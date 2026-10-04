@@ -1,0 +1,381 @@
+import base64
+import hashlib
+import json
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+
+import app.engines as engines
+import app.oauth as oauth
+import app.providers as provider_module
+from app.models import ProcessingOptions
+from app.oauth import ChatGPTAuth
+from app.providers import Providers, safe_error
+from app.store import Store
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def sample_invoice():
+    return json.loads((ROOT / "samples" / "invoice.json").read_text())
+
+
+class FakeResponse:
+    def __init__(self, payload=None, status_code=200, lines=None):
+        self.payload = payload or {}
+        self.status_code = status_code
+        self._lines = lines or []
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def iter_lines(self):
+        return iter(self._lines)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+
+class FakeClient:
+    def __init__(self, *, post=None, get=None, stream=None):
+        self.post_response = post or FakeResponse()
+        self.get_response = get or FakeResponse()
+        self.stream_response = stream or FakeResponse()
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url, kwargs))
+        return self.post_response
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        return self.get_response
+
+    def stream(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        return self.stream_response
+
+
+class FakeChatGPT:
+    def token(self):
+        return "chatgpt-access-token"
+
+
+@pytest.fixture
+def store(tmp_path):
+    return Store(tmp_path / "data")
+
+
+def options(provider="openai"):
+    return ProcessingOptions(engine="ai", ai_fallback=True, provider=provider, model="test-model")
+
+
+def test_openai_mocked_success_uses_strict_schema_and_disables_storage(tmp_path, store, monkeypatch):
+    store.secret("openai", "sk-test-provider-secret")
+    payload = {
+        "status": "completed",
+        "output": [
+            {
+                "content": [
+                    {"type": "output_text", "text": json.dumps(sample_invoice())}
+                ]
+            }
+        ],
+        "usage": {"input_tokens": 7, "output_tokens": 11},
+    }
+    fake = FakeClient(post=FakeResponse(payload))
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: fake)
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible invoice text")
+
+    invoice, usage = Providers(store, FakeChatGPT()).extract(
+        path, "visible invoice text", options()
+    )
+
+    assert invoice.number == "DEMO-2026-001"
+    assert invoice.lines[0].gtin == "00012345678905"
+    assert usage == {"input_tokens": 7, "output_tokens": 11}
+    _, url, request = fake.calls[0]
+    assert url == "https://api.openai.com/v1/responses"
+    assert request["headers"] == {"Authorization": "Bearer sk-test-provider-secret"}
+    assert request["json"]["store"] is False
+    assert request["json"]["text"]["format"]["strict"] is True
+    assert request["json"]["text"]["format"]["schema"]["additionalProperties"] is False
+
+
+def test_chatgpt_mocked_stream_requires_a_completed_response(tmp_path, store, monkeypatch):
+    completed = {
+        "type": "response.completed",
+        "response": {
+            "output": [
+                {
+                    "content": [
+                        {"type": "output_text", "text": json.dumps(sample_invoice())}
+                    ]
+                }
+            ],
+            "usage": {"input_tokens": 3},
+        },
+    }
+    stream = FakeResponse(lines=["data: " + json.dumps(completed), "data: [DONE]"])
+    fake = FakeClient(stream=stream)
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: fake)
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible")
+
+    invoice, usage = Providers(store, FakeChatGPT()).extract(
+        path, "visible", options("chatgpt")
+    )
+
+    assert invoice.number == "DEMO-2026-001"
+    assert usage == {"input_tokens": 3}
+    assert fake.calls[0][2]["headers"] == {
+        "Authorization": "Bearer chatgpt-access-token"
+    }
+
+    fake.stream_response = FakeResponse(lines=["data: [DONE]"])
+    with pytest.raises(ValueError, match="without a completed response"):
+        Providers(store, FakeChatGPT()).extract(path, "visible", options("chatgpt"))
+
+
+def test_provider_refusal_incomplete_output_and_invalid_schema_are_rejected(tmp_path, store, monkeypatch):
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible")
+    store.secret("anthropic", "anthropic-test-secret")
+    refusal = FakeClient(
+        post=FakeResponse({"stop_reason": "refusal", "content": [], "usage": {}})
+    )
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: refusal)
+    with pytest.raises(ValueError, match="incomplete or refused"):
+        Providers(store, FakeChatGPT()).extract(path, "visible", options("anthropic"))
+
+    store.secret("openai", "openai-test-secret")
+    incomplete = FakeClient(post=FakeResponse({"status": "incomplete", "output": []}))
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: incomplete)
+    with pytest.raises(ValueError, match="output was incomplete"):
+        Providers(store, FakeChatGPT()).extract(path, "visible", options())
+
+    invalid = FakeClient(
+        post=FakeResponse(
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "content": [
+                            {"type": "output_text", "text": '{"lines": "not-a-list"}'}
+                        ]
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: invalid)
+    with pytest.raises(ValueError, match="invalid invoice structure"):
+        Providers(store, FakeChatGPT()).extract(path, "visible", options())
+
+
+def test_missing_credential_and_http_error_are_safe(tmp_path, store, monkeypatch):
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible")
+    providers = Providers(store, FakeChatGPT())
+    with pytest.raises(ValueError, match="Connect openai with an API key first"):
+        providers.extract(path, "visible", options())
+
+    secret = "sk-must-not-appear-in-errors"
+    store.secret("openai", secret)
+    fake = FakeClient(post=FakeResponse(status_code=401))
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: fake)
+    with pytest.raises(ValueError) as error:
+        providers.extract(path, "visible", options())
+    assert str(error.value) == safe_error(401)
+    assert secret not in str(error.value)
+
+
+def test_model_listing_filters_non_text_openai_models(store, monkeypatch):
+    store.secret("openai", "openai-test-secret")
+    fake = FakeClient(
+        get=FakeResponse(
+            {
+                "data": [
+                    {"id": "gpt-5"},
+                    {"id": "gpt-realtime"},
+                    {"id": "text-embedding-3-large"},
+                    {"id": "o3"},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(provider_module.httpx, "Client", lambda *args, **kwargs: fake)
+
+    assert Providers(store, FakeChatGPT()).models("openai") == [
+        {"id": "gpt-5", "name": "gpt-5"},
+        {"id": "o3", "name": "o3"},
+    ]
+
+
+def test_engine_ai_fallback_selects_complete_candidate_and_keeps_local_on_failure(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible")
+    local = sample_invoice()
+    local["tax"] = None
+    complete = sample_invoice()
+    monkeypatch.setattr(
+        engines,
+        "capabilities",
+        lambda: [{"id": "invoice2data", "installed": True}],
+    )
+    monkeypatch.setattr(
+        engines,
+        "local_read",
+        lambda *args, **kwargs: {"invoice": local, "text": "OCR", "boxes": []},
+    )
+    runtime = SimpleNamespace(root=tmp_path)
+    configured = ProcessingOptions(
+        engine="auto", ai_fallback=True, provider="openai", model="test-model"
+    )
+
+    result = engines.process(
+        path,
+        configured,
+        runtime,
+        lambda *args: (engines.Invoice.model_validate(complete), {"tokens": 2}),
+    )
+    assert result["selected_engine"] == "openai / test-model"
+    assert result["invoice"]["tax"] == "40.0"
+
+    def failed_reader(*args):
+        raise ValueError("invalid provider schema")
+
+    result = engines.process(path, configured, runtime, failed_reader)
+    assert result["selected_engine"] == "invoice2data"
+    assert result["invoice"]["tax"] is None
+    assert result["trace"][-1]["status"] == "failed"
+    assert result["trace"][-1]["reason"] == "invalid provider schema"
+
+
+@pytest.mark.parametrize("suffix", [".csv", ".txt"])
+def test_explicit_ai_prepares_digital_text_before_calling_provider(tmp_path, monkeypatch, suffix):
+    path = tmp_path / ("invoice" + suffix)
+    path.write_text("number,net\nTEXT-1,10.00\n")
+    prepared_text = "native text with invoice number TEXT-1"
+    calls = []
+    monkeypatch.setattr(
+        engines,
+        "capabilities",
+        lambda: [{"id": "invoice2data", "installed": True}],
+    )
+    monkeypatch.setattr(
+        engines,
+        "local_read",
+        lambda engine, *args, **kwargs: {
+            "invoice": None,
+            "text": prepared_text,
+            "boxes": [],
+        },
+    )
+
+    def ai_reader(received_path, text, received_options):
+        calls.append((received_path, text, received_options))
+        return engines.Invoice.model_validate(sample_invoice()), {"input_tokens": 4}
+
+    configured = ProcessingOptions(
+        engine="ai", ai_fallback=True, provider="openai", model="test-model"
+    )
+    result = engines.process(
+        path,
+        configured,
+        SimpleNamespace(root=tmp_path),
+        ai_reader,
+    )
+
+    assert calls == [(path, prepared_text, configured)]
+    assert result["selected_engine"] == "openai / test-model"
+    assert result["trace"][0]["engine"] == "invoice2data"
+    assert result["trace"][0]["status"] == "text_only"
+
+
+def test_oauth_start_binds_loopback_state_nonce_scope_and_pkce(store):
+    auth = ChatGPTAuth(store)
+    url = auth.start(8765)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+
+    assert (parsed.scheme, parsed.netloc, parsed.path) == (
+        "https",
+        "auth.openai.com",
+        "/api/accounts/authorize",
+    )
+    assert query["redirect_uri"] == ["http://127.0.0.1:8765/auth/callback"]
+    assert query["resource"] == [oauth.RESOURCE]
+    assert query["code_challenge_method"] == ["S256"]
+    assert "chatgpt.tokens.use.direct" in query["scope"][0].split()
+    state = query["state"][0]
+    pending = auth.pending[state]
+    assert pending["nonce"] == query["nonce"][0]
+    expected = base64.urlsafe_b64encode(
+        hashlib.sha256(pending["verifier"].encode()).digest()
+    ).decode().rstrip("=")
+    assert query["code_challenge"] == [expected]
+
+    with pytest.raises(ValueError, match="state was invalid"):
+        auth.finish({"state": "not-the-issued-state", "code": "unused"})
+
+
+def test_oauth_refresh_rejects_loss_of_direct_usage_scope(store, monkeypatch):
+    auth = ChatGPTAuth(store)
+    account_id = "account-1"
+    store.set(
+        "chatgpt_accounts",
+        [
+            {
+                "id": account_id,
+                "email": "person@example.test",
+                "subject": "subject-1",
+                "client_id": "issued-client",
+                "connected": True,
+            }
+        ],
+    )
+    store.set("chatgpt_active", account_id)
+    store.secret(
+        "chatgpt:" + account_id,
+        {
+            "client_id": "issued-client",
+            "access_token": "expired-access",
+            "refresh_token": "refresh-token",
+            "expires_at": time.time() - 1,
+            "scopes": ["chatgpt.tokens.use.direct"],
+        },
+    )
+    fake = FakeClient(
+        post=FakeResponse(
+            {
+                "access_token": "new-access",
+                "expires_in": 3600,
+                "scope": "openid profile",
+            }
+        )
+    )
+    monkeypatch.setattr(oauth.httpx, "Client", lambda *args, **kwargs: fake)
+
+    with pytest.raises(ValueError, match="permission is no longer granted"):
+        auth.token()

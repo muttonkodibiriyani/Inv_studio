@@ -1,0 +1,158 @@
+[
+  {
+    "id": "INV-01",
+    "title": "Select and confirm an invoice batch",
+    "role": "AP operator",
+    "want": "choose several invoices and confirm the processing rules",
+    "benefit": "I know which files, data and reader will be used",
+    "status": "Local implementation verified",
+    "acceptance": [
+      "Cancel sends no invoice-processing request.",
+      "A confirmed plan is bound to filenames/sizes, engine/model, reference version and tolerances.",
+      "Changed rules require a fresh confirmation."
+    ]
+  },
+  {
+    "id": "INV-02",
+    "title": "Read digital invoices and scans",
+    "role": "AP operator",
+    "want": "extract headers and every item line from supported files",
+    "benefit": "I avoid retyping supplier documents",
+    "status": "Local synthetic tests verified",
+    "acceptance": [
+      "Digital invoice2data, PaddleOCR scan and Docling reader paths produce structured synthetic results.",
+      "Unread or incomplete output records an explainable reader trace.",
+      "Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction."
+    ]
+  },
+  {
+    "id": "INV-03",
+    "title": "Use a chosen AI connection for exceptions",
+    "role": "AP operator",
+    "want": "select a provider/model and enable automatic fallback",
+    "benefit": "unfamiliar layouts can be proposed for review",
+    "status": "Adapters verified with mocked provider responses; live account evaluation pending",
+    "acceptance": [
+      "AI is called after explicit selection/confirmed fallback and local extraction failure or incompleteness.",
+      "Provider output must pass the strict invoice schema; missing facts remain missing.",
+      "Credentials never appear in browser storage, exported files or ordinary API errors."
+    ]
+  },
+  {
+    "id": "INV-04",
+    "title": "Map and approve business reference extracts",
+    "role": "data steward",
+    "want": "profile the whole item and PO/GRN files and approve explicit mappings",
+    "benefit": "the validator uses evidence with known meaning",
+    "status": "Full private profiling active; source adapter and business approval pending",
+    "acceptance": [
+      "Preserve original bytes, hashes and row/column provenance; inspect all populated cells.",
+      "Separate unique matches, duplicates, ambiguous joins and missing fields.",
+      "Unknown seller/buyer/route, receipt acceptance and invoiced baseline block approval; never default them silently."
+    ]
+  },
+  {
+    "id": "INV-05",
+    "title": "Match the exact supplier route and items",
+    "role": "AP operator",
+    "want": "check supplier, site, company, PO, item identity and unit",
+    "benefit": "an invoice cannot borrow approval from another market or entity",
+    "status": "Canonical matching implemented and tested",
+    "acceptance": [
+      "Domestic and cross-border routes require their exact approval tuple.",
+      "Conflicting SKU and barcode identity is held.",
+      "Location type comes from an explicit reference field, not a numeric prefix."
+    ]
+  },
+  {
+    "id": "INV-06",
+    "title": "Protect receipt quantity and commercial controls",
+    "role": "finance owner",
+    "want": "check price, accepted receipt balance and tax with decimal rules",
+    "benefit": "we avoid incorrect or duplicate charges",
+    "status": "Implemented and tested",
+    "acceptance": [
+      "Accepted receipts minus returns, external baseline and this app allocations determine available quantity.",
+      "Repeated lines and multiple invoices consume quantity cumulatively.",
+      "Tolerance and currency rounding are explicit; no credit or mixed-tax allocation is invented."
+    ]
+  },
+  {
+    "id": "INV-07",
+    "title": "Review evidence and resolve exceptions",
+    "role": "AP reviewer",
+    "want": "compare the source with editable fields and record review",
+    "benefit": "every exported value has checked evidence",
+    "status": "Implemented and browser verified",
+    "acceptance": [
+      "Review confirmation cannot override validation holds.",
+      "Concurrent edits with stale revisions are rejected.",
+      "Rules changing during extraction prevent stale approval and require a new processing plan."
+    ]
+  },
+  {
+    "id": "INV-08",
+    "title": "Export one joined three-sheet workbook",
+    "role": "AP operator",
+    "want": "download all selected ready invoices into the exact target",
+    "benefit": "the receiving team can import without manual Excel assembly",
+    "status": "Implemented and browser/workbook verified",
+    "acceptance": [
+      "Header/Tax_Breakdown/Details have exactly 13/3/6 columns and no helper formulas.",
+      "Invoice transaction IDs are 1..N and consistent across all three sheets.",
+      "Export rechecks and reserves quantities atomically; repeat download does not duplicate an allocation."
+    ]
+  },
+  {
+    "id": "INV-09",
+    "title": "Recover and audit local operations",
+    "role": "service owner",
+    "want": "retain sources, rule versions, edits and exports",
+    "benefit": "a failed reader or restart can be explained and retried",
+    "status": "Local audit/restart behavior implemented; recovery exercise pending",
+    "acceptance": [
+      "Restarted in-flight jobs visibly require retry; completed exports remain downloadable.",
+      "Export records include reference version, policy and allocations.",
+      "Recovery procedure preserves the database plus the corresponding encryption key."
+    ]
+  },
+  {
+    "id": "INV-10",
+    "title": "Run a restricted cloud workspace",
+    "role": "workspace owner",
+    "want": "sign in to a Firebase frontend backed by durable GCP services",
+    "benefit": "the team can use a hosted portal without losing evidence on restart",
+    "status": "Cloud implementation and deployment in progress",
+    "acceptance": [
+      "Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.",
+      "Database and document evidence survive a replacement application instance.",
+      "Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff."
+    ]
+  },
+  {
+    "id": "INV-11",
+    "title": "Qualify suppliers for a new store or market",
+    "role": "procurement owner",
+    "want": "reuse approved coverage and start discovery only for gaps",
+    "benefit": "store openings do not repeat every supplier task",
+    "status": "Proposed next product increment",
+    "acceptance": [
+      "Same-market coverage reuses valid route facts with provenance/expiry.",
+      "New market or buying entity creates an explicit qualification case.",
+      "AI suggestions cannot approve a legal entity, route or commercial agreement."
+    ]
+  },
+  {
+    "id": "INV-12",
+    "title": "Normalize supplier items for buying and digital channels",
+    "role": "item-data steward",
+    "want": "turn varied supplier files into approved item identities and channel content",
+    "benefit": "purchasing and commerce teams can reuse a consistent catalog",
+    "status": "Proposed next product increment",
+    "acceptance": [
+      "Supplier codes, internal items, barcodes, packaging and units have explicit mappings.",
+      "Conflicting identities and unit conversions need steward approval.",
+      "Channel-specific text, attributes, images and translations are versioned separately from purchasing identity."
+    ]
+  }
+]

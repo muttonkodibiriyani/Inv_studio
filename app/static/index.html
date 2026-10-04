@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Review invoice evidence, validate extracted data, and export approved workbooks.">
+    <title>Invoice Studio</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <section id="auth-gate" class="auth-gate" aria-labelledby="auth-title">
+      <div class="auth-card">
+        <span class="auth-mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 4.5h11l5 5V27.5H8z"/><path d="M19 4.5v5h5M12 15h8M12 19h8M12 23h5"/></svg></span>
+        <p class="eyebrow">Secure invoice workspace</p>
+        <h1 id="auth-title">Invoice Studio</h1>
+        <p id="auth-message">Checking workspace access…</p>
+        <span id="auth-spinner" class="spinner" aria-hidden="true"></span>
+        <button id="google-sign-in" class="button button-primary auth-button" type="button" hidden>
+          <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12.2c0-.7-.1-1.4-.2-2H12v3.7h4.5a3.8 3.8 0 0 1-1.7 2.5v2.4h3a9 9 0 0 0 2.2-6.6zM12 21a8.8 8.8 0 0 0 6-2.2l-3-2.4a5.5 5.5 0 0 1-8.2-2.9H3.7v2.4A9 9 0 0 0 12 21zM6.8 13.5a5.4 5.4 0 0 1 0-3.5V7.6H3.7a9 9 0 0 0 0 8.3l3.1-2.4zM12 6.5c1.5 0 2.9.5 4 1.5l2.8-2.8A9.4 9.4 0 0 0 3.7 7.6L6.8 10A5.4 5.4 0 0 1 12 6.5z"/></svg>
+          Continue with Google
+        </button>
+        <form id="password-sign-in" class="password-sign-in" hidden>
+          <label>Email<input id="auth-email" type="email" autocomplete="username" required></label>
+          <label>Password<input id="auth-password" type="password" autocomplete="current-password" required></label>
+          <button class="button button-primary auth-button" type="submit">Sign in</button>
+          <button id="password-reset" class="link-button" type="button">Send password reset email</button>
+        </form>
+        <button id="auth-retry" class="button button-secondary auth-button" type="button" hidden>Retry connection</button>
+        <button id="auth-sign-out" class="button button-quiet auth-button" type="button" hidden>Use another account</button>
+        <p id="auth-detail" class="auth-detail" hidden></p>
+        <p class="auth-privacy">Access is verified by the server allowlist. Invoice data remains subject to the processing plan you confirm before each run.</p>
+      </div>
+    </section>
+    <div id="app-shell" class="app-shell" hidden>
+      <header class="topbar">
+        <a class="brand" href="#workspace" data-nav="workspace" aria-label="Invoice Studio home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 32 32"><path d="M8 4.5h11l5 5V27.5H8z"/><path d="M19 4.5v5h5M12 15h8M12 19h8M12 23h5"/></svg>
+          </span>
+          <span><strong>Invoice Studio</strong><small>Evidence-led review</small></span>
+        </a>
+        <div class="topbar-actions">
+          <span id="runtime-badge" class="local-badge"><span class="status-dot" aria-hidden="true"></span><span>Local workspace</span></span>
+          <div id="cloud-user" class="cloud-user" hidden><span id="cloud-user-avatar" aria-hidden="true"></span><span><strong id="cloud-user-email"></strong><small>Verified workspace</small></span><button id="cloud-sign-out" type="button">Sign out</button></div>
+          <button class="button button-primary button-small" type="button" data-open-upload>
+            <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+            Add invoices
+          </button>
+        </div>
+      </header>
+
+      <aside class="sidebar" aria-label="Primary navigation">
+        <nav>
+          <button class="nav-item active" type="button" data-nav="workspace" aria-current="page">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5zM4 9h16M9 9v11"/></svg>
+            <span>Workspace</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="references">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>
+            <span>References</span>
+          </button>
+          <button class="nav-item" type="button" data-nav="engines">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0z"/></svg>
+            <span>Engines &amp; AI</span>
+          </button>
+        </nav>
+        <div class="sidebar-foot">
+          <div class="privacy-note">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v10H5z"/></svg>
+            <span><strong>Private by default</strong><small>Local OCR stays on this machine.</small></span>
+          </div>
+        </div>
+      </aside>
+
+      <main id="main-content" tabindex="-1">
+        <div id="global-message" class="global-message" role="status" aria-live="polite" hidden></div>
+
+        <section id="workspace-section" class="page-section active" aria-labelledby="workspace-title">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">Invoice operations</p>
+              <h1 id="workspace-title">Review workspace</h1>
+              <p>Extract, compare and approve every value against its source.</p>
+            </div>
+            <div class="heading-actions">
+              <button id="load-demo" class="button button-secondary" type="button">Try synthetic demo</button>
+              <button class="button button-primary" type="button" data-open-upload>Add invoices</button>
+            </div>
+          </div>
+
+          <div class="workspace-grid">
+            <aside class="card inbox-card" aria-labelledby="inbox-title">
+              <div class="card-header compact">
+                <div>
+                  <h2 id="inbox-title">Invoice inbox</h2>
+                  <p id="job-count">0 invoices</p>
+                </div>
+                <button class="icon-button" type="button" data-open-upload aria-label="Add invoices">
+                  <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 4v12M4 10h12"/></svg>
+                </button>
+              </div>
+              <div class="inbox-filter" role="search">
+                <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5"/><path d="m13 13 4 4"/></svg>
+                <label class="sr-only" for="job-search">Search invoices</label>
+                <input id="job-search" type="search" placeholder="Search filename or supplier">
+              </div>
+              <div id="batch-controls" class="batch-controls" hidden>
+                <div><button id="select-ready" class="link-button" type="button">Select ready</button><span id="selected-count">0 selected</span></div>
+                <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export selected</button>
+              </div>
+              <div id="job-list" class="job-list" aria-live="polite"></div>
+              <div id="job-empty" class="empty-mini">
+                <span class="empty-icon" aria-hidden="true">
+                  <svg viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM15 3v5h4M10 13h6M10 17h4"/></svg>
+                </span>
+                <strong>No invoices yet</strong>
+                <p>Add an invoice file to begin.</p>
+              </div>
+            </aside>
+
+            <section class="review-area" aria-label="Invoice review">
+              <div id="workspace-empty" class="card welcome-card">
+                <div class="welcome-visual" aria-hidden="true">
+                  <div class="paper paper-back"></div>
+                  <div class="paper paper-front">
+                    <span></span><span></span><span></span><span></span>
+                    <div class="paper-stamp">✓</div>
+                  </div>
+                </div>
+                <p class="eyebrow">A calm place for invoice review</p>
+                <h2>Turn source documents into verified records</h2>
+                <p class="welcome-copy">Start with one or several invoices. Invoice Studio preserves the original beside every editable field so reviewers can work with context.</p>
+                <div class="welcome-actions">
+                  <button class="button button-primary" type="button" data-open-upload>Add invoices</button>
+                  <a class="button button-quiet" href="/api/samples/invoice.pdf" data-api-download="Synthetic_Invoice.pdf">Download sample invoice</a>
+                </div>
+                <div class="trust-row">
+                  <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m4 10 4 4 8-8"/></svg>Documents, images &amp; data files</span>
+                  <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M5 9V6a5 5 0 0 1 10 0v3M4 9h12v9H4z"/></svg>Local first, then your chosen AI</span>
+                  <span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M4 5h12v10H4zM7 8h6M7 11h4"/></svg>Excel after review</span>
+                </div>
+              </div>
+
+              <div id="review-panel" hidden>
+                <div class="review-summary card">
+                  <div class="document-title">
+                    <span id="selected-file-icon" class="file-icon">PDF</span>
+                    <div>
+                      <h2 id="selected-filename">Invoice</h2>
+                      <p id="selected-meta">Waiting to process</p>
+                    </div>
+                  </div>
+                  <div class="summary-actions">
+                    <button id="retry-job" class="button button-quiet button-small" type="button">Reprocess</button>
+                    <span id="selected-status" class="status-pill neutral">Queued</span>
+                  </div>
+                </div>
+
+                <div id="processing-banner" class="processing-banner" hidden>
+                  <span class="spinner" aria-hidden="true"></span>
+                  <div><strong id="processing-title">Reading invoice…</strong><span id="processing-detail">This usually takes a moment.</span></div>
+                </div>
+
+                <div id="job-error" class="inline-alert error" role="alert" hidden></div>
+
+                <div class="split-review">
+                  <article class="card evidence-card" aria-labelledby="evidence-title">
+                    <div class="card-header compact">
+                      <div><p class="eyebrow">Original document</p><h2 id="evidence-title">Evidence</h2></div>
+                      <a id="open-document" class="icon-button" href="#" target="_blank" rel="noopener" aria-label="Open original document in a new tab">
+                        <svg aria-hidden="true" viewBox="0 0 20 20"><path d="M8 4H4v12h12v-4M11 4h5v5M16 4l-7 7"/></svg>
+                      </a>
+                    </div>
+                    <div class="document-frame-wrap">
+                      <iframe id="document-frame" title="Original invoice document"></iframe>
+                      <div id="document-download-card" class="document-download-card" hidden>
+                        <span class="empty-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7zM15 3v5h4M12 11v7M9 15l3 3 3-3"/></svg></span>
+                        <strong>Preview isn’t available for this file type</strong>
+                        <p>Open the original in a new tab while reviewing the extracted values and evidence text.</p>
+                        <a id="download-original" class="button button-secondary" href="#" target="_blank" rel="noopener">Open original</a>
+                        <details id="extracted-text-wrap" hidden><summary>Show extracted text</summary><pre id="extracted-text"></pre></details>
+                      </div>
+                    </div>
+                    <p class="evidence-hint">Compare each value with the original before confirming the review.</p>
+                  </article>
+
+                  <article class="card fields-card" aria-labelledby="fields-title">
+                    <div class="card-header compact fields-heading">
+                      <div><p class="eyebrow">Structured result</p><h2 id="fields-title">Invoice details</h2></div>
+                      <div id="completeness" class="completeness" aria-label="Extraction completeness">
+                        <span>Completeness</span><strong>—</strong>
+                      </div>
+                    </div>
+                    <form id="invoice-form">
+                      <div id="validation-summary" class="validation-summary" hidden></div>
+                      <fieldset>
+                        <legend>Header</legend>
+                        <div id="header-fields" class="field-grid"></div>
+                      </fieldset>
+                      <fieldset class="lines-fieldset">
+                        <div class="legend-row">
+                          <legend>Line items</legend>
+                          <button id="add-line" class="button button-quiet button-small" type="button">+ Add line</button>
+                        </div>
+                        <div class="table-scroll">
+                          <table class="line-table">
+                            <thead><tr><th scope="col">SKU / GTIN</th><th scope="col">Description</th><th scope="col">Qty</th><th scope="col">UOM</th><th scope="col">Unit price</th><th scope="col">Evidence</th><th scope="col"><span class="sr-only">Remove</span></th></tr></thead>
+                            <tbody id="line-items"></tbody>
+                          </table>
+                        </div>
+                        <p id="no-lines" class="table-empty">No line items extracted. Add one to continue.</p>
+                      </fieldset>
+                    </form>
+                    <div class="review-controls">
+                      <label class="review-check"><input id="confirm-review" type="checkbox"><span><strong>I checked this record against the evidence</strong><small>Required before export.</small></span></label>
+                      <div class="review-buttons">
+                        <button id="save-review" class="button button-secondary" type="button">Save &amp; revalidate</button>
+                        <button id="export-job" class="button button-primary" type="button" disabled>Export Excel</button>
+                      </div>
+                    </div>
+                  </article>
+                </div>
+
+                <details class="card trace-card">
+                  <summary><span><strong>Extraction trace &amp; provenance</strong><small id="trace-summary">How this result was produced</small></span><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 8 4 4 4-4"/></svg></summary>
+                  <div class="trace-content">
+                    <div><h3>Trace</h3><ol id="trace-list" class="trace-list"></ol></div>
+                    <div><h3>Field provenance</h3><dl id="provenance-list" class="provenance-list"></dl></div>
+                    <div><h3>Audit log</h3><ol id="audit-list" class="trace-list"><li>Open to load audit entries.</li></ol></div>
+                  </div>
+                </details>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="references-section" class="page-section" aria-labelledby="references-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">Matching foundation</p><h1 id="references-title">Reference data &amp; rules</h1><p>Upload the records that invoices are validated against.</p></div>
+          </div>
+          <div class="settings-grid">
+            <article class="card settings-card wide">
+              <div class="settings-card-header">
+                <span class="section-icon mint"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
+                <div><h2>Reference workbook</h2><p>Sites, routes, items, purchase orders, receipts and tax rules.</p></div>
+                <span id="reference-status" class="status-pill neutral">Not loaded</span>
+              </div>
+              <div id="reference-summary" class="reference-summary" hidden></div>
+              <div class="upload-inline">
+                <label class="file-button button button-secondary" for="reference-file">Choose .xlsx, .ods or .json</label>
+                <input id="reference-file" type="file" accept=".xlsx,.ods,.json" hidden>
+                <span id="reference-file-name">No file chosen</span>
+                <button id="upload-reference" class="button button-primary" type="button" disabled>Import</button>
+              </div>
+              <div class="settings-links">
+                <a href="/api/samples/reference.xlsx" data-api-download="Reference_Template.xlsx">Download 7-sheet template</a>
+                <button id="load-demo-references" class="link-button" type="button">Load synthetic reference set</button>
+              </div>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-header">
+                <span class="section-icon blue"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 5h12M6 12h12M6 19h12M9 3v4M15 10v4M11 17v4"/></svg></span>
+                <div><h2>Validation policy</h2><p>Set the permitted variance during matching.</p></div>
+              </div>
+              <form id="policy-form" class="settings-form">
+                <label>Price tolerance<input name="price_tolerance" type="number" min="0" max="100" step="0.001" required></label>
+                <label>Total tolerance<input name="total_tolerance" type="number" min="0" max="100" step="0.001" required></label>
+                <label class="full">Currency decimals <small>JSON map, such as {&quot;AED&quot;:2,&quot;KWD&quot;:3}</small><textarea name="currency_decimals" rows="3" spellcheck="false" required></textarea></label>
+                <button class="button button-secondary" type="submit">Save policy</button>
+              </form>
+            </article>
+
+            <article class="card settings-card">
+              <div class="settings-card-header">
+                <span class="section-icon amber"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h10M4 12h16M4 18h12M17 3v6M8 15v6"/></svg></span>
+                <div><h2>Supplier template</h2><p>Add an invoice2data YAML layout for a known supplier.</p></div>
+              </div>
+              <div class="upload-inline vertical">
+                <label class="file-button button button-secondary" for="template-file">Choose .yml or .yaml</label>
+                <input id="template-file" type="file" accept=".yml,.yaml" hidden>
+                <span id="template-file-name">No file chosen</span>
+                <button id="upload-template" class="button button-primary" type="button" disabled>Register template</button>
+              </div>
+              <a class="settings-text-link" href="/api/samples/template.yml" data-api-download="supplier-template.yml">Download sample supplier template</a>
+            </article>
+          </div>
+        </section>
+
+        <section id="engines-section" class="page-section" aria-labelledby="engines-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">Processing controls</p><h1 id="engines-title">Engines &amp; AI</h1><p>See local engine availability and configure optional providers.</p></div>
+          </div>
+          <div class="settings-grid">
+            <article class="card settings-card wide">
+              <div class="settings-card-header">
+                <span class="section-icon violet"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0z"/></svg></span>
+                <div><h2>Extraction engines</h2><p>Installed engines are available in the upload panel.</p></div>
+              </div>
+              <div id="engine-list" class="engine-list"></div>
+            </article>
+
+            <article class="card settings-card wide">
+              <div class="settings-card-header">
+                <span class="section-icon coral"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 4h8l4 4v8l-4 4H8l-4-4V8zM9 12h6M12 9v6"/></svg></span>
+                <div><h2>AI provider settings</h2><p>Choose a connection and model. You will confirm AI use and data sharing before every run.</p></div>
+              </div>
+              <form id="provider-settings-form" class="settings-form provider-form">
+                <label>Provider<select id="settings-provider" name="provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT account</option><option value="claude_local">Claude Code (local)</option></select></label>
+                <label>Model<input id="settings-model" name="model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Enter a model ID"></label>
+                <label class="toggle-label full"><input id="settings-ai-fallback" name="ai_fallback" type="checkbox"><span class="toggle" aria-hidden="true"></span><span><strong>Default to AI fallback</strong><small>New uploads will start with fallback enabled.</small></span></label>
+                <div class="full model-actions"><button id="fetch-models" class="button button-quiet" type="button">Load available models</button><select id="model-list" aria-label="Available models" hidden><option value="">Select a model</option></select></div>
+                <button class="button button-secondary" type="submit">Save processing defaults</button>
+              </form>
+            </article>
+
+            <article class="card settings-card connection-card" data-provider-card="openai">
+              <div class="connection-title"><span class="provider-logo">O</span><div><h2>OpenAI API</h2><p>Use a separate API key billed through your API account.</p></div><span class="connection-state" data-connection-state="openai">Not connected</span></div>
+              <form class="api-key-form" data-provider="openai"><label>API key<input type="password" name="api_key" autocomplete="off" placeholder="sk-…" required></label><div><button class="button button-secondary" type="submit">Save key</button><button class="button button-quiet remove-connection" type="button">Remove</button></div></form>
+            </article>
+
+            <article class="card settings-card connection-card" data-provider-card="anthropic">
+              <div class="connection-title"><span class="provider-logo warm">A</span><div><h2>Anthropic API</h2><p>Use a separate API key billed through your API account.</p></div><span class="connection-state" data-connection-state="anthropic">Not connected</span></div>
+              <form class="api-key-form" data-provider="anthropic"><label>API key<input type="password" name="api_key" autocomplete="off" placeholder="sk-ant-…" required></label><div><button class="button button-secondary" type="submit">Save key</button><button class="button button-quiet remove-connection" type="button">Remove</button></div></form>
+            </article>
+
+            <article class="card settings-card connection-card">
+              <div class="connection-title"><span class="provider-logo green">C</span><div><h2>ChatGPT account</h2><p>Connect through the official sign-in flow and choose an eligible account.</p></div><span class="connection-state" data-connection-state="chatgpt">Not connected</span></div>
+              <label class="account-label">Connected account<select id="chatgpt-account"><option value="">No connected accounts</option></select></label>
+              <div class="connection-buttons"><button id="connect-chatgpt" class="button button-secondary" type="button">Connect ChatGPT</button><button id="remove-chatgpt" class="button button-quiet" type="button">Remove selected</button><a href="https://chatgpt.com/settings" target="_blank" rel="noopener">Open ChatGPT usage settings ↗</a></div>
+              <p class="disclosure small">Account eligibility and usage limits apply. A ChatGPT subscription is separate from API billing.</p>
+            </article>
+
+            <article class="card settings-card connection-card">
+              <div class="connection-title"><span class="provider-logo dark">⌁</span><div><h2>Claude Code (local)</h2><p>Uses the locally installed, signed-in Claude Code session.</p></div><span class="connection-state" data-connection-state="claude_local">Not detected</span></div>
+              <div class="terminal-callout"><code>claude auth login</code><span>Run this in your local terminal if sign-in is needed.</span></div>
+              <p class="disclosure small">Only extracted OCR text is sent to Claude Code. Tools are disabled. Eligibility and usage limits apply.</p>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="upload-dialog" aria-labelledby="upload-title">
+      <form method="dialog" class="dialog-shell" id="upload-form">
+        <div class="dialog-header">
+          <div><p class="eyebrow">New processing job</p><h2 id="upload-title">Add invoices</h2><p>Files are processed one at a time in the order shown.</p></div>
+          <button class="icon-button" value="cancel" aria-label="Close upload panel"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+        </div>
+        <label id="drop-zone" class="drop-zone" for="invoice-files">
+          <input id="invoice-files" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,.docx,.xlsx,.csv,.txt,.json" multiple hidden>
+          <span class="drop-icon"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V5M8 9l4-4 4 4M5 14v5h14v-5"/></svg></span>
+          <strong>Drop invoices here or browse</strong>
+          <span>One invoice per file · PDF (up to 20 pages), image, DOCX, XLSX, CSV, TXT or JSON · 12 MB each</span>
+        </label>
+        <div id="upload-queue" class="upload-queue" hidden></div>
+        <div class="option-grid">
+          <label>Extraction engine<select id="upload-engine"><option value="auto">Auto — choose best available</option><option value="invoice2data">invoice2data</option><option value="paddleocr">PaddleOCR</option><option value="docling">Docling</option><option value="ai">AI provider</option></select></label>
+          <label>Document language<select id="upload-language"><option value="en">English</option><option value="ar">Arabic</option><option value="ch">Chinese</option><option value="fr">French</option><option value="de">German</option></select></label>
+        </div>
+        <label class="toggle-label ai-toggle"><input id="upload-ai-fallback" type="checkbox" checked><span class="toggle" aria-hidden="true"></span><span><strong>Allow AI fallback</strong><small>If local extraction cannot finish, send this invoice to your chosen provider.</small></span></label>
+        <div id="upload-ai-options" class="ai-options" hidden>
+          <div class="option-grid"><label>Provider<select id="upload-provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT account</option><option value="claude_local">Claude Code (local)</option></select></label><label>Model<input id="upload-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID from settings"></label></div>
+          <p class="disclosure"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 2.5 18 17H2zM10 7v4M10 14v.1"/></svg><span>Enabling AI permits Invoice Studio to send invoice content to the selected provider for extraction. The provider’s privacy terms and usage limits apply.</span></p>
+          <p id="upload-ai-readiness" class="connection-prompt" hidden></p>
+        </div>
+        <div id="upload-progress" class="upload-progress" aria-live="polite" hidden></div>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button id="start-upload" class="button button-primary" type="submit" value="default" disabled>Process invoices</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="retry-dialog" aria-labelledby="retry-title">
+      <form method="dialog" class="dialog-shell small-dialog" id="retry-form">
+        <div class="dialog-header"><div><p class="eyebrow">Start over</p><h2 id="retry-title">Reprocess invoice</h2><p>This replaces the current extraction and review state.</p></div><button class="icon-button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
+        <div class="option-grid"><label>Engine<select id="retry-engine"><option value="auto">Auto</option><option value="invoice2data">invoice2data</option><option value="paddleocr">PaddleOCR</option><option value="docling">Docling</option><option value="ai">AI provider</option></select></label><label>Language<select id="retry-language"><option value="en">English</option><option value="ar">Arabic</option><option value="ch">Chinese</option><option value="fr">French</option><option value="de">German</option></select></label></div>
+        <label class="toggle-label"><input id="retry-ai-fallback" type="checkbox"><span class="toggle" aria-hidden="true"></span><span><strong>Allow AI fallback</strong><small>Invoice content may be sent to the selected provider.</small></span></label>
+        <div class="option-grid"><label>Provider<select id="retry-provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT account</option><option value="claude_local">Claude Code (local)</option></select></label><label>Model<input id="retry-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID"></label></div>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button class="button button-primary" type="submit" value="default">Reprocess</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="preflight-dialog" aria-labelledby="preflight-title">
+      <form method="dialog" class="dialog-shell" id="preflight-form">
+        <div class="dialog-header">
+          <div><p class="eyebrow">Required confirmation</p><h2 id="preflight-title">Review rules before processing</h2><p>No document is sent or processed until you confirm this plan.</p></div>
+          <button id="cancel-preflight-x" class="icon-button" type="button" aria-label="Cancel processing plan"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
+        </div>
+        <div id="preflight-files" class="preflight-files"></div>
+        <dl id="preflight-summary" class="rule-summary"></dl>
+        <div id="preflight-blocking" class="preflight-notes blocking" hidden><strong>Cannot run yet</strong><ul></ul></div>
+        <div id="preflight-warnings" class="preflight-notes"><strong>Review before you continue</strong><ul></ul></div>
+        <p class="one-invoice-note"><strong>One invoice per file.</strong> Split a combined document into separate files first. Every result still needs reference validation and evidence review before Excel export.</p>
+        <div class="dialog-actions"><button id="cancel-preflight" class="button button-quiet" type="button">Cancel</button><button id="confirm-preflight" class="button button-primary" type="submit" value="default">Confirm rules and process</button></div>
+      </form>
+    </dialog>
+
+    <script src="/static/firebase-auth.bundle.js" defer></script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

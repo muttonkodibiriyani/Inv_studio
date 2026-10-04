@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Invoice Studio MVP solution review for leadership and the build team.">
+    <title>Invoice Studio · Solution review</title>
+    <link rel="stylesheet" href="style.css">
+  </head>
+  <body>
+    <a class="skip" href="#content">Skip to content</a>
+    <header class="masthead">
+      <a class="wordmark" href="#overview" data-view-link="overview" aria-label="Invoice Studio solution review home">
+        <span class="mark" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M8 4.5h11l5 5V27.5H8z"/><path d="M19 4.5v5h5M12 15h8M12 19h8M12 23h5"/></svg></span>
+        <span><strong>Invoice Studio</strong><small>Solution review · October 2026</small></span>
+      </a>
+      <div class="masthead-actions">
+        <span class="review-state"><i></i> Review-ready draft</span>
+        <button id="print-button" class="button quiet" type="button">Print / save PDF</button>
+        <button class="button primary" data-view="decisions" type="button">See verified evidence</button>
+      </div>
+    </header>
+
+    <nav class="section-nav" aria-label="Solution review sections">
+      <button class="active" data-view="overview" aria-current="page">Overview</button>
+      <button data-view="stories">User stories <span>12</span></button>
+      <button data-view="architecture">Architecture</button>
+      <button data-view="roadmap">Roadmap</button>
+      <button data-view="decisions">Decisions &amp; evidence</button>
+    </nav>
+
+    <main id="content" tabindex="-1">
+      <section id="overview-view" class="view active" data-section="overview">
+        <div class="hero">
+          <div class="hero-copy">
+            <p class="kicker">MVP solution review</p>
+            <h1>Evidence first invoice conversion, with people in control.</h1>
+            <p class="lede">Invoice Studio turns one invoice file into a reviewed, reference-validated three-sheet Excel transaction. It attempts local extraction first, asks before every run, and uses a selected AI provider only when the reviewer explicitly permits fallback.</p>
+            <div class="hero-actions">
+              <button class="button primary" data-view="stories" type="button">Review acceptance criteria</button>
+              <button class="button quiet" data-view="architecture" type="button">Inspect architecture</button>
+            </div>
+            <div class="deliverables" aria-label="Download review documents">
+              <span>Review pack</span>
+              <a class="button quiet" href="downloads/Invoice_Studio_SLT.pptx" download>Download SLT deck</a>
+              <a class="button quiet" href="downloads/Invoice_Studio_Design_and_Stories.docx" download>Download design &amp; stories</a>
+            </div>
+          </div>
+          <aside class="scope-card" aria-label="Current scope">
+            <div class="scope-head"><span>Current release</span><strong>Local MVP</strong></div>
+            <dl>
+              <div><dt>Input</dt><dd>One invoice per file</dd></div>
+              <div><dt>Decision gate</dt><dd>Rules confirmed before processing</dd></div>
+              <div><dt>Output</dt><dd>Header · Tax_Breakdown · Details</dd></div>
+              <div><dt>Release gate</dt><dd>Validation plus evidence review</dd></div>
+            </dl>
+          </aside>
+        </div>
+
+        <div class="status-strip" aria-label="Delivery status">
+          <article><span class="status working">Working MVP</span><strong>Core path runs locally</strong><p>Upload, plan confirmation, extraction, validation, editing, review and individual or batch export are implemented.</p></article>
+          <article><span class="status untested">Live AI untested</span><strong>Connectors are present</strong><p>Provider configuration and fallback routing exist. No claim is made about live model quality, latency, eligibility or cost.</p></article>
+          <article><span class="status planned">Planned</span><strong>Real master mapping</strong><p>Large source master files need an approved mapping and ingestion route before a supplier pilot.</p></article>
+          <article><span class="status deploying">Deployment in progress</span><strong>Firebase / GCP envelope</strong><p>Authentication, cloud persistence and hosting are being integrated. This review does not label the deployment live.</p></article>
+        </div>
+
+        <section class="panel flow-panel" aria-labelledby="flow-title">
+          <div class="section-heading"><div><p class="kicker">End-to-end control flow</p><h2 id="flow-title">What happens to each invoice</h2></div><span class="hint">Select a step for its control</span></div>
+          <div class="flow-steps" role="list">
+            <button class="flow-step active" data-step="1" type="button"><b>1</b><span><strong>Add</strong><small>One invoice per file</small></span></button>
+            <i aria-hidden="true">→</i>
+            <button class="flow-step" data-step="2" type="button"><b>2</b><span><strong>Confirm rules</strong><small>No silent processing</small></span></button>
+            <i aria-hidden="true">→</i>
+            <button class="flow-step" data-step="3" type="button"><b>3</b><span><strong>Read</strong><small>Local first</small></span></button>
+            <i aria-hidden="true">→</i>
+            <button class="flow-step" data-step="4" type="button"><b>4</b><span><strong>Validate</strong><small>Exact references</small></span></button>
+            <i aria-hidden="true">→</i>
+            <button class="flow-step" data-step="5" type="button"><b>5</b><span><strong>Review</strong><small>Evidence beside fields</small></span></button>
+            <i aria-hidden="true">→</i>
+            <button class="flow-step" data-step="6" type="button"><b>6</b><span><strong>Export</strong><small>Guarded Excel</small></span></button>
+          </div>
+          <div id="flow-detail" class="flow-detail" aria-live="polite">
+            <span>Input control</span><strong>Each selected file becomes one job and is queued in order.</strong><p>Supported document, image and structured-text formats are checked for type and size. Combined invoices must be split before upload.</p>
+          </div>
+        </section>
+
+        <section class="two-col">
+          <article class="panel">
+            <div class="section-heading"><div><p class="kicker">Why this design</p><h2>Controls before automation</h2></div></div>
+            <ul class="check-list">
+              <li><i>01</i><span><strong>Permission is explicit.</strong> A preflight shows engine, provider, model, reference version, tolerances and warnings before any file is processed.</span></li>
+              <li><i>02</i><span><strong>Extraction is separate from approval.</strong> Completeness describes filled fields; validation and human review determine export readiness.</span></li>
+              <li><i>03</i><span><strong>Exceptions stop safely.</strong> Missing identity, quantity, price, receipt or tax evidence stays held for correction.</span></li>
+              <li><i>04</i><span><strong>The source stays visible.</strong> Reviewers compare the original document with editable values and provenance.</span></li>
+            </ul>
+          </article>
+          <article class="panel">
+            <div class="section-heading"><div><p class="kicker">MVP success definition</p><h2>Ready for a controlled pilot when…</h2></div></div>
+            <ul class="measure-list">
+              <li><strong>100%</strong><span>of processing starts have a recorded, confirmed rule plan.</span></li>
+              <li><strong>100%</strong><span>of exports have passed current reference rules and evidence confirmation.</span></li>
+              <li><strong>0</strong><span>provider keys are stored in browser storage or returned by state APIs.</span></li>
+              <li><strong>3</strong><span>exact output sheets share transaction numbers across a batch.</span></li>
+            </ul>
+            <p class="footnote">These are acceptance gates, not measured production performance. Pilot throughput and extraction accuracy baselines remain to be established.</p>
+          </article>
+        </section>
+      </section>
+
+      <section id="stories-view" class="view" data-section="stories" hidden>
+        <div class="page-title"><div><p class="kicker">Build contract</p><h1>User stories &amp; measurable acceptance</h1><p>Twelve testable stories connect the operating need to a visible control or API behavior.</p></div></div>
+        <div class="story-toolbar">
+          <div class="segmented" role="group" aria-label="Filter stories by status">
+            <button class="active" data-story-filter="all" type="button">All <span>12</span></button>
+            <button data-story-filter="working" type="button">Working MVP</button>
+            <button data-story-filter="untested" type="button">Live AI untested</button>
+            <button data-story-filter="planned" type="button">Planned</button>
+          </div>
+          <label class="story-search"><svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5"/><path d="m13 13 4 4"/></svg><span class="sr-only">Search stories</span><input id="story-search" type="search" placeholder="Search stories"></label>
+        </div>
+        <div id="story-list" class="story-list"></div>
+        <p id="story-empty" class="empty" hidden>No stories match this filter.</p>
+      </section>
+
+      <section id="architecture-view" class="view" data-section="architecture" hidden>
+        <div class="page-title architecture-title">
+          <div><p class="kicker">Technical design</p><h1>Local core, optional provider boundary</h1><p>The core workflow remains useful without AI. The provider branch is permitted per processing plan and returns to the same validation and review gates.</p></div>
+          <div class="path-toggle" role="group" aria-label="Architecture path"><button class="active" data-path="local" type="button">Local path</button><button data-path="ai" type="button">AI fallback path</button></div>
+        </div>
+
+        <aside class="deployment-banner"><span class="status deploying">Deployment in progress</span><p><strong>Target envelope:</strong> Firebase-hosted browser experience and authentication, a Cloud Run API, managed cloud state/files and server-side secrets. The local workflow remains the verified baseline until cloud acceptance passes.</p></aside>
+
+        <section class="architecture-map panel" aria-label="System architecture diagram">
+          <div class="arch-lane experience"><span class="lane-label">Reviewer</span><div class="arch-node"><i>01</i><strong>Browser workspace</strong><small>Upload · confirm · edit · approve</small></div></div>
+          <div class="connector vertical"></div>
+          <div class="arch-lane service"><span class="lane-label">Application</span><div class="arch-node"><i>02</i><strong>FastAPI control plane</strong><small>Local process working · Cloud Run deployment in progress</small></div><div class="arch-node"><i>03</i><strong>State + protected files</strong><small>SQLite local working · managed cloud adapter in progress</small></div></div>
+          <div class="connector vertical"></div>
+          <div class="arch-lane extraction"><span class="lane-label">Extraction</span><div class="arch-node local-node"><i>04</i><strong>Local engine workers</strong><small>invoice2data · PaddleOCR · Docling</small></div><div class="arch-node ai-node dim"><i>05</i><strong>Selected AI provider</strong><small>Only after explicit fallback permission</small><span class="status untested">Live AI untested</span></div></div>
+          <div class="connector vertical"></div>
+          <div class="arch-lane controls"><span class="lane-label">Control gates</span><div class="arch-node"><i>06</i><strong>Reference validation</strong><small>PO · receipts · routes · items · tax</small></div><div class="arch-node"><i>07</i><strong>Human evidence review</strong><small>Original + fields + provenance</small></div><div class="arch-node"><i>08</i><strong>Excel writer</strong><small>Exact three-sheet contract</small></div></div>
+        </section>
+        <p id="architecture-caption" class="architecture-caption"><strong>Local path selected:</strong> local engines attempt extraction; incomplete results remain available for manual review when AI is not permitted or unavailable.</p>
+
+        <section class="two-col architecture-notes">
+          <article class="panel"><div class="section-heading"><div><p class="kicker">API boundary</p><h2>Contract at a glance</h2></div></div><div class="contract-list"><div><code>POST /api/preflight</code><span>Builds a rule plan from metadata only.</span></div><div><code>POST /api/preflight/confirm</code><span>Records the explicit processing decision.</span></div><div><code>POST /api/invoices</code><span>Creates one protected job per confirmed file.</span></div><div><code>POST /api/jobs/:id/review</code><span>Saves edits with optimistic revision checking.</span></div><div><code>POST /api/exports/batch</code><span>Atomically exports selected ready invoices.</span></div></div></article>
+          <article class="panel"><div class="section-heading"><div><p class="kicker">Security posture</p><h2>Data boundaries</h2></div></div><ul class="plain-list"><li>Non-GET requests require a same-origin studio header.</li><li>Uploads are bounded by type, size and page/frame limits.</li><li>API keys stay encrypted server-side and clear from the form after save.</li><li>Local engine subprocesses do not receive provider secrets.</li><li>Claude Code receives extracted OCR text with tools disabled.</li><li>Originals and responses use no-store and restrictive browser headers.</li></ul></article>
+        </section>
+
+        <section class="panel decision-table-panel">
+          <div class="section-heading"><div><p class="kicker">Design choices</p><h2>Decisions that shape the MVP</h2></div></div>
+          <div class="table-wrap"><table><thead><tr><th>Choice</th><th>Why</th><th>Trade-off</th></tr></thead><tbody><tr><td>Local-first engine chain</td><td>Preserves a useful path without sending invoice data outside the machine.</td><td>Optional engines add installation weight and first-use model downloads.</td></tr><tr><td>Preflight token bound to rules</td><td>Makes provider, model, references and tolerances reviewable before processing.</td><td>A changed rule invalidates the plan and requires another confirmation.</td></tr><tr><td>Exact reference matching</td><td>Avoids silently inventing item, route, receipt or tax decisions.</td><td>Unclean master data becomes a visible hold rather than an automatic guess.</td></tr><tr><td>Optimistic revisions</td><td>Prevents one reviewer from overwriting a newer edit.</td><td>Stale sessions must refresh and reapply changes.</td></tr><tr><td>Atomic batch export</td><td>Keeps transactions joined and avoids partial batch delivery.</td><td>One invalid or stale invoice holds the entire selected batch.</td></tr></tbody></table></div>
+        </section>
+      </section>
+
+      <section id="roadmap-view" class="view" data-section="roadmap" hidden>
+        <div class="page-title"><div><p class="kicker">Delivery sequence</p><h1>From verified MVP to supplier rollout</h1><p>Progress moves through evidence gates. Dates are set only after source mappings and pilot ownership are approved.</p></div></div>
+        <div class="roadmap">
+          <article class="phase current"><header><span>Phase 0 · Now</span><b class="status working">Working MVP</b></header><h2>Prove the guarded workflow</h2><p>Keep the current local workspace reproducible and verify its contracts with synthetic data.</p><ul><li>Preflight confirmation on upload, retry and demo</li><li>Local engines and optional provider routing</li><li>Reference rules, evidence review and audit</li><li>Individual and multi-invoice three-sheet export</li></ul><footer>Exit: automated backend and browser contracts pass.</footer></article>
+          <article class="phase"><header><span>Phase 1 · Next</span><b class="status planned">Planned</b></header><h2>Map approved source masters</h2><p>Build a distinct ingestion path for operational item, PO and receipt sources without placing private data in the repository.</p><ul><li>Approve source-to-canonical mappings and owners</li><li>Represent store / warehouse location type explicitly</li><li>Reject target-output workbooks presented as masters</li><li>Reconcile identifiers, leading zeroes and currency precision</li></ul><footer>Exit: representative private samples import with signed-off counts and exceptions.</footer></article>
+          <article class="phase"><header><span>Phase 2 · Pilot</span><b class="status planned">Planned</b></header><h2>Onboard a controlled supplier set</h2><p>Start with a small, varied invoice cohort and measure manual effort rather than assuming automation quality.</p><ul><li>Choose supplier layouts and language mix</li><li>Build and version known-layout templates</li><li>Measure field completeness and validation holds separately</li><li>Record reviewer time, correction types and failure causes</li></ul><footer>Exit: finance, buying, receiving and tax owners accept results and operating controls.</footer></article>
+          <article class="phase"><header><span>Phase 3 · Cloud</span><b class="status deploying">Deployment in progress</b></header><h2>Deploy and govern on Firebase / GCP</h2><p>Preserve the verified controls while moving identity, API execution and persistence into an approved cloud envelope.</p><ul><li>Firebase Hosting and allowlisted Firebase Authentication</li><li>Cloud Run API with authenticated same-origin requests</li><li>Managed state, protected document storage and server-side secrets</li><li>Retention, region, backup, monitoring and support ownership</li></ul><footer>Exit: cloud auth, persistence, recovery and end-to-end acceptance pass without weakening local mode.</footer></article>
+        </div>
+
+        <section class="panel rollout-panel"><div class="section-heading"><div><p class="kicker">Supplier onboarding loop</p><h2>Repeat this loop; do not hide exceptions</h2></div></div><div class="rollout-loop"><div><b>1</b><strong>Sample</strong><span>Collect representative invoices with owner approval.</span></div><i>→</i><div><b>2</b><strong>Map</strong><span>Confirm identifiers, routes, tax and location semantics.</span></div><i>→</i><div><b>3</b><strong>Test</strong><span>Run local extraction and permitted fallback on a fixed set.</span></div><i>→</i><div><b>4</b><strong>Review</strong><span>Classify corrections and reference-data holds.</span></div><i>→</i><div><b>5</b><strong>Release</strong><span>Version rules and monitor the first live cohort.</span></div></div></section>
+      </section>
+
+      <section id="decisions-view" class="view" data-section="decisions" hidden>
+        <div class="page-title"><div><p class="kicker">Review record</p><h1>Decisions, evidence &amp; open questions</h1><p>A compact handoff for leadership decisions and build-team follow-through.</p></div></div>
+        <div class="decision-grid">
+          <article class="panel"><span class="status working">Working MVP</span><h2>Verified implementation evidence</h2><ul class="evidence-list"><li><strong>Processing gate</strong><span>Browser automation proves no job starts before explicit preflight confirmation, and Cancel preserves the queue without sending the file.</span></li><li><strong>Review gate</strong><span>Unconfirmed invoices are held in the UI and by the server export endpoint.</span></li><li><strong>Batch integrity</strong><span>Two reviewed invoices export atomically with transaction 1 and 2 joined across all three sheets.</span></li><li><strong>Output contract</strong><span>Details contains the exact six required columns and no helper/formula columns.</span></li><li><strong>Secret handling</strong><span>A unique key marker entered in the browser does not appear in local or session storage.</span></li></ul></article>
+          <article class="panel"><span class="status untested">Live AI untested</span><h2>Claims deliberately withheld</h2><ul class="plain-list"><li>No production extraction accuracy or throughput benchmark.</li><li>No live OpenAI, Anthropic, ChatGPT or Claude quality comparison.</li><li>No guarantee of subscription eligibility, model access, latency or provider cost.</li><li>No confirmation that current supplier layouts are represented.</li><li>No production data residency, retention or service-level claim.</li></ul></article>
+          <article class="panel"><span class="status planned">Leadership decisions</span><h2>Needed before pilot</h2><ol class="question-list"><li><span>01</span><div><strong>Source ownership</strong><p>Who approves mapping and freshness for item, PO, receipt, route and tax sources?</p></div></li><li><span>02</span><div><strong>Pilot boundary</strong><p>Which suppliers, invoice volumes, languages and exception owners enter the first cohort?</p></div></li><li><span>03</span><div><strong>AI policy</strong><p>Which providers, models, document classes and data-sharing terms are permitted?</p></div></li><li><span>04</span><div><strong>Cloud operations</strong><p>Who owns the Firebase/GCP project, email allowlist, region, retention, recovery and production support?</p></div></li></ol></article>
+          <article class="panel"><span class="status planned">Build-team next actions</span><h2>Concrete follow-through</h2><ol class="question-list"><li><span>01</span><div><strong>Profile sources privately</strong><p>Produce field-level mapping proposals and exception counts without adding business data to the public repository.</p></div></li><li><span>02</span><div><strong>Add source adapters</strong><p>Keep operational master ingestion separate from the canonical seven-table reference template.</p></div></li><li><span>03</span><div><strong>Baseline the pilot set</strong><p>Freeze representative inputs and record completeness, holds and reviewer corrections per engine path.</p></div></li><li><span>04</span><div><strong>Define operations</strong><p>Assign exception queues, reference refresh cadence, retention, backup and recovery ownership.</p></div></li></ol></article>
+        </div>
+        <aside class="document-note"><strong>Document boundary</strong><span>This review uses architecture and synthetic examples only. It contains no private invoices, credentials or source-master content.</span></aside>
+      </section>
+    </main>
+
+    <footer><span>Invoice Studio solution review</span><span>Working behavior and planned scope are deliberately separated.</span></footer>
+    <script src="app.js"></script>
+  </body>
+</html>
