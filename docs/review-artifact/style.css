@@ -87,6 +87,7 @@ h2 { margin: 0; font-size: 20px; line-height: 1.2; letter-spacing: -.025em; }
 .status.working { color: var(--forest); background: var(--mint); }
 .status.untested { color: var(--amber); background: var(--amber-bg); }
 .status.planned { color: var(--blue); background: var(--blue-bg); }
+.status.pending { color: var(--violet); background: var(--violet-bg); }
 .status.deploying { color: var(--violet); background: var(--violet-bg); }
 
 .panel { min-width: 0; padding: 22px; background: #fff; border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow); }

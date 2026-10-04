@@ -6,7 +6,7 @@ Status distinguishes verified local behavior from business-data acceptance and p
 
 As an **AP operator**, I want to choose several invoices and confirm the processing rules, so I know which files, data and reader will be used.
 
-**Status:** Local implementation verified.
+**Status:** Local and hosted processing gate verified.
 
 - Cancel sends no invoice-processing request.
 - A confirmed plan is bound to filenames/sizes, engine/model, reference version and tolerances.
@@ -16,9 +16,11 @@ As an **AP operator**, I want to choose several invoices and confirm the process
 
 As an **AP operator**, I want to extract headers and every item line from supported files, so I avoid retyping supplier documents.
 
-**Status:** Local synthetic tests verified.
+**Status:** Prior three-reader baseline verified; readable-PDF fast path and visible-stage release validation pending.
 
 - Digital invoice2data, PaddleOCR scan and Docling reader paths produce structured synthetic results.
+- A readable PDF with no matching supplier template keeps native text and skips expensive image OCR; a confirmed AI fallback can use that text.
+- The job view names the active stage rather than presenting extraction as one opaque wait.
 - Unread or incomplete output records an explainable reader trace.
 - Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction.
 
@@ -31,15 +33,17 @@ As an **AP operator**, I want to select a provider/model and enable automatic fa
 - AI is called after explicit selection/confirmed fallback and local extraction failure or incompleteness.
 - Provider output must pass the strict invoice schema; missing facts remain missing.
 - Credentials never appear in browser storage, exported files or ordinary API errors.
+- Claude setup-token and move-only ChatGPT owner-transfer paths remain subject to live account eligibility and release validation; mocked adapters do not prove subscription inference.
 
 ## INV-04 · Map and approve business reference extracts
 
 As an **data steward**, I want to profile the whole item and PO/GRN files and approve explicit mappings, so the validator uses evidence with known meaning.
 
-**Status:** Full private profiling active; source adapter and business approval pending.
+**Status:** Actual-source lookup indexes 114,940 item rows and 297,199 PO rows; release validation and business approval remain pending.
 
 - Preserve original bytes, hashes and row/column provenance; inspect all populated cells.
 - Separate unique matches, duplicates, ambiguous joins and missing fields.
+- Identifier and product-name searches show source/conflict context and require explicit confirmation; confirmed lookup evidence is not approved matching data.
 - Unknown seller/buyer/route, receipt acceptance and invoiced baseline block approval; never default them silently.
 
 ## INV-05 · Match the exact supplier route and items
@@ -71,6 +75,7 @@ As an **AP reviewer**, I want to compare the source with editable fields and rec
 - Review confirmation cannot override validation holds.
 - Concurrent edits with stale revisions are rejected.
 - Rules changing during extraction prevent stale approval and require a new processing plan.
+- A manual draft created from an active job cannot alter the job revision, extracted invoice or review status.
 
 ## INV-08 · Export one joined three-sheet workbook
 
@@ -84,9 +89,9 @@ As an **AP operator**, I want to download all selected ready invoices into the e
 
 ## INV-09 · Recover and audit local operations
 
-As an **service owner**, I want to retain sources, rule versions, edits and exports, so a failed reader or restart can be explained and retried.
+As a **service owner**, I want to retain sources, rule versions, edits and exports, so a failed reader or restart can be explained and retried.
 
-**Status:** Local audit/restart behavior implemented; recovery exercise pending.
+**Status:** Instance-replacement persistence verified; database backup restoration remains a production gate.
 
 - Restarted in-flight jobs visibly require retry; completed exports remain downloadable.
 - Export records include reference version, policy and allocations.
@@ -94,17 +99,18 @@ As an **service owner**, I want to retain sources, rule versions, edits and expo
 
 ## INV-10 · Run a restricted cloud workspace
 
-As an **workspace owner**, I want to sign in to a Firebase frontend backed by durable GCP services, so the team can use a hosted portal without losing evidence on restart.
+As a **workspace owner**, I want to sign in to a Firebase frontend backed by durable GCP services, so the team can use a hosted portal without losing evidence on restart.
 
-**Status:** Cloud implementation and deployment in progress.
+**Status:** Hosted synthetic workflow and instance-replacement persistence verified.
 
 - Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.
 - Database and document evidence survive a replacement application instance.
 - Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff.
+- Current source additions require a fresh authenticated deployment smoke; prior hosted results are not evidence that those additions are deployed.
 
 ## INV-11 · Qualify suppliers for a new store or market
 
-As an **procurement owner**, I want to reuse approved coverage and start discovery only for gaps, so store openings do not repeat every supplier task.
+As a **procurement owner**, I want to reuse approved coverage and start discovery only for gaps, so store openings do not repeat every supplier task.
 
 **Status:** Proposed next product increment.
 
@@ -121,3 +127,33 @@ As an **item-data steward**, I want to turn varied supplier files into approved 
 - Supplier codes, internal items, barcodes, packaging and units have explicit mappings.
 - Conflicting identities and unit conversions need steward approval.
 - Channel-specific text, attributes, images and translations are versioned separately from purchasing identity.
+
+## INV-13 · Download an explicitly unvalidated manual draft
+
+As an **AP operator**, I want to edit every target workbook field and download a draft while OCR is still running, so urgent manual work is not blocked by a slow reader.
+
+**Status:** Implemented in the current source; integrated release and hosted validation pending.
+
+- Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction, leading-zero-safe identifiers and Decimal arithmetic.
+- Download requires an explicit unvalidated acknowledgement and the filename, workbook properties and cell comments say `DRAFT_UNVALIDATED` and no receipt reservation.
+- Draft creation does not read the active extraction payload, approve a reference, change job status/revision/invoice, write the approved export ledger or reserve receipt quantity.
+
+## INV-14 · Search large source extracts without implying approval
+
+As a **data steward**, I want to search actual item and PO sources by identifier or product name, so I can find evidence without loading unapproved rows into canonical matching.
+
+**Status:** Current source indexes 114,940 item rows and 297,199 PO rows; integrated release validation pending.
+
+- Results retain source row and conflict/duplicate context, with filters and bounded pagination.
+- The operator explicitly confirms a selected result before it can populate the manual workspace.
+- Summary, search and confirmation state clearly that source evidence is not approved for matching, receipt allocation or export readiness.
+
+## INV-15 · Move an owner subscription connection to the hosted workspace
+
+As a **workspace owner**, I want to connect the restricted Claude CLI or move my ChatGPT registration into my authenticated hosted workspace, so the provider can use my authorized account without sharing a raw secret through the browser state.
+
+**Status:** Connection and transfer controls are implemented in source; live subscription inference, release validation and hosted deployment pending.
+
+- Claude setup tokens are encrypted, omitted from state, removable, and supplied only to the restricted server CLI with tools disabled.
+- ChatGPT starts local OAuth under the application's own registration; successful export constructs a one-time bundle, deletes local encrypted credentials, disconnects and clears the active local account.
+- Only an authenticated cloud owner can import and verify the bundle. Export is denied in cloud mode, import is denied locally, and no test result implies provider eligibility or live inference quality.

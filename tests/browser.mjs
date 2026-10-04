@@ -214,6 +214,14 @@ try {
     "The invoice review region is not visible",
   );
 
+  // The isolated browser workspace starts without matching data after a clean
+  // backend restart. Load only the bundled synthetic set used by this test.
+  const demoReferences = await context.request.post(`${baseURL}/api/references/demo`, {
+    data: {},
+    headers: { "x-studio-request": "1" },
+  });
+  await assertOk(demoReferences, "Synthetic reference setup");
+
   const demoResponse = await runPreflight(
     () => page.getByRole("button", { name: "Try synthetic demo" }).click(),
     "/api/demo",
@@ -224,6 +232,15 @@ try {
   await waitForCompletedJob(demoJob.id);
   await waitForSelectedReview(demoJob.filename);
   await page.getByRole("heading", { name: "Invoice details" }).waitFor();
+
+  const demoDocumentPath = `/api/jobs/${demoJob.id}/document`;
+  const initialDocumentSource = await waitFor("the source preview to load", async () => {
+    const source = await page.locator("#document-frame").getAttribute("src");
+    return source?.startsWith("blob:") ? source : null;
+  });
+  const documentRequestsBeforeRetry = requestLog.filter(
+    (entry) => entry.method === "GET" && entry.path === demoDocumentPath,
+  ).length;
 
   // Reprocessing is separately gated, even when the document is already local.
   await page.locator("#retry-job").click();
@@ -237,6 +254,126 @@ try {
   assert.equal(retriedJob.id, demoJob.id, "Retry returned a different invoice job");
   await waitForCompletedJob(demoJob.id);
   await waitForSelectedReview(demoJob.filename);
+  assert.equal(
+    await page.locator("#document-frame").getAttribute("src"),
+    initialDocumentSource,
+    "Status polling replaced the source preview and can make it blink",
+  );
+  assert.equal(
+    requestLog.filter((entry) => entry.method === "GET" && entry.path === demoDocumentPath).length,
+    documentRequestsBeforeRetry,
+    "Reprocessing or status polling downloaded the unchanged source document again",
+  );
+
+  // A description-only line can search staged evidence. Ambiguous identifiers
+  // require an explicit selection and copying them does not approve or save it.
+  const firstReviewLine = page.locator("#line-items tr").first();
+  const lookupDescription = await firstReviewLine.locator('[name="description"]').inputValue();
+  const originalLineIdentity = {
+    sku: await firstReviewLine.locator('[name="sku"]').inputValue(),
+    gtin: await firstReviewLine.locator('[name="gtin"]').inputValue(),
+    uom: await firstReviewLine.locator('[name="uom"]').inputValue(),
+  };
+  assert(lookupDescription.length >= 2, "Demo line has no description for item lookup");
+  const lookupRoute = /\/api\/reference-lookup\/search\?/;
+  await page.route(lookupRoute, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        records: [{
+          kind: "item",
+          source_hash: "browser-test-source",
+          source_sheet: "ItemMaster",
+          source_row: 8,
+          data: { Description: lookupDescription, Item: "ITEM-LOOKUP", UPC: "629000000002" },
+          flags: [],
+          candidate_fields: {
+            sku: ["ITEM-LOOKUP"],
+            gtin: ["629000000001", "629000000002"],
+            uom: ["EA"],
+            pack: ["12"],
+            description: [lookupDescription],
+            supplier: ["Browser supplier"],
+            site: ["DXB"],
+            po: [],
+          },
+          match: { basis: ["description_tokens"], score: 0.98, matched_terms: [lookupDescription] },
+          approved_for_matching: false,
+          requires_confirmation: true,
+        }],
+        next_cursor: null,
+        notice: "Source evidence only.",
+      }),
+    });
+  });
+  await firstReviewLine.getByRole("button", { name: "Find item" }).click();
+  await page.locator("#references-section:not([hidden])").waitFor({ state: "visible", timeout });
+  assert.equal(await page.locator("#reference-lookup-query").inputValue(), lookupDescription);
+  const candidate = page.locator(".reference-result").first();
+  await candidate.locator("summary").click();
+  assert.equal(await candidate.locator('[data-candidate-field="sku"]').inputValue(), "ITEM-LOOKUP");
+  assert.equal(await candidate.locator('[data-candidate-field="gtin"]').inputValue(), "", "Ambiguous GTIN was chosen automatically");
+  await candidate.locator('[data-candidate-field="gtin"]').selectOption("629000000002");
+  await candidate.getByRole("button", { name: "Use selected item" }).click();
+  await page.locator("#workspace-section:not([hidden])").waitFor({ state: "visible", timeout });
+  assert.equal(await firstReviewLine.locator('[name="sku"]').inputValue(), "ITEM-LOOKUP");
+  assert.equal(await firstReviewLine.locator('[name="gtin"]').inputValue(), "629000000002");
+  assert.equal(await firstReviewLine.locator('[name="uom"]').inputValue(), "EA");
+  await firstReviewLine.locator('[name="sku"]').fill(originalLineIdentity.sku);
+  await firstReviewLine.locator('[name="gtin"]').fill(originalLineIdentity.gtin);
+  await firstReviewLine.locator('[name="uom"]').fill(originalLineIdentity.uom);
+  await page.unroute(lookupRoute);
+
+  // A manual draft is an explicit, separate workbook path. It may copy the
+  // visible values, but must not revise, approve or export the active job.
+  const beforeDraft = await (await context.request.get(`${baseURL}/api/jobs/${demoJob.id}`)).json();
+  await page.getByRole("button", { name: "Create unvalidated draft" }).click();
+  const draftDialog = page.locator("#manual-draft-dialog");
+  await draftDialog.waitFor({ state: "visible", timeout });
+  assert(
+    (await draftDialog.textContent())?.includes("DRAFT · UNVALIDATED"),
+    "Manual draft did not display its unvalidated warning",
+  );
+  const draftHeader = draftDialog.locator('[data-draft-section="Header"]');
+  await draftHeader.locator('[name="Document"]').fill("DRAFT-SMOKE");
+  await draftHeader.locator('[name="Supplier Site"]').fill("TEST-SITE");
+  await draftHeader.locator('[name="Order No"]').fill("TEST-PO");
+  await draftHeader.locator('[name="Location"]').fill("TEST-LOCATION");
+  await draftHeader.locator('[name="Location Type"]').selectOption("Warehouse (W)");
+  await draftHeader.locator('[name="Document Date"]').fill("2026-10-04");
+  await draftHeader.locator('[name="Total Cost Ex Tax"]').fill("40");
+  await draftHeader.locator('[name="Tax Amount"]').fill("2");
+  const draftTax = draftDialog.locator('[data-draft-section="Tax_Breakdown"]');
+  await draftTax.locator('[name="Tax Code"]').fill("VAT");
+  await draftTax.locator('[name="Tax Basis"]').fill("40");
+  while (await draftDialog.locator("#manual-draft-lines tr").count() > 1) {
+    await draftDialog.locator("#manual-draft-lines tr").last().getByRole("button", { name: "Remove draft detail row" }).click();
+  }
+  const draftLine = draftDialog.locator("#manual-draft-lines tr").first();
+  await draftLine.locator('[name="Item"]').fill("TEST-ITEM");
+  await draftLine.locator('[name="UPC"]').fill("629000000001");
+  await draftLine.locator('[name="Unit Cost"]').fill("40");
+  await draftLine.locator('[name="Quantity"]').fill("1");
+  await draftLine.locator('[name="Unit Tax Code"]').fill("VAT");
+  await page.locator('#manual-draft-acknowledge').check();
+  const invalidDraftFields = await draftDialog.locator("form").evaluate((form) => [...form.elements]
+    .filter((element) => typeof element.checkValidity === "function" && !element.checkValidity())
+    .map((element) => element.name || element.id));
+  assert.deepEqual(invalidDraftFields, [], `Manual draft form remained invalid: ${invalidDraftFields.join(", ")}`);
+  const draftPostPromise = page.waitForResponse(
+    responseMatches("POST", `/api/jobs/${demoJob.id}/draft`),
+    { timeout },
+  );
+  await page.locator("#download-manual-draft").click();
+  const draftPost = await draftPostPromise;
+  await assertOk(draftPost, "Unvalidated draft creation");
+  assert.match(draftPost.headers()["content-disposition"] || "", /_DRAFT_UNVALIDATED\.xlsx"?$/);
+  assert.match(draftPost.headers()["content-type"] || "", /application\/vnd\.openxmlformats-officedocument\.spreadsheetml\.sheet/);
+  await draftDialog.waitFor({ state: "hidden", timeout });
+  const afterDraft = await (await context.request.get(`${baseURL}/api/jobs/${demoJob.id}`)).json();
+  assert.equal(afterDraft.revision, beforeDraft.revision, "Draft creation revised the active invoice job");
+  assert.equal(afterDraft.export_id, beforeDraft.export_id, "Draft creation marked the invoice as exported");
 
   const confirmReview = page.locator("#confirm-review");
   const exportButton = page.locator("#export-job");
@@ -466,10 +603,19 @@ print(json.dumps({
 
   await page.getByRole("button", { name: "References", exact: true }).click();
   await page.locator("#references-section").waitFor({ state: "visible" });
+  assert.notEqual(await page.locator("#reference-source-summary").textContent(), "Loading staged source summary…");
   await page.getByRole("heading", { level: 1, name: "Reference data & rules" }).waitFor();
   assert(
-    await page.getByRole("heading", { name: "Reference workbook" }).isVisible(),
+    await page.getByRole("heading", { name: "Approved matching snapshot" }).isVisible(),
     "The reference controls are not visible",
+  );
+  assert(
+    await page.getByRole("heading", { name: "Source evidence lookup" }).isVisible(),
+    "The unapproved source-evidence lookup is not visible",
+  );
+  assert(
+    (await page.locator(".source-evidence-warning").textContent())?.includes("not approved matching data"),
+    "Staged source evidence is not clearly separated from approved matching data",
   );
 
   await page.getByRole("button", { name: "Engines & AI", exact: true }).click();
@@ -527,6 +673,7 @@ print(json.dumps({
       cloudApiHeaders.push(request.headers().authorization);
     }
   });
+  await cloudPage.setViewportSize({ width: 390, height: 844 });
   await cloudPage.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
   await cloudPage.locator("#app-shell").waitFor({ state: "visible", timeout });
   assert.equal(
@@ -538,6 +685,17 @@ print(json.dumps({
     cloudApiHeaders.length >= 2 && cloudApiHeaders.every(
       (value) => value === "Bearer BROWSER_TEST_ID_TOKEN",
     ),
+  );
+  await cloudPage.getByRole("button", { name: "Workspace", exact: true }).click();
+  await cloudPage.locator("#workspace-section").waitFor({ state: "visible", timeout });
+  const mobileLayout = await cloudPage.evaluate(() => ({
+    viewport: window.innerWidth,
+    root: document.documentElement.scrollWidth,
+    body: document.body.scrollWidth,
+  }));
+  assert(
+    mobileLayout.root <= mobileLayout.viewport && mobileLayout.body <= mobileLayout.viewport,
+    `Cloud workspace overflows the mobile viewport: ${JSON.stringify(mobileLayout)}`,
   );
   await cloudPage.locator("#cloud-sign-out").click();
   await cloudPage.locator("#app-shell").waitFor({ state: "hidden", timeout });

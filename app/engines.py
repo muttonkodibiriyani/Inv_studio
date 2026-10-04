@@ -2,6 +2,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -65,6 +66,7 @@ def local_read(engine,path,root,language="en"):
 
 def process(path,options,store,ai_reader,progress=lambda *args:None):
     trace=[];best=None;best_score=-1;text="";boxes=[];selected="none"
+    document_type_hint=None;extraction_note=None
     installed={x["id"] for x in capabilities() if x["installed"]}
     chain=["invoice2data","paddleocr","docling"] if options.engine=="auto" else ([] if options.engine=="ai" else [options.engine])
     # Text/office attachments and the local Claude bridge need native/OCR text even
@@ -85,9 +87,25 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             if len(result["text"])>len(text):text=result["text"];boxes=result.get("boxes",[])
             trace.append({"engine":engine,"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"reason":"Required extraction fields present" if not missing else "; ".join(missing)})
             if candidate is not None and score>best_score:best=candidate;best_score=score;selected=engine
+            progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
+            # Native text already exists: another OCR pass cannot supply an
+            # unknown supplier's semantic mapping. Offer AI/manual entry promptly.
+            if options.engine in ("auto","ai") and engine=="invoice2data" and candidate is None and len(text.strip())>=250:
+                po_heading=re.search(r"(?im)^\s*(?:#{1,6}\s*)?Purchase\s+Order\s*$",text)
+                po_number=re.search(r"(?i)Store\s+Purchase\s+Order\s*(?:#|No|Number)",text)
+                invoice_heading=re.search(r"(?im)^\s*(?:#{1,6}\s*)?(?:(?:tax|commercial|sales|supplier)\s+)?Invoice\b",text)
+                if po_heading and po_number and not invoice_heading:
+                    document_type_hint="possible_purchase_order"
+                    extraction_note="This document is labelled Purchase Order. Check the document type before entering invoice fields; a PO does not prove an invoice or receipt."
+                else:
+                    extraction_note="Document text was read, but no supplier invoice template matched. Use a connected AI reader or enter the fields manually."
+                for remaining in chain[chain.index(engine)+1:]:
+                    trace.append({"engine":remaining,"status":"skipped","reason":"Native text is already readable; a supplier mapping or selected AI is needed, not another OCR pass."})
+                break
             if not missing:break
         except Exception as e:
             trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2)})
+            progress(engine,"Reader attempt finished",{"trace":list(trace),"characters":len(text)})
     _,missing=quality(best)
     if options.engine=="ai" or (options.ai_fallback and missing):
         if not options.model:trace.append({"engine":options.provider,"status":"needs_connection","reason":"Select a model in AI connections"})
@@ -103,4 +121,5 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             except Exception as e:
                 trace.append({"engine":options.provider,"model":options.model,"status":"failed","reason":str(e)[:240]})
     return {"invoice":(best or Invoice()).model_dump(mode="json"),"text":text,"boxes":boxes,
-            "trace":trace,"selected_engine":selected,"completeness":max(0,best_score)}
+            "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
+            "document_type_hint":document_type_hint,"extraction_note":extraction_note}

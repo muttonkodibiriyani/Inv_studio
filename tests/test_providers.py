@@ -2,11 +2,14 @@ import base64
 import hashlib
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+import jwt
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 import app.engines as engines
 import app.oauth as oauth
@@ -15,6 +18,7 @@ from app.models import ProcessingOptions
 from app.oauth import ChatGPTAuth
 from app.providers import Providers, safe_error
 from app.store import Store
+from app.subscriptions import CLAUDE_SECRET, ClaudeSubscription
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +80,18 @@ class FakeClient:
 class FakeChatGPT:
     def token(self):
         return "chatgpt-access-token"
+
+
+class IdentityClient(FakeClient):
+    def __init__(self, jwk):
+        super().__init__()
+        self.jwk = jwk
+
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, kwargs))
+        if url.endswith("/.well-known/openid-configuration"):
+            return FakeResponse({"jwks_uri": oauth.AUTH + "/.well-known/jwks.json"})
+        return FakeResponse({"keys": [self.jwk]})
 
 
 @pytest.fixture
@@ -379,6 +395,180 @@ def test_oauth_refresh_rejects_loss_of_direct_usage_scope(store, monkeypatch):
 
     with pytest.raises(ValueError, match="permission is no longer granted"):
         auth.token()
+
+
+def test_claude_subscription_is_encrypted_and_cli_run_is_isolated(tmp_path, store, monkeypatch):
+    token = "sk-ant-oat01-" + "s" * 64
+    subscription = ClaudeSubscription(store)
+    assert subscription.connect(token) == {"connected": True, "provider": "claude_local"}
+    assert subscription.connected() is True
+    assert token.encode() not in store.path.read_bytes()
+
+    captured = {}
+
+    def run(command, **kwargs):
+        captured.update(command=command, **kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"structured_output": sample_invoice(), "usage": {"input_tokens": 5}}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(provider_module.shutil, "which", lambda name: "/usr/local/bin/claude")
+    monkeypatch.setattr(provider_module.subprocess, "run", run)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-leak")
+    monkeypatch.setenv("INV_STUDIO_DATABASE_URL", "must-not-leak")
+    path = tmp_path / "invoice.txt"
+    path.write_text("visible invoice")
+
+    invoice, usage = Providers(store, FakeChatGPT()).extract(
+        path, "visible invoice", options("claude_local")
+    )
+
+    assert invoice.number == "DEMO-2026-001"
+    assert usage == {"input_tokens": 5}
+    assert "--bare" not in captured["command"]
+    for switch in ("--safe-mode", "--restricted", "--disable-slash-commands", "--no-session-persistence"):
+        assert switch in captured["command"]
+    assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == token
+    assert captured["env"]["HOME"] == captured["cwd"]
+    assert captured["env"]["CLAUDE_CONFIG_DIR"].startswith(captured["cwd"])
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "INV_STUDIO_DATABASE_URL" not in captured["env"]
+
+    subscription.disconnect()
+    assert store.secret(CLAUDE_SECRET) is None
+
+
+def _registration_bundle():
+    private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key()))
+    jwk.update(kid="test-key", use="sig", alg="RS256")
+    now = int(time.time())
+    client_id = "issued-inv-studio-client"
+    subject = "chatgpt-subject-1"
+    scopes = oauth.SCOPES.split()
+    access = jwt.encode(
+        {
+            "iss": oauth.AUTH,
+            "aud": oauth.RESOURCE,
+            "sub": subject,
+            "client_id": client_id,
+            "scope": " ".join(scopes),
+            "iat": now,
+            "nbf": now,
+            "exp": now + 3600,
+        },
+        private,
+        algorithm="RS256",
+        headers={"kid": "test-key"},
+    )
+    identity = jwt.encode(
+        {
+            "iss": oauth.AUTH,
+            "aud": client_id,
+            "sub": subject,
+            "email": "owner@example.test",
+            "iat": now,
+            "exp": now + 3600,
+        },
+        private,
+        algorithm="RS256",
+        headers={"kid": "test-key"},
+    )
+    return {
+        "format": oauth.BUNDLE_FORMAT,
+        "version": 1,
+        "exported_at": now,
+        "account": {"subject": subject, "email": "owner@example.test"},
+        "credentials": {
+            "client_id": client_id,
+            "access_token": access,
+            "refresh_token": "refresh-token-for-inv-studio-only",
+            "id_token": identity,
+            "token_type": "Bearer",
+            "expires_at": now + 3600,
+            "earliest_refresh_at": now + 60,
+            "scopes": scopes,
+        },
+    }, jwk
+
+
+def test_chatgpt_bundle_import_verifies_tokens_encrypts_secrets_and_preserves_host(store, monkeypatch):
+    auth = ChatGPTAuth(store)
+    target_host_id = store.get("host_id")
+    bundle, jwk = _registration_bundle()
+    fake = IdentityClient(jwk)
+    monkeypatch.setattr(oauth.httpx, "Client", lambda *args, **kwargs: fake)
+
+    account = auth.import_bundle(bundle)
+
+    assert account == {"id": account["id"], "email": "owner@example.test", "connected": True}
+    assert store.get("host_id") == target_host_id
+    assert auth.accounts() == [
+        {
+            "id": account["id"],
+            "email": "owner@example.test",
+            "subject": "chatgpt-subject-1",
+            "client_id": "issued-inv-studio-client",
+            "connected": True,
+        }
+    ]
+    database = store.path.read_bytes()
+    assert bundle["credentials"]["refresh_token"].encode() not in database
+    assert bundle["credentials"]["access_token"].encode() not in database
+    assert auth.token() == bundle["credentials"]["access_token"]
+
+
+def test_chatgpt_bundle_rejects_scope_mismatch_without_echoing_or_storing_secret(store, monkeypatch):
+    auth = ChatGPTAuth(store)
+    bundle, jwk = _registration_bundle()
+    secret = bundle["credentials"]["refresh_token"]
+    bundle["credentials"]["scopes"] = ["openid", "offline_access"]
+    monkeypatch.setattr(oauth.httpx, "Client", lambda *args, **kwargs: IdentityClient(jwk))
+
+    with pytest.raises(ValueError) as error:
+        auth.import_bundle(bundle)
+
+    assert str(error.value) == "ChatGPT credential bundle is invalid or expired. Sign in again locally and retry."
+    assert secret not in str(error.value)
+    assert auth.accounts() == []
+    assert secret.encode() not in store.path.read_bytes()
+
+
+def test_chatgpt_bundle_export_is_own_registration_and_excludes_host_id(store):
+    auth = ChatGPTAuth(store)
+    bundle, _ = _registration_bundle()
+    account_id = "account-1"
+    store.set("chatgpt_accounts", [{"id": account_id, "email": "owner@example.test",
+        "subject": bundle["account"]["subject"], "client_id": bundle["credentials"]["client_id"],
+        "connected": True}])
+    store.secret("chatgpt:" + account_id, bundle["credentials"])
+
+    exported = auth.export_bundle(account_id)
+
+    assert exported["format"] == oauth.BUNDLE_FORMAT
+    assert exported["credentials"]["client_id"] == "issued-inv-studio-client"
+    assert "host_id" not in json.dumps(exported)
+    assert store.secret("chatgpt:"+account_id) is None
+    assert auth.accounts()[0]["connected"] is False
+
+
+def test_chatgpt_refresh_is_serialized_across_workers(store, monkeypatch):
+    auth = ChatGPTAuth(store)
+    account_id = "account-1"
+    store.set("chatgpt_active", account_id)
+    store.secret("chatgpt:" + account_id, {"client_id": "issued-client", "access_token": "expired",
+        "refresh_token": "refresh", "expires_at": time.time() - 1,
+        "scopes": ["chatgpt.tokens.use.direct"]})
+    fake = FakeClient(post=FakeResponse({"access_token": "fresh", "refresh_token": "replacement",
+        "expires_in": 3600, "scope": "openid offline_access chatgpt.tokens.use.direct"}))
+    monkeypatch.setattr(oauth.httpx, "Client", lambda *args, **kwargs: fake)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        assert list(pool.map(lambda _: auth.token(), range(8))) == ["fresh"] * 8
+
+    assert len([call for call in fake.calls if call[0] == "POST"]) == 1
 
 
 def test_local_reader_does_not_inherit_cloud_database_or_vault_credentials(tmp_path,monkeypatch):

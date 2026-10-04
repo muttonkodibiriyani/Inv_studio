@@ -24,6 +24,8 @@ from starlette.concurrency import run_in_threadpool
 from .authentication import CloudIdentity, actor
 from .engines import capabilities, process
 from .excel import workbook, batch_workbook
+from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
+from .reference_lookup import ReferenceLookup
 from .matching import enrich, key, validate
 from .models import Invoice, Policy, ProcessingOptions, StrictModel
 from .oauth import ChatGPTAuth
@@ -61,6 +63,14 @@ class Retry(StrictModel):
 
 class Connection(StrictModel):
     api_key: SecretStr = Field(min_length=10,max_length=500)
+
+
+class SubscriptionToken(StrictModel):
+    setup_token: SecretStr = Field(min_length=20,max_length=4096)
+
+
+class ChatGPTBundle(StrictModel):
+    bundle: dict
 
 
 class Settings(StrictModel):
@@ -105,6 +115,7 @@ def create_app(data_dir=None):
     store=store_type(Path(data_dir or os.getenv("INV_STUDIO_DATA",ROOT/".data")))
     if identity.cloud:store.sync_templates()
     auth=ChatGPTAuth(store);providers=Providers(store,auth)
+    lookup=ReferenceLookup(store)
     pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix="invoice")
     slots=threading.BoundedSemaphore(20)
     plans={};plans_lock=threading.RLock()
@@ -197,8 +208,15 @@ def create_app(data_dir=None):
                 if job.get("confirmed_signature") != rule_signature(opts):
                     raise ValueError("Confirmed rules changed")
                 job.update(status="processing",error=None);store.job(jid,job)
-            def progress(engine,message):
-                j=job_or_404(jid);j["progress"]={"engine":engine,"message":message};store.job(jid,j)
+            def progress(engine,message,details=None):
+                j=job_or_404(jid)
+                previous=j.get("progress") or {}
+                j["progress"]={"engine":engine,"message":message,
+                    "started_at":previous.get("started_at") if previous.get("engine")==engine else datetime.now(timezone.utc).isoformat()}
+                if details:
+                    j["trace"]=details.get("trace",j.get("trace",[]))
+                    j["progress"]["characters"]=details.get("characters",0)
+                store.job(jid,j)
             if identity.cloud:store.ensure_blob(Path(job["path"]))
             result=process(Path(job["path"]),opts,store,providers.extract,progress)
             with plans_lock:
@@ -286,7 +304,7 @@ def create_app(data_dir=None):
         with store.connection() as c:
             exports=[{"id":r["id"],"job_id":r["job_id"],**{k:v for k,v in json.loads(r["payload"]).items() if k in ("number","created_at")}} for r in c.execute("SELECT id,job_id,payload FROM exports ORDER BY rowid DESC")]
         return {"engines":capabilities(),"connections":{"openai":bool(store.secret("openai")),"anthropic":bool(store.secret("anthropic")),
-                "chatgpt":not identity.cloud and any(a["id"]==store.get("chatgpt_active") and a["connected"] for a in accounts),"claude_local":not identity.cloud and bool(shutil.which("claude"))},
+                "chatgpt":any(a["id"]==store.get("chatgpt_active") and a["connected"] for a in accounts),"claude_local":providers.claude_subscription.connected() and bool(shutil.which("claude"))},
                 "accounts":accounts,"active_account":store.get("chatgpt_active"),"settings":store.get("settings",Settings().model_dump()),
                 "policy":policy().model_dump(mode="json"),"references":{"version":refs.get("version"),"imported_at":refs.get("imported_at"),"counts":{k:len(refs.get(k,[])) for k in ("sites","routes","items","orders","receipts","taxRules")}} if refs else None,
                 "jobs":[public(evaluate(j),False) for j in store.jobs()],"exports":exports,
@@ -295,8 +313,6 @@ def create_app(data_dir=None):
     @app.post("/api/preflight")
     def preflight(body:Preflight):
         warnings=[];blocking=[];opts=body.options
-        if identity.cloud and opts.provider in ("chatgpt","claude_local"):
-            raise ValueError("Subscription bridges are available only in the local app. Select an API provider for the cloud workspace.")
         if not references():warnings.append("No reference files loaded. Extraction can run, but Excel export stays on hold until references are imported and checked.")
         if opts.ai_fallback or opts.engine=="ai":
             if not opts.model:warnings.append("No AI model selected. If local reading fails, this batch will wait for an AI connection or manual review.")
@@ -493,6 +509,47 @@ def create_app(data_dir=None):
     def connect(provider:str,body:Connection):
         if provider not in ("openai","anthropic"):raise ValueError("Use API keys only for OpenAI or Anthropic API connections")
         store.secret(provider,body.api_key.get_secret_value().strip());return {"connected":True}
+
+    @app.post("/api/subscriptions/claude/import")
+    def import_claude_subscription(body:SubscriptionToken):
+        result=providers.claude_subscription.connect(body.setup_token.get_secret_value())
+        store.audit("subscription_connected",{"provider":"claude_local"})
+        return result
+
+    @app.delete("/api/subscriptions/claude")
+    def disconnect_claude_subscription():
+        providers.claude_subscription.disconnect()
+        store.audit("subscription_disconnected",{"provider":"claude_local"})
+        return {"connected":False}
+
+    @app.post("/api/chatgpt/export")
+    def export_chatgpt_bundle(body:Account):
+        if identity.cloud:raise HTTPException(403,"Export a subscription registration from your local Invoice Studio installation")
+        bundle=auth.export_bundle(body.id)
+        return Response(json.dumps(bundle),media_type="application/json",headers={"Cache-Control":"no-store","Pragma":"no-cache","Content-Disposition":'attachment; filename="invoice-studio-chatgpt-credentials.json"'})
+
+    @app.post("/api/chatgpt/import")
+    def import_chatgpt_bundle(body:ChatGPTBundle):
+        if not identity.cloud:raise HTTPException(403,"Credential transfer is for your authenticated self-hosted workspace")
+        account=auth.import_bundle(body.bundle)
+        store.audit("subscription_connected",{"provider":"chatgpt"})
+        return account
+
+    @app.get("/api/reference-lookup/summary")
+    def lookup_summary():return lookup.summary()
+
+    @app.get("/api/reference-lookup/search")
+    def lookup_search(kind:str,q:str,cursor:str="",limit:int=25,site:str="",supplier:str="",po:str=""):
+        return lookup.search(kind,q,cursor,limit,site=site,supplier=supplier,po=po)
+
+    @app.post("/api/jobs/{jid}/draft")
+    def manual_draft(jid:str,body:ManualDraftRequest):
+        job_or_404(jid)
+        content=build_draft_workbook(body)
+        metadata=draft_public_metadata(body,job_id=jid)
+        metadata["workbook_sha256"]=hashlib.sha256(content).hexdigest()
+        store.audit("manual_draft_downloaded",metadata)
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="{draft_filename(body)}"',"Cache-Control":"no-store"})
 
     @app.delete("/api/connections/{provider}")
     def disconnect(provider:str):

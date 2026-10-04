@@ -50,6 +50,19 @@ RUN python -m pip install --no-cache-dir \
     && python -m pip check \
     && python -c 'import cv2, docling, paddle, psycopg; print("Cloud OCR imports are ready")'
 
+ARG CLAUDE_VERSION=2.1.285
+ARG CLAUDE_SHA256=33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29
+RUN python - <<'PY'
+import hashlib, os, pathlib, urllib.request
+url='https://downloads.claude.ai/claude-code-releases/'+os.environ['CLAUDE_VERSION']+'/linux-x64/claude'
+target=pathlib.Path('/usr/local/bin/claude')
+urllib.request.urlretrieve(url,target)
+assert hashlib.sha256(target.read_bytes()).hexdigest()==os.environ['CLAUDE_SHA256'], 'CLI checksum mismatch'
+target.chmod(0o755)
+PY
+ENV DISABLE_UPDATES=1
+RUN claude --version
+
 COPY app ./app
 COPY samples ./samples
 COPY README.md ./

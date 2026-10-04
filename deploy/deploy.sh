@@ -26,6 +26,8 @@ gcloud run deploy inv-studio-api --project="$GCP_PROJECT" --region="$GCP_REGION"
 mkdir -p .data/hosting/static
 cp app/static/index.html .data/hosting/index.html
 cp app/static/app.js app/static/style.css app/static/firebase-auth.bundle.js .data/hosting/static/
+mkdir -p .data/hosting/review
+cp -R docs/review-artifact/. .data/hosting/review/
 python3 - <<'PY'
 import json,os,pathlib
 root=pathlib.Path.cwd()

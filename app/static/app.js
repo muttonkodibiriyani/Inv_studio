@@ -26,6 +26,10 @@ const HEADER_FIELDS = [
   ["tax", "Tax total", "number"],
 ];
 
+const DRAFT_HEADER_COLUMNS = ["Transaction Number", "Document", "Supplier Site", "Order No", "Location", "Location Type", "Document Date", "Total Cost Ex Tax", "Tax Amount", "Ref No. 1", "Ref No. 2", "Ref No. 3", "Comment"];
+const DRAFT_TAX_COLUMNS = ["Transaction Number", "Tax Code", "Tax Basis"];
+const DRAFT_DETAIL_COLUMNS = ["Transaction Number", "Item", "UPC", "Unit Cost", "Quantity", "Unit Tax Code"];
+
 const STATUS_LABELS = {
   queued: "Queued",
   processing: "Processing",
@@ -42,6 +46,8 @@ const app = {
   selectedForBatch: new Set(),
   uploadFiles: [],
   pollTimer: null,
+  pollBusy: false,
+  pollCursor: 0,
   messageTimer: null,
   selectionToken: 0,
   preflight: null,
@@ -51,7 +57,15 @@ const app = {
   sessionVerified: false,
   workspaceStarted: false,
   documentUrl: null,
+  documentJobId: null,
   documentToken: 0,
+  manualDraftJobId: null,
+  referenceLookupLoaded: false,
+  referenceLookupCursor: null,
+  referenceLookupQuery: "",
+  referenceLookupKind: "item",
+  referenceLookupFilters: {},
+  referenceLookupTarget: null,
 };
 
 async function studioFetch(path, options = {}) {
@@ -103,14 +117,191 @@ function dispositionFilename(disposition, fallback) {
 
 async function downloadApi(path, fallbackName = "download") {
   const { blob, disposition } = await apiBlob(path);
+  saveBlob(blob, dispositionFilename(disposition, fallbackName));
+}
+
+function saveBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = dispositionFilename(disposition, fallbackName);
+  anchor.download = filename;
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function setDraftField(sectionName, column, value) {
+  const section = $(`[data-draft-section="${sectionName}"]`, $("#manual-draft-form"));
+  const input = [...section.elements].find((element) => element.name === column);
+  if (input) input.value = value ?? "";
+}
+
+function addManualDraftLine(line = {}) {
+  const row = make("tr");
+  row.dataset.lookupDescription = line._description || "";
+  const values = {
+    "Transaction Number": line["Transaction Number"] ?? 1,
+    Item: line.Item ?? "",
+    UPC: line.UPC ?? "",
+    "Unit Cost": line["Unit Cost"] ?? "",
+    Quantity: line.Quantity ?? "",
+    "Unit Tax Code": line["Unit Tax Code"] ?? "",
+  };
+  DRAFT_DETAIL_COLUMNS.forEach((column) => {
+    const cell = make("td");
+    const input = make("input");
+    input.name = column;
+    input.value = values[column];
+    input.required = true;
+    if (column === "Transaction Number") { input.type = "number"; input.min = "1"; input.max = "1"; input.step = "1"; }
+    if (["Unit Cost", "Quantity"].includes(column)) {
+      input.type = "number";
+      input.step = "0.0001";
+      input.min = column === "Unit Cost" ? "0" : "0.0001";
+    }
+    input.addEventListener("input", updateManualDraftTotal);
+    cell.append(input);
+    row.append(cell);
+  });
+  const find = make("button", "line-lookup", "Find item");
+  find.type = "button";
+  find.addEventListener("click", () => beginLineReferenceLookup("draft", row));
+  row.children[1].append(find);
+  const action = make("td");
+  const remove = make("button", "remove-line", "×");
+  remove.type = "button";
+  remove.setAttribute("aria-label", "Remove draft detail row");
+  remove.addEventListener("click", () => {
+    if ($$("tr", $("#manual-draft-lines")).length === 1) return;
+    row.remove();
+    updateManualDraftTotal();
+  });
+  action.append(remove);
+  row.append(action);
+  $("#manual-draft-lines").append(row);
+  updateManualDraftTotal();
+}
+
+function updateManualDraftTotal() {
+  const total = $$("tr", $("#manual-draft-lines")).reduce((sum, row) => {
+    const cost = Number($('[name="Unit Cost"]', row).value);
+    const quantity = Number($('[name="Quantity"]', row).value);
+    return sum + (Number.isFinite(cost) && Number.isFinite(quantity) ? cost * quantity : 0);
+  }, 0);
+  $("#manual-draft-total").textContent = `Detail total: ${total.toFixed(4)}`;
+}
+
+function initializeManualDraft(job) {
+  const invoice = structuredClone(job.invoice || {});
+  const matches = job.validation?.matches || [];
+  setDraftField("Header", "Transaction Number", 1);
+  setDraftField("Header", "Document", invoice.number);
+  setDraftField("Header", "Supplier Site", invoice.site);
+  setDraftField("Header", "Order No", invoice.po);
+  setDraftField("Header", "Location", invoice.location);
+  setDraftField("Header", "Location Type", job.validation?.location_type);
+  setDraftField("Header", "Document Date", invoice.date);
+  setDraftField("Header", "Total Cost Ex Tax", invoice.net);
+  setDraftField("Header", "Tax Amount", invoice.tax);
+  setDraftField("Header", "Ref No. 1", "");
+  setDraftField("Header", "Ref No. 2", "");
+  setDraftField("Header", "Ref No. 3", "");
+  setDraftField("Header", "Comment", "DRAFT UNVALIDATED — manual entry");
+  setDraftField("Tax_Breakdown", "Transaction Number", 1);
+  setDraftField("Tax_Breakdown", "Tax Code", invoice.taxCode);
+  setDraftField("Tax_Breakdown", "Tax Basis", invoice.net);
+  $("#manual-draft-lines").replaceChildren();
+  (invoice.lines?.length ? invoice.lines : [{}]).forEach((line, index) => addManualDraftLine({
+    "Transaction Number": 1,
+    Item: matches[index]?.item || line.sku || "",
+    UPC: matches[index]?.gtin || line.gtin || "",
+    "Unit Cost": line.price ?? "",
+    Quantity: line.qty ?? "",
+    "Unit Tax Code": invoice.taxCode || "",
+    _description: line.description || "",
+  }));
+  $("#manual-draft-acknowledge").checked = false;
+  $("#manual-draft-error").hidden = true;
+}
+
+function openManualDraft() {
+  const job = app.currentJob;
+  if (!job) return;
+  if (app.manualDraftJobId !== job.id) {
+    app.manualDraftJobId = job.id;
+    initializeManualDraft(job);
+  }
+  $("#manual-draft-source-name").textContent = job.filename;
+  const source = $("#manual-draft-source-link");
+  if (app.documentJobId === job.id && app.documentUrl) {
+    source.href = app.documentUrl;
+    source.removeAttribute("aria-disabled");
+  } else {
+    source.removeAttribute("href");
+    source.setAttribute("aria-disabled", "true");
+  }
+  $("#manual-draft-dialog").showModal();
+}
+
+function draftSection(sectionName, columns) {
+  const section = $(`[data-draft-section="${sectionName}"]`, $("#manual-draft-form"));
+  return Object.fromEntries(columns.map((column) => {
+    const input = [...section.elements].find((element) => element.name === column);
+    return [column, column === "Transaction Number" ? Number(input.value) : input.value.trim()];
+  }));
+}
+
+function draftDetails() {
+  return $$("tr", $("#manual-draft-lines")).map((row) => Object.fromEntries(DRAFT_DETAIL_COLUMNS.map((column) => {
+    const input = [...row.querySelectorAll("input")].find((element) => element.name === column);
+    return [column, column === "Transaction Number" ? Number(input.value) : input.value.trim()];
+  })));
+}
+
+async function downloadManualDraft(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const error = $("#manual-draft-error");
+  error.hidden = true;
+  if (!form.checkValidity()) {
+    error.textContent = "Complete every required workbook field. The first missing or invalid value is highlighted.";
+    error.hidden = false;
+    form.reportValidity();
+    return;
+  }
+  const body = {
+    acknowledge_unvalidated: $("#manual-draft-acknowledge").checked,
+    Header: draftSection("Header", DRAFT_HEADER_COLUMNS),
+    Tax_Breakdown: draftSection("Tax_Breakdown", DRAFT_TAX_COLUMNS),
+    Details: draftDetails(),
+  };
+  const net = Number(body.Header["Total Cost Ex Tax"]);
+  const basis = Number(body.Tax_Breakdown["Tax Basis"]);
+  const detailTotal = body.Details.reduce((sum, row) => sum + Number(row["Unit Cost"]) * Number(row.Quantity), 0);
+  if (!Number.isFinite(net) || !Number.isFinite(basis) || !Number.isFinite(detailTotal) || net.toFixed(4) !== basis.toFixed(4) || net.toFixed(4) !== detailTotal.toFixed(4)) {
+    error.textContent = "Tax Basis and the detail Unit Cost × Quantity total must both equal Total Cost Ex Tax.";
+    error.hidden = false;
+    return;
+  }
+
+  const button = $("#download-manual-draft");
+  button.disabled = true;
+  button.textContent = "Preparing draft…";
+  try {
+    const response = await studioFetch(`/api/jobs/${encodeURIComponent(app.manualDraftJobId)}/draft`, { method: "POST", body });
+    if (!response.ok) throw await responseError(response);
+    const disposition = response.headers.get("content-disposition") || "";
+    saveBlob(await response.blob(), dispositionFilename(disposition, "Invoice_DRAFT_UNVALIDATED.xlsx"));
+    $("#manual-draft-dialog").close();
+    notify("Unvalidated draft downloaded. The invoice job and allocations were not changed.");
+  } catch (requestError) {
+    error.textContent = requestError.message;
+    error.hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = "Download DRAFT_UNVALIDATED.xlsx";
+  }
 }
 
 function notify(message, type = "success", duration = 4600) {
@@ -141,7 +332,7 @@ function humanize(value) {
     openai: "OpenAI",
     anthropic: "Anthropic",
     chatgpt: "ChatGPT",
-    claude_local: "Claude Code (local)",
+    claude_local: "Claude subscription",
   };
   if (names[value]) return names[value];
   return String(value || "").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -174,6 +365,7 @@ function navigate(sectionName) {
   });
   history.replaceState(null, "", `#${sectionName}`);
   $("#main-content").focus({ preventScroll: true });
+  if (sectionName === "references") ensureReferenceLookup().catch((error) => notify(error.message, "error"));
 }
 
 async function loadState({ preserveSelection = true } = {}) {
@@ -275,8 +467,53 @@ function clearSelectedJob() {
   $("#review-panel").hidden = true;
   if (app.documentUrl) URL.revokeObjectURL(app.documentUrl);
   app.documentUrl = null;
+  app.documentJobId = null;
   app.documentToken += 1;
-  clearInterval(app.pollTimer);
+}
+
+function plannedProcessingStages(job) {
+  const options = job.options || {};
+  const current = job.progress?.engine;
+  let stages;
+  if (options.engine === "auto" || !options.engine) stages = ["invoice2data", "paddleocr", "docling"];
+  else if (options.engine === "ai") stages = [];
+  else stages = [options.engine];
+
+  if (options.engine === "ai" || options.ai_fallback) stages.push(options.provider || "openai");
+  if (current && !stages.includes(current)) {
+    const aiIndex = stages.findIndex((stage) => ["openai", "anthropic", "chatgpt", "claude_local"].includes(stage));
+    stages.splice(aiIndex < 0 ? stages.length : aiIndex, 0, current);
+  }
+  return [...new Set(stages.filter(Boolean))];
+}
+
+function renderProcessingStages(job) {
+  const list = $("#processing-stages");
+  list.replaceChildren();
+  const stages = plannedProcessingStages(job);
+  const current = job.status === "processing" ? job.progress?.engine : null;
+  const currentIndex = current ? stages.indexOf(current) : -1;
+  stages.forEach((engine, index) => {
+    const isAI = ["openai", "anthropic", "chatgpt", "claude_local"].includes(engine);
+    let state = "next";
+    let stateLabel = index === 0 && job.status === "queued" ? "Starts first" : "Next if needed";
+    if (index === currentIndex) {
+      state = "active";
+      stateLabel = "Working now";
+    } else if (currentIndex > index) {
+      state = "complete";
+      stateLabel = "Checked";
+    }
+    if (isAI && !String(job.options?.model || "").trim()) stateLabel = "Needs a model to run";
+    const item = make("li", `processing-stage ${state}`);
+    const marker = make("span", "stage-marker", state === "complete" ? "✓" : String(index + 1));
+    marker.setAttribute("aria-hidden", "true");
+    const copy = make("span", "stage-copy");
+    const model = isAI && job.options?.model ? ` · ${job.options.model}` : "";
+    copy.append(make("strong", "", `${humanize(engine)}${model}`), make("small", "", stateLabel));
+    item.append(marker, copy);
+    list.append(item);
+  });
 }
 
 function renderSelectedJob(job) {
@@ -293,14 +530,37 @@ function renderSelectedJob(job) {
 
   const processing = ["queued", "processing"].includes(job.status);
   $("#processing-banner").hidden = !processing;
+  $("#processing-result").hidden = !processing;
+  $("#invoice-form").hidden = processing;
+  $(".review-controls").hidden = processing;
+  $("#completeness").hidden = processing;
+  $(".trace-card").hidden = processing;
   if (processing) {
-    $("#processing-title").textContent = job.status === "queued" ? "Waiting for an extraction slot…" : `${humanize(job.progress?.engine || "engine")} is reading the invoice…`;
-    $("#processing-detail").textContent = job.progress?.message || "The result will appear here when it is ready.";
+    const title = job.status === "queued" ? "Waiting for an extraction slot…" : `${humanize(job.progress?.engine || "engine")} is reading the invoice…`;
+    const detail = job.progress?.message || "The result will appear here when it is ready.";
+    $("#processing-title").textContent = title;
+    $("#processing-detail").textContent = detail;
+    $("#processing-result-title").textContent = title;
+    $("#processing-result-detail").textContent = detail;
+    renderProcessingStages(job);
+  }
+  const possiblePurchaseOrder = job.document_type_hint === "possible_purchase_order";
+  const extractionNote = String(job.extraction_note || (possiblePurchaseOrder
+    ? "The source appears to be a purchase order rather than an invoice. Check the document and enter a draft manually if you still need a workbook."
+    : "")).trim();
+  $("#extraction-note").hidden = processing || !extractionNote;
+  if (extractionNote) {
+    $("#extraction-note-title").textContent = possiblePurchaseOrder ? "This may be a purchase order" : "Extraction needs review";
+    $("#extraction-note-detail").textContent = extractionNote;
   }
   $("#job-error").hidden = !job.error;
   $("#job-error").textContent = job.error || "";
 
   renderDocument(job).catch((error) => notify(error.message, "error"));
+  if (processing) {
+    renderValidation(job);
+    return;
+  }
   renderInvoiceForm(job);
   renderValidation(job);
   renderTrace(job);
@@ -308,25 +568,38 @@ function renderSelectedJob(job) {
 }
 
 async function renderDocument(job) {
-  const token = ++app.documentToken;
-  const endpoint = `/api/jobs/${encodeURIComponent(job.id)}/document`;
-  $("#open-document").removeAttribute("href");
-  $("#download-original").removeAttribute("href");
-  const ext = (job.filename.split(".").pop() || "").toLowerCase();
-  const canPreview = ["pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"].includes(ext);
-  $("#document-frame").hidden = !canPreview;
-  $("#document-download-card").hidden = canPreview;
-  $("#document-frame").removeAttribute("src");
   const text = String(job.text || "").trim();
   $("#extracted-text").textContent = text;
   $("#extracted-text-wrap").hidden = !text;
-  const { blob } = await apiBlob(endpoint);
-  if (token !== app.documentToken || app.currentJob?.id !== job.id) return;
+  if (app.documentJobId === job.id) return;
+
+  const token = ++app.documentToken;
+  const endpoint = `/api/jobs/${encodeURIComponent(job.id)}/document`;
+  const ext = (job.filename.split(".").pop() || "").toLowerCase();
+  const isImage = ["png", "jpg", "jpeg", "webp", "bmp"].includes(ext);
+  const canPreview = ext === "pdf" || isImage;
+  app.documentJobId = job.id;
   if (app.documentUrl) URL.revokeObjectURL(app.documentUrl);
-  app.documentUrl = URL.createObjectURL(blob);
-  $("#open-document").href = app.documentUrl;
-  $("#download-original").href = app.documentUrl;
-  if (canPreview) $("#document-frame").src = app.documentUrl;
+  app.documentUrl = null;
+  $("#open-document").removeAttribute("href");
+  $("#download-original").removeAttribute("href");
+  $("#document-frame").hidden = ext !== "pdf";
+  $("#document-image").hidden = !isImage;
+  $("#document-download-card").hidden = canPreview;
+  $("#document-frame").removeAttribute("src");
+  $("#document-image").removeAttribute("src");
+  try {
+    const { blob } = await apiBlob(endpoint);
+    if (token !== app.documentToken || app.currentJob?.id !== job.id) return;
+    app.documentUrl = URL.createObjectURL(blob);
+    $("#open-document").href = app.documentUrl;
+    $("#download-original").href = app.documentUrl;
+    if (ext === "pdf") $("#document-frame").src = app.documentUrl;
+    if (isImage) $("#document-image").src = app.documentUrl;
+  } catch (error) {
+    if (token === app.documentToken && app.documentJobId === job.id) app.documentJobId = null;
+    throw error;
+  }
 }
 
 function renderInvoiceForm(job) {
@@ -372,6 +645,11 @@ function addLine(line = {}, disabled = false) {
   identity.append(lineInput("sku", line.sku, "Supplier SKU"), lineInput("gtin", line.gtin, "GTIN or barcode"));
   const description = make("td");
   description.append(lineInput("description", line.description, "Description"));
+  const find = make("button", "line-lookup", "Find item by description");
+  find.type = "button";
+  find.disabled = disabled;
+  find.addEventListener("click", () => beginLineReferenceLookup("review", row));
+  description.append(find);
   const qty = make("td"); qty.append(lineInput("qty", line.qty, "Quantity", "number"));
   const uom = make("td"); uom.append(lineInput("uom", line.uom, "Unit of measure"));
   const price = make("td"); price.append(lineInput("price", line.price, "Unit price", "number"));
@@ -394,6 +672,10 @@ function renderValidation(job) {
   const issues = job.validation?.issues || [];
   const summary = $("#validation-summary");
   summary.replaceChildren();
+  if (["queued", "processing"].includes(job.status)) {
+    summary.hidden = true;
+    return;
+  }
   if (!issues.length) {
     if (job.status === "ready" || job.status === "exported") {
       summary.hidden = false;
@@ -541,24 +823,74 @@ async function exportBatch() {
   }
 }
 
-function startPollingIfNeeded() {
-  clearInterval(app.pollTimer);
-  if (!app.currentJob || !["queued", "processing"].includes(app.currentJob.status)) return;
-  app.pollTimer = setInterval(async () => {
-    if (!app.currentJob) return;
-    try {
-      const job = await api(`/api/jobs/${encodeURIComponent(app.currentJob.id)}`);
-      app.currentJob = job;
-      replaceJobSummary(job);
-      renderSelectedJob(job);
-      if (!["queued", "processing"].includes(job.status)) {
-        clearInterval(app.pollTimer);
-        notify(job.status === "error" ? "Invoice processing needs attention." : "Invoice extraction finished.", job.status === "error" ? "error" : "success");
+function activeJobIds() {
+  return (app.state?.jobs || [])
+    .filter((job) => ["queued", "processing"].includes(job.status))
+    .map((job) => job.id);
+}
+
+async function pollActiveJobs() {
+  if (app.pollBusy) return;
+  const active = activeJobIds();
+  if (!active.length) {
+    clearInterval(app.pollTimer);
+    app.pollTimer = null;
+    return;
+  }
+
+  app.pollBusy = true;
+  const selectionToken = app.selectionToken;
+  const selectedId = app.selectedJobId;
+  const selectedWasProcessing = app.currentJob?.id === selectedId && ["queued", "processing"].includes(app.currentJob.status);
+  const ids = [];
+  if (selectedWasProcessing && active.includes(selectedId)) ids.push(selectedId);
+  const background = active.filter((id) => id !== selectedId);
+  for (let count = 0; count < Math.min(2, background.length); count += 1) {
+    ids.push(background[(app.pollCursor + count) % background.length]);
+  }
+  if (background.length) app.pollCursor = (app.pollCursor + Math.min(2, background.length)) % background.length;
+
+  try {
+    const responses = await Promise.allSettled(ids.map((id) => api(`/api/jobs/${encodeURIComponent(id)}`)));
+    let selectedResult = null;
+    let listChanged = false;
+    responses.forEach((result) => {
+      if (result.status !== "fulfilled") return;
+      const job = result.value;
+      const stateIndex = app.state.jobs.findIndex((entry) => entry.id === job.id);
+      if (stateIndex >= 0) {
+        const previous = app.state.jobs[stateIndex];
+        listChanged ||= previous.status !== job.status || previous.invoice?.number !== job.invoice?.number ||
+          previous.invoice?.supplier_name !== job.invoice?.supplier_name || previous.invoice?.seller !== job.invoice?.seller;
+        app.state.jobs[stateIndex] = { ...previous, ...job };
       }
-    } catch (_) {
-      clearInterval(app.pollTimer);
+      if (job.id === selectedId) selectedResult = job;
+    });
+    if (listChanged) renderJobs();
+
+    // A request started for one selection must never replace a document chosen
+    // while that request was in flight, or overwrite edits to a completed job.
+    if (selectedResult && app.selectionToken === selectionToken && app.selectedJobId === selectedId && selectedWasProcessing) {
+      const wasActive = ["queued", "processing"].includes(app.currentJob?.status);
+      app.currentJob = selectedResult;
+      renderSelectedJob(selectedResult);
+      if (wasActive && !["queued", "processing"].includes(selectedResult.status)) {
+        notify(selectedResult.status === "error" ? "Invoice processing needs attention." : "Invoice extraction finished.", selectedResult.status === "error" ? "error" : "success");
+      }
     }
-  }, 1400);
+  } finally {
+    app.pollBusy = false;
+    if (!activeJobIds().length) {
+      clearInterval(app.pollTimer);
+      app.pollTimer = null;
+    }
+  }
+}
+
+function startPollingIfNeeded() {
+  if (!activeJobIds().length) return;
+  if (app.pollTimer) return;
+  app.pollTimer = setInterval(pollActiveJobs, 1400);
 }
 
 function queueFiles(fileList) {
@@ -780,6 +1112,233 @@ function cancelPreflight() {
   if (pending?.kind === "retry" && !$("#retry-dialog").open) $("#retry-dialog").showModal();
 }
 
+function referenceValue(value) {
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function referenceRecordTitle(record) {
+  const candidateDescription = candidateValues(record, "description")[0];
+  if (candidateDescription) return candidateDescription;
+  const entries = Object.entries(record.data || {}).filter(([, value]) => referenceValue(value).trim());
+  const preferred = [
+    /product.*name|item.*name|description/i,
+    /sku|item.*code|product.*code/i,
+    /barcode|gtin|upc/i,
+    /po.*number|purchase.*order|\bpo\b/i,
+    /supplier|vendor/i,
+  ];
+  for (const pattern of preferred) {
+    const match = entries.find(([name]) => pattern.test(name));
+    if (match) return referenceValue(match[1]);
+  }
+  return entries.length ? referenceValue(entries[0][1]) : `${humanize(record.kind || "source")} record`;
+}
+
+function candidateValues(record, field) {
+  const values = record.candidate_fields?.[field];
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.map((value) => referenceValue(value).trim()).filter(Boolean))];
+}
+
+function beginLineReferenceLookup(mode, row) {
+  const isDraft = mode === "draft";
+  const value = (name) => $(`[name="${name}"]`, row)?.value.trim() || "";
+  const query = isDraft
+    ? row.dataset.lookupDescription || value("Item") || value("UPC")
+    : value("description") || value("sku") || value("gtin");
+  if (query.length < 2) {
+    notify("Enter a product description, item code or barcode before searching.", "error");
+    return;
+  }
+  app.referenceLookupTarget = { mode, row };
+  if (isDraft) $("#manual-draft-dialog").close();
+  navigate("references");
+  $("#reference-lookup-kind").value = "item";
+  $("#reference-lookup-query").value = query.slice(0, 100);
+  $("#reference-lookup-site").value = "";
+  $("#reference-lookup-supplier").value = "";
+  $("#reference-lookup-po").value = "";
+  searchReferenceLookup();
+}
+
+function candidateSelect(record, field, labelText) {
+  const label = make("label");
+  label.append(make("span", "", labelText));
+  const select = make("select");
+  select.dataset.candidateField = field;
+  const values = candidateValues(record, field);
+  if (values.length !== 1) {
+    const placeholder = make("option", "", values.length ? "Choose a value" : "Not available");
+    placeholder.value = "";
+    select.append(placeholder);
+  }
+  values.forEach((value) => {
+    const columns = [...new Set((record.candidate_field_sources?.[field] || [])
+      .filter((source) => referenceValue(source?.value).trim() === value)
+      .map((source) => referenceValue(source?.column).trim())
+      .filter(Boolean))];
+    const option = make("option", "", columns.length ? `${columns.join(" / ")}: ${value}` : value);
+    option.value = value;
+    select.append(option);
+  });
+  if (values.length === 1) select.value = values[0];
+  select.disabled = !values.length;
+  label.append(select);
+  return label;
+}
+
+function applyReferenceCandidate(action) {
+  const target = app.referenceLookupTarget;
+  if (!target?.row?.isConnected) {
+    notify("That invoice line is no longer available. Open it and search again.", "error");
+    app.referenceLookupTarget = null;
+    return;
+  }
+  const selected = Object.fromEntries($$("select[data-candidate-field]", action).map((select) => [select.dataset.candidateField, select.value]));
+  if (!selected.sku && !selected.gtin && !selected.uom) return;
+  const names = target.mode === "draft" ? { sku: "Item", gtin: "UPC" } : { sku: "sku", gtin: "gtin", uom: "uom" };
+  Object.entries(names).forEach(([field, inputName]) => {
+    if (selected[field]) $(`[name="${inputName}"]`, target.row).value = selected[field];
+  });
+  const mode = target.mode;
+  app.referenceLookupTarget = null;
+  if (mode === "draft") $("#manual-draft-dialog").showModal();
+  else navigate("workspace");
+  notify("Candidate values copied for review. They are not approved until you verify and save them.");
+}
+
+function referenceCandidateAction(record) {
+  if (!app.referenceLookupTarget || !record.candidate_fields) return null;
+  const action = make("div", "reference-candidate-action");
+  const contextValues = [
+    ["description", "Description"], ["pack", "Pack"], ["supplier", "Supplier"], ["site", "Site"], ["po", "PO"],
+  ].flatMap(([field, label]) => {
+    const values = candidateValues(record, field);
+    return values.length ? [`${label}: ${values.join(" / ")}`] : [];
+  });
+  if (contextValues.length) action.append(make("p", "reference-candidate-context", contextValues.join(" · ")));
+  action.append(candidateSelect(record, "sku", "Item code"), candidateSelect(record, "gtin", "Barcode / GTIN"));
+  if (app.referenceLookupTarget.mode === "review") action.append(candidateSelect(record, "uom", "Unit of measure"));
+  const use = make("button", "button button-secondary", "Use selected item");
+  use.type = "button";
+  const update = () => { use.disabled = !$("select[data-candidate-field]:not(:disabled)", action) || !$$('select[data-candidate-field]', action).some((select) => select.value); };
+  action.addEventListener("change", update);
+  use.addEventListener("click", () => applyReferenceCandidate(action));
+  action.append(use);
+  update();
+  return action;
+}
+
+function renderReferenceRecord(record) {
+  const details = make("details", "reference-result");
+  const summary = make("summary");
+  const title = make("span", "reference-result-title");
+  title.append(make("strong", "", referenceRecordTitle(record)));
+  const match = record.match || {};
+  const matchBasis = match.basis ?? record.match_basis;
+  const basis = matchBasis ? `Matched by ${Array.isArray(matchBasis) ? matchBasis.map(referenceValue).join(", ") : referenceValue(matchBasis)}` : "Candidate source row";
+  title.append(make("small", "", basis));
+  const provenance = [record.source_sheet, record.source_row ? `row ${record.source_row}` : "", record.source_hash ? `source ${String(record.source_hash).slice(0, 10)}` : ""].filter(Boolean).join(" · ");
+  const meta = make("span", "reference-result-meta", provenance);
+  const score = match.score ?? record.score;
+  if (score !== undefined && score !== null) meta.append(make("small", "", ` · score ${score}`));
+  summary.append(title, meta);
+  details.append(summary);
+
+  const body = make("div", "reference-result-body");
+  const candidateAction = referenceCandidateAction(record);
+  if (candidateAction) body.append(candidateAction);
+  const flags = Array.isArray(record.flags) ? record.flags : [];
+  if (flags.length) {
+    const flagList = make("div", "reference-result-flags");
+    flags.forEach((flag) => flagList.append(make("span", "", referenceValue(flag))));
+    body.append(flagList);
+  }
+  const data = make("dl", "reference-result-data");
+  Object.entries(record.data || {}).forEach(([name, value]) => {
+    data.append(make("dt", "", name), make("dd", "", referenceValue(value) || "—"));
+  });
+  body.append(data);
+  details.append(body);
+  return details;
+}
+
+async function ensureReferenceLookup() {
+  if (app.referenceLookupLoaded) return;
+  app.referenceLookupLoaded = true;
+  try {
+    const summary = await api("/api/reference-lookup/summary");
+    const container = $("#reference-source-summary");
+    container.replaceChildren();
+    const sources = Array.isArray(summary.sources) ? summary.sources : [];
+    if (!sources.length) container.append(make("span", "", "No staged source evidence is available yet."));
+    sources.forEach((source) => {
+      if (source.counts && typeof source.counts === "object") {
+        const counts = Object.entries(source.counts)
+          .filter(([kind, count]) => kind !== "total" && Number.isFinite(Number(count)))
+          .map(([kind, count]) => `${Number(count).toLocaleString()} ${humanize(kind).toLowerCase()} rows`)
+          .join(" · ");
+        container.append(make("span", "", `${source.id || "Staged source"}${counts ? ` · ${counts}` : ""}`));
+      } else {
+        const count = Number.isFinite(Number(source.count)) ? `${Number(source.count).toLocaleString()} records` : "record count unavailable";
+        const hash = source.hash ? ` · ${String(source.hash).slice(0, 10)}` : "";
+        container.append(make("span", "", `${humanize(source.kind || "source")} · ${count}${hash}`));
+      }
+    });
+    if (summary.notice) {
+      $("#reference-lookup-notice").textContent = summary.notice;
+      $("#reference-lookup-notice").hidden = false;
+    }
+  } catch (error) {
+    app.referenceLookupLoaded = false;
+    $("#reference-source-summary").replaceChildren(make("span", "", "Staged source evidence could not be loaded."));
+    throw error;
+  }
+}
+
+async function searchReferenceLookup({ append = false } = {}) {
+  const query = (append ? app.referenceLookupQuery : $("#reference-lookup-query").value.trim());
+  const kind = append ? app.referenceLookupKind : $("#reference-lookup-kind").value;
+  const filters = append ? app.referenceLookupFilters : {
+    site: $("#reference-lookup-site").value.trim(),
+    supplier: $("#reference-lookup-supplier").value.trim(),
+    po: $("#reference-lookup-po").value.trim(),
+  };
+  if (query.length < 2) {
+    $("#reference-lookup-query").focus();
+    return;
+  }
+  const button = append ? $("#reference-lookup-more") : $("#reference-lookup-submit");
+  button.disabled = true;
+  const originalLabel = button.textContent;
+  button.textContent = append ? "Loading…" : "Searching…";
+  try {
+    const params = new URLSearchParams({ kind, q: query, limit: "25" });
+    Object.entries(filters).forEach(([name, value]) => { if (value) params.set(name, value); });
+    if (append && app.referenceLookupCursor) params.set("cursor", app.referenceLookupCursor);
+    const response = await api(`/api/reference-lookup/search?${params}`);
+    const results = $("#reference-lookup-results");
+    if (!append) results.replaceChildren();
+    const records = Array.isArray(response.records) ? response.records : [];
+    records.forEach((record) => results.append(renderReferenceRecord(record)));
+    if (!append && !records.length) results.append(make("p", "table-empty", "No staged source rows matched this search."));
+    app.referenceLookupQuery = query;
+    app.referenceLookupKind = kind;
+    app.referenceLookupFilters = filters;
+    app.referenceLookupCursor = response.next_cursor || null;
+    $("#reference-lookup-more").hidden = !app.referenceLookupCursor;
+    $("#reference-lookup-notice").textContent = response.notice || "Candidate source rows are evidence only and require confirmation.";
+    $("#reference-lookup-notice").hidden = false;
+  } catch (error) {
+    $("#reference-lookup-notice").textContent = error.message;
+    $("#reference-lookup-notice").hidden = false;
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
 function renderReferences() {
   const refs = app.state?.references;
   $("#reference-status").textContent = refs ? `Version ${String(refs.version || "loaded").slice(0, 10)}` : "Not loaded";
@@ -823,7 +1382,7 @@ function renderConnections() {
   Object.entries(connections).forEach(([provider, connected]) => {
     const badge = $(`[data-connection-state="${provider}"]`);
     if (!badge) return;
-    badge.textContent = connected ? (provider === "claude_local" ? "Detected" : "Connected") : (provider === "claude_local" ? "Not detected" : "Not connected");
+    badge.textContent = connected ? "Connected" : "Not connected";
     badge.classList.toggle("connected", connected);
   });
   const account = $("#chatgpt-account");
@@ -834,31 +1393,20 @@ function renderConnections() {
     option.selected = entry.id === app.state.active_account;
     account.add(option);
   });
-  $("#remove-chatgpt").disabled = !account.value;
+  const hasAccount = Boolean(account.value);
+  $("#remove-chatgpt").disabled = !hasAccount;
+  $("#remove-chatgpt-cloud").disabled = !hasAccount;
+  $("#export-chatgpt").disabled = !hasAccount;
   const cloud = app.authMode === "cloud";
-  if (cloud) {
-    const badge = $('[data-connection-state="chatgpt"]');
-    badge.textContent = "Local mode only";
-    badge.classList.remove("connected");
-    $("#connect-chatgpt").disabled = true;
-    $("#connect-chatgpt").textContent = "Local mode only";
-    $("#remove-chatgpt").disabled = true;
-    $("#chatgpt-account").disabled = true;
-    const claude = $('[data-connection-state="claude_local"]');
-    claude.textContent = "Local mode only";
-    claude.classList.remove("connected");
-  } else {
-    $("#connect-chatgpt").disabled = false;
-    $("#connect-chatgpt").textContent = "Connect ChatGPT";
-    $("#chatgpt-account").disabled = false;
-  }
+  $$('[data-mode-only]').forEach((element) => { element.hidden = element.dataset.modeOnly !== (cloud ? "cloud" : "local"); });
+  $("#connect-chatgpt").disabled = cloud;
+  $("#chatgpt-account").disabled = false;
   ["settings-provider", "upload-provider", "retry-provider"].forEach((id) => {
     const select = $(`#${id}`);
     ["chatgpt", "claude_local"].forEach((value) => {
       const option = $(`option[value="${value}"]`, select);
-      if (option) option.disabled = cloud;
+      if (option) option.disabled = false;
     });
-    if (cloud && ["chatgpt", "claude_local"].includes(select.value)) select.value = "openai";
   });
 }
 
@@ -950,9 +1498,69 @@ async function connectChatGPT() {
   } catch (error) { notify(error.message, "error", 7000); }
 }
 
+async function exportChatGPT() {
+  const id = $("#chatgpt-account").value;
+  if (!id) return;
+  const button = $("#export-chatgpt");
+  button.disabled = true;
+  try {
+    const response = await studioFetch("/api/chatgpt/export", { method: "POST", body: { id } });
+    if (!response.ok) throw await responseError(response);
+    const disposition = response.headers.get("content-disposition") || "";
+    saveBlob(await response.blob(), dispositionFilename(disposition, "invoice-studio-chatgpt-credentials.json"));
+    await loadState();
+    notify("ChatGPT connection moved out of this installation. Import the sensitive file into your hosted workspace, then delete it.");
+  } catch (error) { notify(error.message, "error", 7000); }
+  finally { button.disabled = false; }
+}
+
+async function importChatGPT(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const file = form.elements.bundle_file.files[0];
+  const raw = file ? await file.text() : form.elements.bundle_json.value.trim();
+  let bundle;
+  try { bundle = JSON.parse(raw); }
+  catch (_) { notify("Choose or paste a valid Invoice Studio registration JSON file.", "error"); return; }
+  const button = $('button[type="submit"]', form);
+  button.disabled = true;
+  try {
+    await api("/api/chatgpt/import", { method: "POST", body: { bundle } });
+    form.reset();
+    await loadState();
+    notify("ChatGPT subscription registration imported and stored securely.");
+  } catch (error) { notify(error.message, "error", 7000); }
+  finally { button.disabled = false; }
+}
+
+async function importClaudeSubscription(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const setupToken = form.elements.setup_token.value;
+  form.elements.setup_token.value = "";
+  const button = $('button[type="submit"]', form);
+  button.disabled = true;
+  try {
+    await api("/api/subscriptions/claude/import", { method: "POST", body: { setup_token: setupToken } });
+    await loadState();
+    notify("Claude subscription token stored securely. The connection is ready when the Claude CLI is installed.");
+  } catch (error) { notify(error.message, "error", 7000); }
+  finally { button.disabled = false; }
+}
+
+async function removeClaudeSubscription() {
+  try {
+    await api("/api/subscriptions/claude", { method: "DELETE" });
+    await loadState();
+    notify("Claude subscription connection removed.");
+  } catch (error) { notify(error.message, "error"); }
+}
+
 async function selectChatGPTAccount() {
   const id = $("#chatgpt-account").value;
   $("#remove-chatgpt").disabled = !id;
+  $("#remove-chatgpt-cloud").disabled = !id;
+  $("#export-chatgpt").disabled = !id;
   if (!id) return;
   try { await api("/api/chatgpt/select", { method: "POST", body: { id } }); await loadState(); notify("Active ChatGPT account changed."); }
   catch (error) { notify(error.message, "error"); }
@@ -1038,6 +1646,13 @@ function bindEvents() {
   $("#preflight-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closePreflight(); });
   $("#cancel-preflight").addEventListener("click", closePreflight);
   $("#cancel-preflight-x").addEventListener("click", closePreflight);
+  $$('[data-open-manual-draft]').forEach((button) => button.addEventListener("click", openManualDraft));
+  $("#add-manual-draft-line").addEventListener("click", () => addManualDraftLine());
+  $("#manual-draft-form").addEventListener("submit", downloadManualDraft);
+  const closeManualDraft = () => $("#manual-draft-dialog").close();
+  $("#cancel-manual-draft").addEventListener("click", closeManualDraft);
+  $("#close-manual-draft-x").addEventListener("click", closeManualDraft);
+  $("#manual-draft-dialog").addEventListener("cancel", (event) => { event.preventDefault(); closeManualDraft(); });
 
   $(".trace-card").addEventListener("toggle", (event) => { if (event.currentTarget.open) loadAudit(); });
   $("#reference-file").addEventListener("change", (event) => { $("#reference-file-name").textContent = event.target.files[0]?.name || "No file chosen"; $("#upload-reference").disabled = !event.target.files[0]; });
@@ -1049,6 +1664,8 @@ function bindEvents() {
     try { await api("/api/references/demo", { method: "POST", body: {} }); await loadState(); notify("Synthetic reference data loaded. It is for demonstration only."); }
     catch (error) { notify(error.message, "error"); }
   });
+  $("#reference-lookup-form").addEventListener("submit", (event) => { event.preventDefault(); searchReferenceLookup(); });
+  $("#reference-lookup-more").addEventListener("click", () => searchReferenceLookup({ append: true }));
   $("#template-file").addEventListener("change", (event) => { $("#template-file-name").textContent = event.target.files[0]?.name || "No file chosen"; $("#upload-template").disabled = !event.target.files[0]; });
   $("#upload-template").addEventListener("click", async () => {
     try { await importFile($("#template-file"), "/api/templates", "Supplier template registered."); $("#template-file-name").textContent = "No file chosen"; $("#upload-template").disabled = true; }
@@ -1063,8 +1680,13 @@ function bindEvents() {
     $(".remove-connection", form).addEventListener("click", () => removeApiConnection(form.dataset.provider));
   });
   $("#connect-chatgpt").addEventListener("click", connectChatGPT);
+  $("#export-chatgpt").addEventListener("click", exportChatGPT);
+  $("#chatgpt-import-form").addEventListener("submit", importChatGPT);
   $("#chatgpt-account").addEventListener("change", selectChatGPTAccount);
   $("#remove-chatgpt").addEventListener("click", removeChatGPT);
+  $("#remove-chatgpt-cloud").addEventListener("click", removeChatGPT);
+  $("#claude-subscription-form").addEventListener("submit", importClaudeSubscription);
+  $("#remove-claude-subscription").addEventListener("click", removeClaudeSubscription);
   $$('[data-api-download]').forEach((link) => link.addEventListener("click", async (event) => {
     event.preventDefault();
     try { await downloadApi(new URL(link.href).pathname, link.dataset.apiDownload || "download"); }
@@ -1249,6 +1871,7 @@ async function signOutCloud() {
   app.sessionVerified = false;
   app.sessionUser = null;
   clearInterval(app.pollTimer);
+  app.pollTimer = null;
   clearSelectedJob();
   $("#cloud-user").hidden = true;
   showAuthGate({ message: "Signed out. Use an approved account to continue.", google: app.authProviders.includes("google"), password: app.authProviders.includes("password") });
