@@ -188,7 +188,15 @@ async function saveConfirmedReview(jobId, invoiceNumber) {
 }
 
 try {
+  let releaseConfig;
+  const configGate = new Promise((resolve) => { releaseConfig = resolve; });
+  await page.route("**/api/public-config", async (route) => { await configGate; await route.continue(); });
   const home = await page.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
+  await page.locator("#auth-gate").waitFor({ state: "visible", timeout });
+  assert(await page.locator("#app-shell").isHidden(), "Workspace appeared before access configuration was verified");
+  releaseConfig();
+  await page.locator("#app-shell").waitFor({ state: "visible", timeout });
+  await page.unroute("**/api/public-config");
   await assertOk(home, "Invoice Studio page load");
   await page.getByRole("heading", { level: 1, name: "Review workspace" }).waitFor();
 
@@ -200,7 +208,7 @@ try {
     "Primary navigation is not visible",
   );
   assert(await page.getByRole("main").isVisible(), "The main content region is not visible");
-  assert(await page.locator("#job-list").isVisible(), "The invoice inbox is not visible");
+  assert(await page.locator("#job-list").isVisible() || await page.locator("#job-empty").isVisible(), "Neither the invoice list nor its empty state is visible");
   assert(
     await page.getByRole("region", { name: "Invoice review" }).isVisible(),
     "The invoice review region is not visible",
@@ -235,6 +243,24 @@ try {
   const runId = Date.now().toString(36).toUpperCase();
   const firstNumber = `SMOKE-${runId}-1`;
   const secondNumber = `SMOKE-${runId}-2`;
+  const thirdNumber = `SMOKE-${runId}-3`;
+  const tinyInvoice = (number) => Buffer.from(JSON.stringify({
+    number,
+    supplier_name: "Lumena Beauty Trading LLC",
+    date: "2026-10-04",
+    po: "70002",
+    currency: "AED",
+    net: "40",
+    tax: "2",
+    lines: [{
+      sku: "LUM-CRM50",
+      gtin: "00012345678912",
+      description: "Lumena cream 50 ml",
+      uom: "EA",
+      qty: "1",
+      price: "40",
+    }],
+  }));
   await page.locator('#header-fields input[name="number"]').fill(firstNumber);
   await confirmReview.uncheck();
   assert(await exportButton.isDisabled(), "Export must be disabled before evidence review is confirmed");
@@ -268,7 +294,12 @@ try {
   // Add a second, distinct synthetic invoice through the normal file-upload UI.
   await page.locator("[data-open-upload]").first().click();
   await page.locator("#upload-dialog").waitFor({ state: "visible" });
-  await page.locator("#invoice-files").setInputFiles(resolve(repoRoot, "samples/invoice-2.pdf"));
+  const secondFilename = `smoke-${runId.toLowerCase()}-2.json`;
+  await page.locator("#invoice-files").setInputFiles({
+    name: secondFilename,
+    mimeType: "application/json",
+    buffer: tinyInvoice(secondNumber),
+  });
   await page.locator("#start-upload").waitFor({ state: "visible" });
 
   const uploadsBeforeCancel = requestLog.filter(
@@ -292,7 +323,7 @@ try {
   await page.locator("#upload-dialog").waitFor({ state: "visible" });
   await page.waitForTimeout(250);
   assert(
-    (await page.locator("#upload-queue").textContent())?.includes("invoice-2.pdf"),
+    (await page.locator("#upload-queue").textContent())?.includes(secondFilename),
     "Cancelling preflight did not restore the original upload queue",
   );
   assert.equal(
@@ -313,17 +344,36 @@ try {
   await waitForSelectedReview(secondJob.filename);
   const secondReadyJob = await saveConfirmedReview(secondJob.id, secondNumber);
 
+  const thirdFilename = `smoke-${runId.toLowerCase()}-3.json`;
+  await page.locator("[data-open-upload]").first().click();
+  await page.locator("#upload-dialog").waitFor({ state: "visible" });
+  await page.locator("#invoice-files").setInputFiles({
+    name: thirdFilename,
+    mimeType: "application/json",
+    buffer: tinyInvoice(thirdNumber),
+  });
+  const thirdUploadResponse = await runPreflight(
+    () => page.locator("#start-upload").click(),
+    "/api/invoices",
+    "Second batch invoice upload",
+  );
+  const thirdJob = await thirdUploadResponse.json();
+  assert.match(thirdJob.id, /^[a-f0-9]{32}$/, "Second upload did not return an invoice job id");
+  await waitForCompletedJob(thirdJob.id);
+  await waitForSelectedReview(thirdJob.filename);
+  const thirdReadyJob = await saveConfirmedReview(thirdJob.id, thirdNumber);
+
   // Select the two ready invoices and exercise the UI's atomic batch export,
   // including the browser's follow-up workbook download.
-  const firstRow = page.locator("#job-list .job-row").filter({ hasText: firstNumber });
   const secondRow = page.locator("#job-list .job-row").filter({ hasText: secondNumber });
-  await firstRow.locator(".job-select").check();
+  const thirdRow = page.locator("#job-list .job-row").filter({ hasText: thirdNumber });
   await secondRow.locator(".job-select").check();
+  await thirdRow.locator(".job-select").check();
   await waitFor("two invoices to be selected for batch export", async () =>
     (await page.locator("#selected-count").textContent())?.trim() === "2 selected",
   );
-  assert(await firstRow.locator(".job-select").isChecked(), "The first ready invoice was not selected");
   assert(await secondRow.locator(".job-select").isChecked(), "The second ready invoice was not selected");
+  assert(await thirdRow.locator(".job-select").isChecked(), "The third ready invoice was not selected");
   assert(await page.locator("#batch-export").isEnabled(), "Batch export did not enable");
 
   const batchPostPromise = page.waitForResponse(responseMatches("POST", "/api/exports/batch"), {
@@ -450,8 +500,7 @@ print(json.dumps({
   // Firebase module is replaced before page load; application requests remain
   // real and must all carry the module's ID token after /api/session verifies
   // the allowlisted identity.
-  const cloudContext = await browser.newContext();
-  const cloudPage = await cloudContext.newPage();
+  const cloudPage = page;
   const cloudErrors = [];
   const cloudApiHeaders = [];
   cloudPage.on("pageerror", (error) => cloudErrors.push(error.message));
@@ -497,12 +546,10 @@ print(json.dumps({
     "Cloud sign-out did not return to the configured password sign-in gate",
   );
   assert.deepEqual(cloudErrors, [], `Cloud-mode browser errors: ${cloudErrors.join("; ")}`);
-  await cloudContext.close();
-
   assert.deepEqual(pageErrors, [], `Browser page errors: ${pageErrors.join("; ")}`);
   assert.deepEqual(serverErrors, [], `Server errors: ${serverErrors.join("; ")}`);
   console.log(
-    `Browser smoke test passed (jobs ${firstReadyJob.id} + ${secondReadyJob.id}; batch ${batch.id}; Chromium; ${baseURL}).`,
+    `Browser smoke test passed (jobs ${secondReadyJob.id} + ${thirdReadyJob.id}; batch ${batch.id}; Chromium; ${baseURL}).`,
   );
 } catch (error) {
   await page

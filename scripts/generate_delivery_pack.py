@@ -71,7 +71,7 @@ def box(slide,x,y,w,h,text,size=22,color=ink,bold=False,fill=None):
 
 def slide(title,kicker='INVOICE STUDIO / DECISION PACK'):
     s=prs.slides.add_slide(prs.slide_layouts[6]);s.background.fill.solid();s.background.fill.fore_color.rgb=RGBColor.from_string(bg)
-    box(s,.6,.3,12,.3,kicker,11,teal,True);box(s,.6,.95,12,1.0,title,32,navy,True)
+    box(s,.6,.3,12,.3,kicker,11,teal,True);box(s,.6,.95,12,1.3,title,32,navy,True)
     box(s,.6,7.02,11,.3,'4 OCT 2026  •  BUILD EVIDENCE AND PROPOSED NEXT STAGES',9,muted)
     box(s,12,6.95,.6,.35,str(len(prs.slides)).zfill(2),12,teal,True)
     return s
@@ -80,7 +80,7 @@ def cards(title,items,footer=None):
     s=slide(title);n=len(items);w=11.9/n
     for i,(head,body) in enumerate(items):
         x=.65+i*(w+.03);box(s,x,2.3,w-.15,3.8,'',fill=white)
-        box(s,x+.15,2.52,w-.45,.7,head,22,teal,True);box(s,x+.15,3.35,w-.45,2.4,body,19,ink)
+        box(s,x+.15,2.52,w-.45,1.05,head,21,teal,True);box(s,x+.15,3.7,w-.45,2.2,body,19,ink)
     if footer:box(s,.7,6.35,11.8,.45,footer,14,muted)
     return s
 s=slide('From supplier invoice\nto checked Excel','INV STUDIO / SLT PROPOSAL AND WORKING MVP')

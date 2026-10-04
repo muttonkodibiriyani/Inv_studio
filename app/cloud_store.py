@@ -65,7 +65,7 @@ def _default_connect(database_url):
         import psycopg
     except ImportError:
         raise RuntimeError("Cloud persistence requires the psycopg package") from None
-    return psycopg.connect(database_url)
+    return psycopg.connect(database_url,connect_timeout=20)
 
 
 def _default_storage_client():

@@ -68,7 +68,7 @@ async function studioFetch(path, options = {}) {
   try {
     return await fetch(path, config);
   } catch (_) {
-    throw new Error("Invoice Studio could not reach the local server.");
+    throw new Error("Invoice Studio could not reach the server.");
   }
 }
 
