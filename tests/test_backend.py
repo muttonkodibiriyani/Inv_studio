@@ -663,3 +663,15 @@ def test_damaged_reference_workbook_returns_safe_client_error(api_client):
     assert response.json() == {
         "detail": "Reference workbook is damaged or is not a valid .xlsx file"
     }
+
+
+def test_restart_recovers_jobs_older_than_visible_history(tmp_path):
+    from app.store import Store
+    from app.main import create_app
+    store=Store(tmp_path)
+    store.job("old-active",{"id":"old-active","status":"processing"})
+    for n in range(205):store.job(str(n),{"id":str(n),"status":"review"})
+    assert not any(x["id"]=="old-active" for x in store.jobs())
+    app=create_app(tmp_path)
+    assert app.state.store.job("old-active")["status"]=="error"
+    app.state.pool.shutdown(wait=True)

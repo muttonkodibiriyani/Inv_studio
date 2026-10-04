@@ -101,9 +101,18 @@ def paddle(path,language):
     return "\n".join(text),boxes
 
 
-def docling(path):
-    from docling.document_converter import DocumentConverter
-    result=DocumentConverter().convert(path)
+def docling(path,language="en"):
+    from docling.document_converter import DocumentConverter, PdfFormatOption, ImageFormatOption
+    from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+    cache=Path.home()/".cache"/"inv-studio"/"rapidocr"
+    cache.mkdir(parents=True,exist_ok=True)
+    options=PdfPipelineOptions()
+    options.ocr_options=RapidOcrOptions(backend="torch",lang=["ch" if language=="ch" else "iso:"+language],
+        rapidocr_params={"Global.model_root_dir":cache})
+    converter=DocumentConverter(format_options={InputFormat.PDF:PdfFormatOption(pipeline_options=options),
+        InputFormat.IMAGE:ImageFormatOption(pipeline_options=options)})
+    result=converter.convert(path)
     doc=result.document
     boxes=[]
     for item,_ in doc.iterate_items():
@@ -121,7 +130,7 @@ def main():
     try:
         if args.engine=="invoice2data":text,boxes=digital(args.file)
         elif args.engine=="paddleocr":text,boxes=paddle(args.file,args.language)
-        else:text,boxes=docling(args.file)
+        else:text,boxes=docling(args.file,args.language)
         if args.file.suffix.lower()==".json":
             from .models import Invoice
             parsed=Invoice.model_validate_json(text).model_dump(mode="json")

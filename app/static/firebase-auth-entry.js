@@ -4,6 +4,8 @@ import {
   getAuth,
   onAuthStateChanged,
   sendPasswordResetEmail,
+  sendEmailVerification,
+  reload,
   signInWithEmailAndPassword,
   signInWithPopup,
   signOut,
@@ -89,6 +91,18 @@ async function resetPassword(email) {
   await sendPasswordResetEmail(auth, email);
 }
 
+async function sendVerification() {
+  if (!currentUser) throw new Error("Sign in first.");
+  await sendEmailVerification(currentUser);
+}
+
+async function refreshIdentity() {
+  if (!currentUser) throw new Error("Sign in first.");
+  await reload(currentUser);
+  await currentUser.getIdToken(true);
+  return currentUser;
+}
+
 async function signOutUser() {
   if (auth) await signOut(auth);
   currentUser = null;
@@ -100,6 +114,8 @@ window.InvoiceStudioAuth = {
   signInGoogle,
   signInPassword,
   resetPassword,
+  sendVerification,
+  refreshIdentity,
   signOut: signOutUser,
   currentUser: () => currentUser,
 };

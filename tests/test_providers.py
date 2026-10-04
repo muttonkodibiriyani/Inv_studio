@@ -379,3 +379,19 @@ def test_oauth_refresh_rejects_loss_of_direct_usage_scope(store, monkeypatch):
 
     with pytest.raises(ValueError, match="permission is no longer granted"):
         auth.token()
+
+
+def test_local_reader_does_not_inherit_cloud_database_or_vault_credentials(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from app import engines
+    (tmp_path/"work").mkdir()
+    for key in ("INV_STUDIO_DATABASE_URL","INV_STUDIO_VAULT_KEY","GOOGLE_APPLICATION_CREDENTIALS","OTHER_SECRET"):
+        monkeypatch.setenv(key,"synthetic-private-marker")
+    def reader(command,**kwargs):
+        assert "synthetic-private-marker" not in kwargs["env"].values()
+        assert kwargs["env"]["OMP_NUM_THREADS"]=="2"
+        output=Path(command[command.index("--output")+1])
+        output.write_text(json.dumps({"text":"synthetic","boxes":[],"invoice":None}))
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(engines.subprocess,"run",reader)
+    assert engines.local_read("invoice2data",tmp_path/"invoice.pdf",tmp_path)["text"]=="synthetic"

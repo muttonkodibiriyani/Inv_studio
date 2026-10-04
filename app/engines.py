@@ -47,7 +47,10 @@ def local_read(engine,path,root,language="en"):
     cmd=[sys.executable,"-m","app.ocr_worker","--engine",engine,"--file",str(path),"--output",str(output),
          "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language]
     # Workers receive runtime paths, not the application's API keys or provider tokens.
-    env={k:v for k,v in os.environ.items() if not any(x in k.upper() for x in ("TOKEN","SECRET","API_KEY","PASSWORD"))}
+    allowed_env={"PATH","HOME","LANG","LC_ALL","LD_LIBRARY_PATH","SSL_CERT_FILE","SSL_CERT_DIR",
+                 "REQUESTS_CA_BUNDLE","TMPDIR","TMP","TEMP","XDG_CACHE_HOME","HF_HOME",
+                 "HF_HUB_OFFLINE","HF_HUB_DISABLE_TELEMETRY","DO_NOT_TRACK","PADDLE_PDX_CACHE_HOME"}
+    env={k:v for k,v in os.environ.items() if k in allowed_env}
     env["OMP_NUM_THREADS"]="2"
     try:
         proc=subprocess.run(cmd,capture_output=True,text=True,timeout=int(os.getenv("INV_ENGINE_TIMEOUT","240")),env=env)

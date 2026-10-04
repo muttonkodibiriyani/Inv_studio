@@ -25,9 +25,10 @@ def warm(engine,source,work):
         "--templates",str(ROOT/"app/templates"),
         "--language","en",
     ]
-    result=subprocess.run(command,cwd=ROOT,text=True,capture_output=True)
+    result=subprocess.run(command,cwd=ROOT,text=True,capture_output=True,timeout=600)
     if result.returncode or not output.exists():
         detail=result.stderr.strip()[-2000:] or "worker produced no parse output"
+        if output.exists():detail=json.loads(output.read_text()).get("error","Unknown error")+": "+detail
         raise RuntimeError(f"{engine} warm-up failed: {detail}")
     try:
         payload=json.loads(output.read_text())

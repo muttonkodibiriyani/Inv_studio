@@ -4,6 +4,7 @@ FROM python:3.12.12-slim-bookworm@sha256:593bd06efe90efa80dc4eee3948be7c0fde4134
 ARG TORCH_VERSION=2.14.1+cpu
 ARG TORCHVISION_VERSION=0.29.1+cpu
 ARG OPENCV_HEADLESS_VERSION=5.0.0.93
+ARG NUMPY_VERSION=2.3.5
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -31,10 +32,10 @@ WORKDIR /opt/inv-studio
 
 # Copy only reproducible application inputs. Runtime state, credentials and local
 # caches are excluded by both ignore files and are never copied into this image.
-COPY pyproject.toml LICENSE README.md ./
-COPY app ./app
-COPY samples ./samples
-COPY scripts/warm_ocr.py ./scripts/warm_ocr.py
+COPY pyproject.toml LICENSE ./
+# Install dependencies against a minimal package, so code-only changes can reuse
+# this expensive CPU OCR layer. Runtime imports resolve from /opt/inv-studio.
+RUN mkdir -p app && touch app/__init__.py
 
 RUN python -m pip install --no-cache-dir \
         pip==25.0.1 setuptools==78.1.0 wheel==0.45.1 \
@@ -44,8 +45,15 @@ RUN python -m pip install --no-cache-dir \
         "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
     && python -m pip install --no-cache-dir --no-build-isolation '.[docling,paddle]' \
     && python -m pip install --no-cache-dir --force-reinstall \
+        "numpy==${NUMPY_VERSION}" \
         "opencv-python-headless==${OPENCV_HEADLESS_VERSION}" \
+    && python -m pip check \
     && python -c 'import cv2, docling, paddle, psycopg; print("Cloud OCR imports are ready")'
+
+COPY app ./app
+COPY samples ./samples
+COPY README.md ./
+COPY scripts/warm_ocr.py ./scripts/warm_ocr.py
 
 RUN mkdir -p \
         /home/studio/.cache/huggingface \
@@ -55,6 +63,10 @@ RUN mkdir -p \
         /tmp/inv-studio-data/templates \
         /tmp/inv-studio-data/work \
     && chown -R 1000:1000 /home/studio /tmp/inv-studio-data
+
+# RapidOCR 3.9.2 keeps its recognition dictionaries in this data directory,
+# independently of Global.model_root_dir. Only this cache is writable, not code.
+RUN python -c 'import importlib.util,os; from pathlib import Path; p=Path(importlib.util.find_spec("rapidocr").origin).parent/"models"; p.mkdir(exist_ok=True); os.chown(p,1000,1000)'
 
 USER 1000:1000
 

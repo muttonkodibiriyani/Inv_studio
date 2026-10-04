@@ -1075,10 +1075,20 @@ function bindEvents() {
   $("#password-reset").addEventListener("click", resetPassword);
   $("#auth-retry").addEventListener("click", initializeAccess);
   $("#auth-sign-out").addEventListener("click", signOutCloud);
+  $("#auth-send-verification").addEventListener("click", async () => {
+    try {
+      await window.InvoiceStudioAuth.sendVerification();
+      showAuthGate({ message: "Check your email for the verification link.", verification: true, signOut: true });
+    } catch (_) { showAuthGate({ message: "Verification email could not be sent. Wait a moment and try again.", verification: true, signOut: true }); }
+  });
+  $("#auth-refresh-verification").addEventListener("click", async () => {
+    try { await window.InvoiceStudioAuth.refreshIdentity(); await verifyCloudSession(); }
+    catch (_) { showAuthGate({ message: "Email verification could not be refreshed. Try again.", verification: true, signOut: true }); }
+  });
   $("#cloud-sign-out").addEventListener("click", signOutCloud);
 }
 
-function showAuthGate({ message, detail = "", busy = false, google = false, password = false, retry = false, signOut = false }) {
+function showAuthGate({ message, detail = "", busy = false, google = false, password = false, retry = false, signOut = false, verification = false }) {
   $("#app-shell").hidden = true;
   $("#auth-gate").hidden = false;
   $("#auth-message").textContent = message;
@@ -1087,6 +1097,8 @@ function showAuthGate({ message, detail = "", busy = false, google = false, pass
   $("#password-sign-in").hidden = !password;
   $("#auth-retry").hidden = !retry;
   $("#auth-sign-out").hidden = !signOut;
+  $("#auth-send-verification").hidden = !verification;
+  $("#auth-refresh-verification").hidden = !verification;
   $("#auth-detail").hidden = !detail;
   $("#auth-detail").textContent = detail;
 }
@@ -1118,6 +1130,10 @@ async function startWorkspace() {
 }
 
 async function verifyCloudSession() {
+  if (window.InvoiceStudioAuth.currentUser?.()?.emailVerified === false) {
+    showAuthGate({ message: "Verify your email to open this workspace.", detail: "Use the verification email, then return here to continue.", verification: true, signOut: true });
+    return;
+  }
   showAuthGate({ message: "Verifying workspace access…", busy: true });
   try {
     const session = await api("/api/session");

@@ -114,10 +114,13 @@ def create_app(data_dir=None):
     if identity.cloud:hosts += ["*.run.app"]+[urlparse(x).netloc for x in allowed_origins]
     app.state.identity=identity
     app.add_middleware(TrustedHostMiddleware,allowed_hosts=hosts)
-    for job in store.jobs():
-        if job["status"] in ("processing","queued"):
-            job.update(status="error",error="The server restarted during processing. Retry this invoice.")
-            store.job(job["id"],job)
+    # Recovery must inspect all persisted jobs, not the 200-entry UI history.
+    with store.connection(True) as connection:
+        for row in connection.execute("SELECT id,payload FROM jobs"):
+            job=json.loads(row["payload"])
+            if job["status"] in ("processing","queued"):
+                job.update(status="error",error="The server restarted during processing. Retry this invoice.")
+                store.job(job["id"],job,connection)
 
     @app.middleware("http")
     async def local_guard(request,call_next):
