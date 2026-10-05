@@ -116,9 +116,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   justify-content: space-between;
   min-width: 0;
   padding: 0 24px;
-  background: rgb(255 255 255 / 94%);
+  background: var(--paper);
   border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(14px);
 }
 
 .brand {
