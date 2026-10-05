@@ -54,21 +54,25 @@
 
       <aside class="sidebar" aria-label="Primary navigation">
         <nav>
-          <button class="nav-item active" type="button" data-nav="workspace" aria-current="page">
+          <button class="nav-item active" type="button" data-nav="workspace" aria-current="page" title="Workspace">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5zM4 9h16M9 9v11"/></svg>
             <span>Workspace</span>
           </button>
-          <button class="nav-item" type="button" data-nav="references">
+          <button class="nav-item" type="button" data-nav="references" title="References">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>
             <span>References</span>
           </button>
-          <button class="nav-item" type="button" data-nav="engines">
+          <button class="nav-item" type="button" data-nav="engines" title="Engines &amp; AI">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0z"/></svg>
             <span>Engines &amp; AI</span>
           </button>
         </nav>
         <div class="sidebar-foot">
-          <div class="privacy-note">
+          <button id="sidebar-toggle" class="nav-item sidebar-toggle" type="button" aria-expanded="true" title="Collapse menu">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14M15.5 9.5 13 12l2.5 2.5"/></svg>
+            <span>Collapse menu</span>
+          </button>
+          <div class="privacy-note" title="Private by default. OCR runs on the workspace server. AI only when you allow it.">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v10H5z"/></svg>
             <span><strong>Private by default</strong><small>OCR runs on the workspace server. AI only when you allow it.</small></span>
           </div>
@@ -114,6 +118,13 @@
                 <svg aria-hidden="true" viewBox="0 0 20 20"><circle cx="9" cy="9" r="5"/><path d="m13 13 4 4"/></svg>
                 <label class="sr-only" for="job-search">Search invoices</label>
                 <input id="job-search" type="search" placeholder="Search filename or supplier">
+              </div>
+              <div id="inbox-sort" class="inbox-sort" role="group" aria-label="Sort invoices by time added" hidden>
+                <span>Time added</span>
+                <div class="sort-toggle">
+                  <button type="button" data-inbox-sort="newest" aria-pressed="true">Newest</button>
+                  <button type="button" data-inbox-sort="oldest" aria-pressed="false">Oldest</button>
+                </div>
               </div>
               <div id="batch-controls" class="batch-controls" hidden>
                 <div class="batch-selection">
@@ -273,6 +284,7 @@
                       </div>
                     </div>
                   </article>
+                  <div class="pane-resizer" data-pane-resizer="evidence" role="separator" aria-orientation="vertical" aria-label="Resize original document and invoice details" tabindex="0" title="Drag to resize. Double-click to reset."></div>
                 </div>
 
                 <details class="card trace-card">
@@ -285,6 +297,7 @@
                 </details>
               </div>
             </section>
+            <div class="pane-resizer" data-pane-resizer="inbox" role="separator" aria-orientation="vertical" aria-label="Resize invoice inbox" tabindex="0" title="Drag to resize. Double-click to reset."></div>
           </div>
         </section>
 

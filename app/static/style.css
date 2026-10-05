@@ -116,9 +116,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   justify-content: space-between;
   min-width: 0;
   padding: 0 24px;
-  background: rgb(255 255 255 / 94%);
+  background: var(--paper);
   border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(14px);
 }
 
 .brand {
@@ -187,7 +186,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .nav-item:hover { color: var(--ink); background: #edf2ef; }
 .nav-item.active { color: var(--forest); background: #e4f0eb; }
 
-.sidebar-foot { padding: 10px 6px; }
+.sidebar-foot { display: grid; gap: 12px; padding: 10px 6px; }
+.sidebar-toggle { padding-inline: 10px; font-size: 11px; }
+.sidebar-toggle svg { width: 18px; transition: transform 140ms ease; }
 .privacy-note { display: flex; gap: 9px; align-items: flex-start; color: var(--muted); }
 .privacy-note svg { width: 18px; flex: 0 0 auto; margin-top: 1px; color: var(--forest); }
 .privacy-note span { display: grid; gap: 2px; }
@@ -196,6 +197,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 
 main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .page-section { max-width: 1500px; margin: 0 auto; animation: enter 180ms ease-out; }
+/* The review workspace uses the whole viewport; settings pages keep a readable measure. */
+#workspace-section { max-width: none; }
 @keyframes enter { from { opacity: 0; transform: translateY(3px); } }
 
 .page-heading {
@@ -269,6 +272,11 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .inbox-filter { position: relative; margin: 0 13px 10px; }
 .inbox-filter svg { position: absolute; top: 10px; left: 10px; width: 16px; color: var(--faint); }
 .inbox-filter input { width: 100%; height: 36px; padding: 7px 10px 7px 34px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; font-size: 12px; }
+.inbox-sort { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 0 13px 10px; color: var(--muted); font-size: 10px; font-weight: 700; }
+.sort-toggle { display: inline-flex; padding: 2px; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; }
+.sort-toggle button { padding: 4px 10px; color: #52605d; background: transparent; border: 0; border-radius: 6px; font-size: 10px; font-weight: 800; }
+.sort-toggle button:hover { color: var(--ink); }
+.sort-toggle button[aria-pressed="true"] { color: var(--forest); background: #fff; box-shadow: 0 1px 2px rgb(22 43 37 / 14%); }
 .batch-controls { display: grid; gap: 8px; margin: 0 10px 9px; padding: 9px; background: #edf5f1; border-radius: 8px; }
 .batch-selection { display: grid; gap: 2px; min-width: 0; }
 .batch-selection > div { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -301,6 +309,9 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .job-copy strong, .job-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .job-copy strong { font-size: 12px; }
 .job-copy span { color: var(--muted); font-size: 10px; }
+.job-meta { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+.job-meta-status { flex: 1 1 auto; min-width: 0; }
+.job-time { flex: none; color: #55625f; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .job-item .status-dot { box-shadow: none; }
 .job-item .status-dot.processing { background: #c88b21; animation: pulse 1.2s infinite; }
 .job-item .status-dot.error { background: #c25959; }
@@ -360,6 +371,7 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .inline-alert.error { color: var(--danger); background: var(--danger-bg); border: 1px solid #f1ceca; }
 
 .split-review { display: grid; grid-template-columns: minmax(330px, .85fr) minmax(480px, 1.15fr); gap: 14px; align-items: start; }
+.pane-resizer { display: none; }
 .evidence-card, .fields-card { overflow: hidden; }
 .evidence-card { position: sticky; top: 92px; }
 .document-frame-wrap { height: min(70vh, 790px); min-height: 500px; margin: 0 14px; overflow: auto; background: #e8ecea; border: 1px solid var(--line); border-radius: 10px; }
@@ -685,6 +697,73 @@ dialog:has(.fine-rules-dialog) { width: min(1180px, calc(100vw - 28px)); }
 .preflight-notes li + li { margin-top: 4px; }
 .one-invoice-note { margin: 11px 0 0; padding: 11px 13px; color: var(--muted); background: var(--soft); border-radius: 9px; font-size: 10px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 7px; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+
+/* Desktop review workbench: inbox | original document | invoice details side by
+   side, filling the viewport height, each pane scrolling on its own. */
+@media (min-width: 1201px) {
+  main { padding: 24px clamp(16px, 1.6vw, 32px) 16px; }
+  .workspace-grid {
+    --inbox-width: clamp(288px, 20vw, 400px);
+    --pane-gap: 14px;
+    position: relative;
+    height: calc(100vh - 104px);
+    height: calc(100dvh - 104px);
+    min-height: 540px;
+    grid-template-columns: min(var(--inbox-width), 40%) minmax(0, 1fr);
+    gap: var(--pane-gap);
+    align-items: stretch;
+  }
+  .inbox-card { position: relative; top: auto; display: flex; flex-direction: column; min-height: 0; overflow-y: auto; }
+  .inbox-card > * { flex: none; }
+  .inbox-card .job-list { flex: 1 1 0; align-content: start; min-height: 180px; max-height: none; }
+  .review-area { display: flex; flex-direction: column; min-height: 0; }
+  .welcome-card { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  #review-panel { display: flex; flex: 1 1 auto; flex-direction: column; gap: 12px; min-height: 0; }
+  #review-panel > * { flex: none; }
+  #review-panel > .split-review {
+    --evidence-share: 40%;
+    position: relative;
+    flex: 1 1 0;
+    min-height: 320px;
+    grid-template-columns: minmax(0, var(--evidence-share)) minmax(0, 1fr);
+    gap: var(--pane-gap);
+    align-items: stretch;
+  }
+  .evidence-card { position: relative; top: auto; display: flex; flex-direction: column; min-height: 0; }
+  .evidence-card > * { flex: none; }
+  .evidence-card .document-frame-wrap { flex: 1 1 auto; height: auto; min-height: 0; }
+  .fields-card { min-height: 0; overflow-y: auto; }
+  .field-grid { grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); }
+  .trace-card[open] .trace-content { max-height: 36vh; overflow-y: auto; }
+  .pane-resizer {
+    position: absolute;
+    z-index: 5;
+    top: 0;
+    bottom: 0;
+    display: block;
+    width: 14px;
+    margin-left: -7px;
+    cursor: col-resize;
+    touch-action: none;
+  }
+  .pane-resizer::after { content: ""; position: absolute; top: 50%; left: 50%; width: 4px; height: 42px; background: var(--line-strong); border-radius: 99px; transform: translate(-50%, -50%); transition: background 140ms ease; }
+  .pane-resizer:hover::after, .pane-resizer:focus-visible::after, .pane-resizing .pane-resizer::after { background: var(--forest); }
+  .pane-resizer:focus-visible { box-shadow: none; }
+  .pane-resizer[data-pane-resizer="inbox"] { left: calc(min(var(--inbox-width), 40%) + var(--pane-gap) / 2); }
+  .pane-resizer[data-pane-resizer="evidence"] { left: calc(var(--evidence-share) + var(--pane-gap) / 2); }
+  .pane-resizing { cursor: col-resize; user-select: none; }
+  .pane-resizing iframe { pointer-events: none; }
+}
+
+/* Compact sidebar: icons only, labels kept for assistive technology. */
+@media (min-width: 921px) {
+  .app-shell.nav-compact { grid-template-columns: 68px minmax(0, 1fr); }
+  .nav-compact .sidebar { padding-inline: 10px; }
+  .nav-compact .nav-item { justify-content: center; padding-inline: 0; }
+  .nav-compact .nav-item span, .nav-compact .privacy-note span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
+  .nav-compact .privacy-note { justify-content: center; }
+  .nav-compact .sidebar-toggle svg { transform: scaleX(-1); }
+}
 
 @media (max-width: 1200px) {
   .split-review { grid-template-columns: 1fr; }
