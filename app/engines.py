@@ -207,6 +207,11 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 if engine=="native_pdf_text" else (False,[]))
             native_reconciliation=(_native_reconciliation(candidate,result["text"])
                 if native_suitable else None)
+            if engine=="invoice2data" and options.engine=="auto" and path.suffix.lower()==".pdf":
+                # The auto chain reads the PDF's own text here; the same gate applies to an unprinted code.
+                kept,notes=native_pdf_quality(candidate,result["text"])
+                if kept and notes:
+                    native_review=notes;missing=[x for x in missing if not x.endswith(" item identity")]
             reason=("Embedded PDF text has complete line facts reconciled through the document's explicit discount"
                 if native_reconciliation=="explicit_document_discount" else
                 "Embedded PDF text passes every arithmetic check; "+"; ".join(native_issues)
@@ -214,6 +219,8 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 "Embedded PDF text has complete, reconciled line facts"
                 if native_suitable else "; ".join(native_issues)
                 if engine=="native_pdf_text" else
+                "Embedded PDF text passes every arithmetic check; "+"; ".join(native_review)
+                if engine=="invoice2data" and native_review else
                 "Required extraction fields present" if not missing else "; ".join(missing))
             trace_entry={"engine":engine,"method":result.get("extraction_method","template" if candidate else "text_only"),"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines") if candidate else 0,"line_items":len(candidate.lines) if candidate else 0,"text_characters":len(result["text"]),"table_count":len(result.get("tables",[])),"parser_error":result.get("parser_error"),"reason":reason}
             if queue_seconds is not None:trace_entry["queue_seconds"]=round(queue_seconds,2)
@@ -261,7 +268,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2),"queue_seconds":round(queue_seconds,2) if queue_seconds is not None else None})
             progress(engine,"Reader attempt finished",{"trace":list(trace),"characters":len(text)})
     _,missing=quality(best)
-    if native_review and selected=="native PDF text":
+    if native_review and selected in ("native PDF text","invoice2data"):
         # The gate already checked every amount; an unprinted code is for review, not for the AI to supply.
         missing=[x for x in missing if not x.endswith(" item identity")]
     if document_type_hint=="possible_purchase_order":
@@ -271,7 +278,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         else:read_ai()
     if best is not None and best.lines and best.number and document_type_hint is None:
         extraction_note=None
-    if native_review and selected=="native PDF text":
+    if native_review and selected in ("native PDF text","invoice2data"):
         extraction_note="Read from the PDF text; every printed amount checks. Review: "+"; ".join(native_review)+"."
     return {"invoice":(best or Invoice()).model_dump(mode="json"),"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
