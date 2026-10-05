@@ -56,6 +56,9 @@ function renderRulesResult(job) {
     if (field.value === null || field.value === undefined) {
       dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence" : "Not found in owner sheets or on the invoice"));
     } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
+    if (field.target === "Order No" && Number(rules.po_candidates) > 1) {
+      dd.append(make("small", "rules-flagged", `Ambiguous: ${rules.po_candidates} candidate orders — owner review`));
+    }
     list.append(make("dt", "", field.label), dd);
   });
   const body = $("#rules-lines");
@@ -1094,7 +1097,9 @@ function renderValidation(job) {
     const line = issue.line ? `Line ${issue.line}: ` : "";
     const owner = issue.owner ? ` · ${issue.owner}` : "";
     // Fine-rules issues carry the owner's Failure Status name; non-blocking ones are warnings.
-    const status = rulesJob(job) && issue.code !== "REVIEW" ? `${issue.code}: ` : "";
+    // Owner's Failure Status first, then its checklist id and the engine's exception type when they differ.
+    const detail = [issue.check, issue.type && issue.type !== issue.code ? issue.type : ""].filter(Boolean).join(" · ");
+    const status = rulesJob(job) && issue.code !== "REVIEW" ? `${issue.code}${detail ? ` [${detail}]` : ""}: ` : "";
     const warning = issue.blocking === false ? " (warning)" : "";
     list.append(make("li", "", `${line}${status}${issue.message}${owner}${warning}`));
   });

@@ -110,7 +110,7 @@ def test_banner_uses_rules_exceptions_verbatim():
         "Rule ID": "ALG-008", "Candidates / Evidence": "", "blocking": True}])
     issues = rules_validation(rules_view(result), reviewed=True)["issues"]
     assert issues[0] == {"code": "Missing/Ambiguous PO", "message": "d", "owner": "Buyer", "line": None,
-                         "rule": "ALG-008", "evidence": "", "blocking": True}
+                         "rule": "ALG-008", "evidence": "", "blocking": True, "check": "", "type": ""}
 
 
 def test_download_matches_the_owner_target_format():
@@ -177,6 +177,10 @@ def test_review_banner_and_download_come_from_one_rules_result(production):
     assert rules["item_lines"] == {**rules["item_lines"], "resolved": 2, "total": 2, "owner_review": False}
     assert shown["validation"]["source"] == "fine_rules"
     assert [i["code"] for i in shown["validation"]["issues"] if i["blocking"]] == ["REVIEW"]
+    # A rules 'Approved' alone never makes the job approved: export stays held until a person confirms review.
+    assert shown["status"] == "review" and shown["validation"]["ready"] is False
+    held = client.post("/api/jobs/job-1/export", headers=H, json={"revision": shown["revision"]})
+    assert held.status_code == 409
     # The invoice the reviewer edits is not filled from derived values.
     assert shown["invoice"]["site"] is None
     reviewed = client.post("/api/jobs/job-1/review", headers=H,
@@ -269,3 +273,13 @@ def test_owner_review_is_not_doubled_when_rules_raises_it():
     view=rules_view(result)
     assert view["item_lines"]["owner_review"] is True
     assert [i["rule"] for i in view["issues"] if i["rule"] in ("ITEM-95","ITEM-LINE-95")]==["ITEM-LINE-95"]
+
+
+def test_failure_status_check_and_po_candidates_reach_the_view():
+    result={"status":"Review","header":{},"lines":[],"lineage":[],"po_candidates":3,
+            "exceptions":[{"Exception Type":"Missing/Ambiguous PO","Engine Type":"Ambiguous PO","Check ID":"C-12",
+                           "Description":"3 orders","Rule ID":"POG-001","blocking":True}]}
+    view=rules_view(result)
+    issue=next(i for i in view["issues"] if i["rule"]=="POG-001")
+    assert (issue["code"],issue["type"],issue["check"])==("Missing/Ambiguous PO","Ambiguous PO","C-12")
+    assert view["po_candidates"]==3

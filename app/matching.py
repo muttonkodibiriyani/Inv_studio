@@ -228,7 +228,8 @@ def rules_view(result,text="",boxes=(),printed=None):
     for e in result.get("exceptions") or []:
         issues.append({"code":str(e.get("Exception Type") or "Exception"),"message":str(e.get("Description") or ""),
                        "owner":str(e.get("Owner") or ""),"line":e.get("Line No.") or None,"rule":str(e.get("Rule ID") or ""),
-                       "evidence":str(e.get("Candidates / Evidence") or ""),"blocking":bool(e.get("blocking",True))})
+                       "evidence":str(e.get("Candidates / Evidence") or ""),"blocking":bool(e.get("blocking",True)),
+                       "check":str(e.get("Check ID") or ""),"type":str(e.get("Engine Type") or "")})
     # RULES raises its own ITEM-LINE-95 exception when lines exist; add ours only when it did not.
     if below and not any(i["rule"]=="ITEM-LINE-95" for i in issues):
         issues.append({"code":"Owner Review","message":f"Item lines resolved {resolved}/{total}: below 95%, owner review required",
@@ -250,7 +251,7 @@ def rules_view(result,text="",boxes=(),printed=None):
     return {"status":result.get("status") or "Review","fields":fields,"lines":out_lines,"issues":issues,
             "item_lines":{"resolved":resolved,"total":total,"rate":str(rate.quantize(Decimal("0.0001"))) if rate is not None else None,
                           "threshold":str(ITEM_THRESHOLD),"owner_review":below,"definition":definition},
-            "config_version":result.get("config_version")}
+            "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version")}
 
 
 def rules_key(view):

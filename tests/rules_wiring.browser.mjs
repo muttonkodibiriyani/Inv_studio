@@ -55,6 +55,7 @@ const rules = {
   })),
   issues: [],
   item_lines: { resolved: 1, total: 2, rate: "0.5000", threshold: "0.95", owner_review: true, definition: "Synthetic definition of a resolved line" },
+  po_candidates: 3,
   revision: 1,
 };
 
@@ -78,6 +79,7 @@ const job = {
     status: "Review",
     issues: [
       { code: "Owner Review", message: "Item lines resolved 1/2: below 95%, owner review required", owner: "Owner", line: null, rule: "ITEM-95", blocking: true },
+      { code: "Missing/Ambiguous PO", message: "3 orders carry every resolved item; owner review", owner: "Buyer", line: null, rule: "POG-001", check: "C-12", type: "Ambiguous PO", blocking: true },
       { code: "Missing Evidence", message: "Purchase order not found in the owner's sheets or printed on the invoice", owner: "Accounts payable", line: null, rule: "EVIDENCE", blocking: true },
       { code: "Evidence Disagreement", message: "number: OCR read differently; value kept, check the document", owner: "Accounts payable", line: null, rule: "EVID-OCR", blocking: false },
     ],
@@ -123,7 +125,7 @@ try {
     const fields = page.locator("#rules-fields");
     assert.match(await fields.textContent(), /Supplier site900001owner sheet Supplier Sites!4 \(V-001\)/);
     assert.match(await fields.textContent(), /Net total100\.00printed on invoice · page 1 box/);
-    assert.match(await fields.textContent(), /Purchase orderNot found in owner sheets or on the invoice/);
+    assert.match(await fields.textContent(), /Purchase orderNot found in owner sheets or on the invoiceAmbiguous: 3 candidate orders — owner review/);
     assert.match(await fields.textContent(), /MarketAEMarket table · SYN\|v1/);
     const rate = page.locator("#rules-item-rate");
     assert.match(await rate.textContent(), /Item lines resolved 1\/2 \(50\.0%\) — below 95%: this invoice goes to owner review\./);
@@ -137,6 +139,7 @@ try {
     }
     const banner = await page.locator("#validation-summary").textContent();
     assert.match(banner, /Owner Review: Item lines resolved 1\/2/);
+    assert.match(banner, /Missing\/Ambiguous PO \[C-12 · Ambiguous PO\]: 3 orders/);
     assert.match(banner, /Evidence Disagreement: number: .*\(warning\)/);
     assert.match(await page.locator("#provenance-list").textContent(), /owner sheet Supplier Sites!4/);
 
