@@ -1086,6 +1086,21 @@ def _find_printed(scan, value):
     return None, None
 
 
+_LEGAL_WORDS = {"co", "company", "llc", "wll", "l", "c", "w", "ltd", "limited", "est", "establishment", "trading",
+                "the", "and", "group", "fzco", "fze", "fzllc", "inc", "plc", "spc"}
+
+
+def _distinctive(value):
+    return [w for w in re.findall(r"[a-z0-9]+", fold(value)) if w not in _LEGAL_WORDS]
+
+
+def _different_company(printed, owner):
+    """A printed buyer names a different company only when it has a distinctive name and the owner's distinctive
+    name is not in it. Legal-form fragments (a reader miss such as "Co. L.L.C") are not a different company."""
+    words = _distinctive(printed)
+    return bool(words) and name_key(" ".join(_distinctive(owner))) not in "".join(words)
+
+
 def resolve_buyer(run, scan):
     """Owner rule BUYER-NAME: Buyer Name is always the configured owner entity. Printed quote and page are the
     evidence when the text carries it; otherwise the owner rule is. A different printed buyer is a review flag."""
@@ -1099,8 +1114,7 @@ def resolve_buyer(run, scan):
     else:
         run.trace("Buyer Name", owner, BUYER_RULE, BUYER_RULE_EVIDENCE, reference=BUYER_RULE_EVIDENCE,
                   confidence="Owner rule", evidence_kind=EVIDENCE_OWNER_RULE)
-    printed = name_key(run.invoice.buyer_name)
-    if printed and name_key(owner) not in printed:
+    if _different_company(run.invoice.buyer_name, owner):
         run.exception("Buyer Review", "printed buyer differs from owner entity", BUYER_RULE, owner="Accounts payable")
     return owner
 

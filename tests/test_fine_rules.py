@@ -686,6 +686,10 @@ def test_buyer_name_is_the_configured_owner_entity_with_printed_or_owner_rule_ev
     other = run(invoice(buyer_name="Another Buyer Co"), config=owner)
     assert other["header"]["Buyer Name"] == "Synthetic Owner Retail Co" and other["status"] == "Review"
     assert any(e["Description"] == "printed buyer differs from owner entity" for e in other["exceptions"])
+    short = {**CONFIG, "buyer_name": "Synthowner LLC"}
+    for fragment in ("Co. L.L.C", "M.H.SynthOwner Company W.L.L.", "Synthowner Group Co. L.L.C"):
+        assert "Buyer Review" not in types(run(invoice(buyer_name=fragment), config=short)), fragment
+    assert "Buyer Review" in types(run(invoice(buyer_name="Othername Co. L.L.C"), config=short))
     assert run()["header"]["Buyer Name"] == ""
 
 
