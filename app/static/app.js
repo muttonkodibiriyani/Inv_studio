@@ -42,6 +42,10 @@ const STATUS_LABELS = {
 };
 
 const NATIVE_TEXT_PREFERENCE = "invoice-studio-prefer-native-text";
+const SIDEBAR_PREFERENCE = "invoice-studio-sidebar";
+const PANE_SIZE_PREFERENCE = "invoice-studio-pane-sizes";
+// Below this width the sidebar starts compact unless the user expanded it.
+const COMPACT_SIDEBAR_QUERY = "(max-width: 1599px)";
 
 function savedNativeTextPreference() {
   try {
@@ -59,6 +63,7 @@ const app = {
   currentJob: null,
   selectedJobId: null,
   selectedForBatch: new Set(),
+  inboxSort: "newest",
   reviewDirty: false,
   uploadFiles: [],
   pollTimer: null,
@@ -101,6 +106,103 @@ function setNativeTextPreference(value, { remember = true } = {}) {
   app.nativeTextPreferenceExplicit = true;
   try { window.localStorage.setItem(NATIVE_TEXT_PREFERENCE, String(app.preferNativeText)); }
   catch (_) { /* Browser storage is optional; the in-memory preference remains. */ }
+}
+
+function savedLayoutPreference(key) {
+  try { return window.localStorage.getItem(key); } catch (_) { return null; }
+}
+
+function rememberLayoutPreference(key, value) {
+  try {
+    if (value === null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch (_) { /* Browser storage is optional; the layout still applies to this page. */ }
+}
+
+function applySidebarMode() {
+  const saved = savedLayoutPreference(SIDEBAR_PREFERENCE);
+  const compact = saved ? saved === "compact" : window.matchMedia(COMPACT_SIDEBAR_QUERY).matches;
+  $("#app-shell").classList.toggle("nav-compact", compact);
+  const toggle = $("#sidebar-toggle");
+  const label = compact ? "Expand menu" : "Collapse menu";
+  toggle.setAttribute("aria-expanded", String(!compact));
+  toggle.title = label;
+  toggle.querySelector("span").textContent = label;
+}
+
+// Inbox width is stored in pixels; the document pane as a share of the
+// document + details row. CSS still caps the inbox at 40% of the workspace.
+const PANE_LIMITS = {
+  inbox: { property: "--inbox-width", unit: "px", min: 240, max: 520, step: 16 },
+  evidence: { property: "--evidence-share", unit: "%", min: 25, max: 60, step: 2 },
+};
+
+function savedPaneSizes() {
+  try { return JSON.parse(savedLayoutPreference(PANE_SIZE_PREFERENCE) || "{}") || {}; } catch (_) { return {}; }
+}
+
+function setupPaneResizers() {
+  const saved = savedPaneSizes();
+  $$("[data-pane-resizer]").forEach((handle) => {
+    const name = handle.dataset.paneResizer;
+    const limits = PANE_LIMITS[name];
+    const container = handle.parentElement;
+    const pane = name === "inbox" ? $(".inbox-card") : $(".evidence-card");
+    handle.setAttribute("aria-valuemin", String(limits.min));
+    handle.setAttribute("aria-valuemax", String(limits.max));
+    const measure = () => {
+      const width = pane.getBoundingClientRect().width;
+      return name === "inbox" ? width : (width / container.getBoundingClientRect().width) * 100;
+    };
+    const apply = (value) => {
+      if (value === null) {
+        container.style.removeProperty(limits.property);
+        handle.removeAttribute("aria-valuenow");
+        return null;
+      }
+      const clamped = Math.round(Math.min(limits.max, Math.max(limits.min, value)));
+      container.style.setProperty(limits.property, `${clamped}${limits.unit}`);
+      handle.setAttribute("aria-valuenow", String(clamped));
+      return clamped;
+    };
+    const save = (value) => {
+      const sizes = savedPaneSizes();
+      if (value === null) delete sizes[name];
+      else sizes[name] = value;
+      rememberLayoutPreference(PANE_SIZE_PREFERENCE, JSON.stringify(sizes));
+    };
+    if (Number.isFinite(saved[name])) apply(saved[name]);
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      document.body.classList.add("pane-resizing");
+      let latest = null;
+      const move = (moveEvent) => {
+        const box = container.getBoundingClientRect();
+        const offset = moveEvent.clientX - box.left;
+        latest = apply(name === "inbox" ? offset : (offset / box.width) * 100);
+      };
+      const stop = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", stop);
+        handle.removeEventListener("pointercancel", stop);
+        document.body.classList.remove("pane-resizing");
+        if (latest !== null) save(latest);
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", stop);
+      handle.addEventListener("pointercancel", stop);
+    });
+    handle.addEventListener("keydown", (event) => {
+      const delta = { ArrowLeft: -limits.step, ArrowRight: limits.step }[event.key];
+      if (!delta) return;
+      event.preventDefault();
+      save(apply(measure() + delta));
+    });
+    handle.addEventListener("dblclick", () => save(apply(null)));
+  });
 }
 
 async function studioFetch(path, options = {}) {
@@ -387,6 +489,34 @@ function formatDate(value) {
   return Number.isNaN(parsed.valueOf()) ? String(value) : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
+function addedTimestamp(job) {
+  const time = Date.parse(job.created_at || "");
+  return Number.isNaN(time) ? null : time;
+}
+
+// The server lists jobs by last update, so a job moves whenever it changes.
+// The inbox orders by the stable upload time instead; unknown times go last.
+function sortJobsByAdded(jobs, order = app.inboxSort) {
+  const direction = order === "oldest" ? 1 : -1;
+  return [...jobs].sort((left, right) => {
+    const a = addedTimestamp(left);
+    const b = addedTimestamp(right);
+    if (a === b) return 0;
+    if (a === null) return 1;
+    if (b === null) return -1;
+    return (a - b) * direction;
+  });
+}
+
+function formatAddedTime(value, now = new Date()) {
+  const parsed = new Date(value || "");
+  if (!value || Number.isNaN(parsed.valueOf())) return "";
+  if (parsed.toDateString() === now.toDateString()) return parsed.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const options = { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" };
+  if (parsed.getFullYear() !== now.getFullYear()) options.year = "numeric";
+  return parsed.toLocaleString([], options);
+}
+
 function formatSize(bytes) {
   if (bytes < 1024 * 1024) return `${Math.max(0.1, bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -478,14 +608,17 @@ async function loadState({ preserveSelection = true } = {}) {
 function renderJobs() {
   const query = $("#job-search").value.trim().toLowerCase();
   const jobs = [...(app.state?.jobs || [])];
-  const filtered = jobs.filter((job) => {
+  const filtered = sortJobsByAdded(jobs.filter((job) => {
     const invoice = job.invoice || {};
     return [job.filename, invoice.supplier_name, invoice.seller, invoice.number].some((value) => String(value || "").toLowerCase().includes(query));
-  });
+  }));
   $("#job-count").textContent = `${jobs.length} invoice${jobs.length === 1 ? "" : "s"}`;
   $("#job-empty").hidden = jobs.length > 0;
   $("#job-list").hidden = jobs.length === 0;
   $("#batch-controls").hidden = jobs.length === 0;
+  $("#inbox-sort").hidden = jobs.length === 0;
+  $$("[data-inbox-sort]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.inboxSort === app.inboxSort)));
+  const now = new Date();
   const list = $("#job-list");
   list.replaceChildren();
 
@@ -510,7 +643,16 @@ function renderJobs() {
     const copy = make("span", "job-copy");
     copy.append(make("strong", "", job.invoice?.supplier_name || job.invoice?.seller || job.filename));
     const secondary = job.invoice?.number ? `${job.invoice.number} · ${STATUS_LABELS[job.status] || humanize(job.status)}` : STATUS_LABELS[job.status] || humanize(job.status);
-    copy.append(make("span", "", secondary));
+    const meta = make("span", "job-meta");
+    meta.append(make("span", "job-meta-status", secondary));
+    const added = formatAddedTime(job.created_at, now);
+    if (added) {
+      const time = make("time", "job-time", added);
+      time.dateTime = job.created_at;
+      time.title = `Added ${formatDate(job.created_at)}`;
+      meta.append(time);
+    }
+    copy.append(meta);
     button.append(copy);
     const dot = make("span", `status-dot ${job.status === "error" ? "error" : ["processing", "queued"].includes(job.status) ? "processing" : ""}`);
     dot.setAttribute("aria-hidden", "true");
@@ -999,6 +1141,12 @@ async function saveReview() {
     button.textContent = "Save & revalidate";
     button.disabled = false;
   }
+}
+
+// New uploads land at the top (newest first) or the bottom (oldest first).
+function revealNewestJobs() {
+  const list = $("#job-list");
+  list.scrollTop = app.inboxSort === "oldest" ? list.scrollHeight : 0;
 }
 
 function replaceJobSummary(job) {
@@ -1584,7 +1732,10 @@ async function runUpload(preflightToken, options) {
     form.append("options", JSON.stringify(options));
     form.append("preflight_token", preflightToken);
     try {
-      completed.push(await api("/api/invoices", { method: "POST", body: form }));
+      const job = await api("/api/invoices", { method: "POST", body: form });
+      completed.push(job);
+      replaceJobSummary(job);
+      revealNewestJobs();
     } catch (error) {
       failed.push(`${file.name}: ${error.message}`);
     }
@@ -1592,6 +1743,7 @@ async function runUpload(preflightToken, options) {
   app.uploadFiles = [];
   renderUploadQueue();
   await loadState({ preserveSelection: false });
+  revealNewestJobs();
   if (completed.length) await selectJob(completed[0].id);
   if (!failed.length) {
     progress.textContent = `${completed.length} invoice${completed.length === 1 ? "" : "s"} added. Processing continues in the workspace.`;
@@ -1626,6 +1778,7 @@ async function prepareDemo() {
 async function runDemo(preflightToken) {
   const job = await api("/api/demo", { method: "POST", body: { preflight_token: preflightToken } });
   await loadState({ preserveSelection: false });
+  revealNewestJobs();
   await selectJob(job.id);
   notify("Synthetic reference data and invoice loaded. No real business data was used.");
 }
@@ -2271,6 +2424,13 @@ async function runRetry(preflightToken, options) {
 }
 
 function bindEvents() {
+  applySidebarMode();
+  window.matchMedia(COMPACT_SIDEBAR_QUERY).addEventListener("change", applySidebarMode);
+  $("#sidebar-toggle").addEventListener("click", () => {
+    rememberLayoutPreference(SIDEBAR_PREFERENCE, $("#app-shell").classList.contains("nav-compact") ? "expanded" : "compact");
+    applySidebarMode();
+  });
+  setupPaneResizers();
   ["settings", "upload", "retry"].forEach(setupModelPicker);
   $$('button[value="cancel"]').forEach((button) => button.addEventListener("click", () => {
     button.closest("dialog")?.close("cancel");
@@ -2278,6 +2438,11 @@ function bindEvents() {
   $$('[data-nav]').forEach((control) => control.addEventListener("click", (event) => { event.preventDefault(); navigate(control.dataset.nav); }));
   $$('[data-open-upload]').forEach((button) => button.addEventListener("click", openUpload));
   $("#job-search").addEventListener("input", renderJobs);
+  $$("[data-inbox-sort]").forEach((button) => button.addEventListener("click", () => {
+    app.inboxSort = button.dataset.inboxSort;
+    renderJobs();
+    $("#job-list").scrollTop = 0;
+  }));
   $("#load-demo").addEventListener("click", prepareDemo);
   $("#add-line").addEventListener("click", () => { addLine(); markReviewDirty(); });
   $("#invoice-form").addEventListener("input", markReviewDirty);
@@ -2459,7 +2624,7 @@ async function startWorkspace() {
     await loadState();
     const route = location.hash.slice(1);
     navigate(["workspace", "references", "engines"].includes(route) ? route : "workspace");
-    if (app.state.jobs.length) await selectJob(app.state.jobs[0].id);
+    if (app.state.jobs.length) await selectJob(sortJobsByAdded(app.state.jobs)[0].id);
     $("#auth-gate").hidden = true;
     $("#app-shell").hidden = false;
     app.workspaceStarted = true;

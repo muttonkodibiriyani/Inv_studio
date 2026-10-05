@@ -706,6 +706,16 @@ try {
   await waitForSelectedReview(thirdJob.filename);
   const thirdReadyJob = await saveConfirmedReview(thirdJob.id, thirdNumber);
 
+  // The inbox lists invoices by upload time, newest first, with the time shown.
+  const newestRows = page.locator("#job-list .job-row");
+  await waitFor("the newest uploads to lead the inbox", async () =>
+    (await newestRows.nth(0).textContent())?.includes(thirdNumber) && (await newestRows.nth(1).textContent())?.includes(secondNumber),
+  );
+  assert(
+    !Number.isNaN(Date.parse(await newestRows.nth(0).locator("time.job-time").getAttribute("datetime"))),
+    "The newest upload does not show when it was added",
+  );
+
   assert.equal(await page.locator("#workflow-upload-count").textContent(), `${initialJobCount + 3} invoices`);
   assert.match(await page.locator("#workflow-process-count").textContent(), /^\d+ active$/);
   assert.match(await page.locator("#workflow-review-count").textContent(), /^\d+ processed$/);
