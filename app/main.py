@@ -53,6 +53,8 @@ class Review(StrictModel):
     confirm: bool = False
     # Reviewer-entered target values for cells the fine rules left empty: {"header": {...}, "lines": {"1": {...}}}.
     entries: dict | None = None
+    # The owner's pick among the rules' supplier_site_candidates (a supplier code); "" clears it.
+    supplier_code: str | None = None
 
 
 class Revision(StrictModel):
@@ -275,6 +277,7 @@ def create_app(data_dir=None):
         """ONE fine-rules run for this invoice; review fields, banner and download all read its view."""
         with store.connection() as c:config=store.get("fine_rules_config",{},c);signature=rules_signature(c)
         entry={"invoice":invoice,"filename":j["filename"],"text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":j["id"]}
+        if j.get("owner_supplier_code"):entry["owner_supplier_code"]=j["owner_supplier_code"]
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
         entries=j.get("owner_entries") if entries is None else entries
         view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),entries)
@@ -551,9 +554,20 @@ def create_app(data_dir=None):
         store.audit("extraction_draft_downloaded",{"job_id":jid,"revision":j["revision"],"approved":False,"line_items":len(invoice.lines)})
         return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="EXTRACTION_REVIEW_ONLY_{jid[:8]}.xlsx"'})
 
+    def supplier_pick(j,body):
+        """The owner's supplier code for the rules: only one of the candidates the rules last offered on this job.
+        A changed supplier name drops an earlier pick; the rules re-check the pick against their own candidates."""
+        if body.supplier_code is None:
+            same=body.invoice.supplier_name==(j.get("invoice") or {}).get("supplier_name")
+            return j.get("owner_supplier_code") if same else None
+        code=body.supplier_code.strip()
+        if not code:return None
+        offered={str(c.get("supplier_code")) for c in (j.get("rules") or {}).get("supplier_site_candidates") or []}
+        if code not in offered and code!=j.get("owner_supplier_code"):raise ValueError("Supplier code is not one of the candidates the rules offered")
+        return code
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
-        view=entries=None
+        view=entries=pick=None
         if not demo_references:
             j=job_or_404(jid);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
@@ -563,7 +577,8 @@ def create_app(data_dir=None):
                 entries=owner_entries(j.get("owner_entries"))
                 if body.invoice.model_dump(mode="json")["lines"]!=j["invoice"].get("lines"):entries["lines"]={}
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
-            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution},entries)
+            pick=supplier_pick(j,body)
+            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution,"owner_supplier_code":pick},entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
@@ -572,6 +587,8 @@ def create_app(data_dir=None):
             j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
             if view is not None:
                 j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries;j["owner_entry_attribution"]=attribution
+                if pick:j["owner_supplier_code"]=pick
+                else:j.pop("owner_supplier_code",None)
                 if body.confirm:
                     # Confirm-time accuracy: per field, its status before and changed yes/no; never a value.
                     supplier=(view["fields"].get("site") or {}).get("value") or ""
@@ -582,7 +599,7 @@ def create_app(data_dir=None):
             j["provenance"]+=provenance
             evaluate(j,c);store.job(jid,j,c)
             store.audit("reviewed" if body.confirm else "edited",{"job_id":jid,"before":before,"after":j["invoice"],"revision":j["revision"],"reference_version":references(c).get("version"),
-                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[])} if view is not None else {})},c)
+                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[]),"owner_supplier_pick":bool(pick)} if view is not None else {})},c)
         return public(j)
 
     @app.post("/api/jobs/{jid}/retry")

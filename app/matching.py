@@ -302,7 +302,9 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
     return {"status":result.get("status") or "Review","fields":fields,"lines":out_lines,"issues":issues,
             "item_lines":{"resolved":resolved,"total":total,"rate":str(rate.quantize(Decimal("0.0001"))) if rate is not None else None,
                           "threshold":str(ITEM_THRESHOLD),"owner_review":below,"definition":definition},
-            "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version")}
+            "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version"),
+            # Codes left when the rules cannot pick a supplier code: offered for the owner's pick, never a value.
+            **({"supplier_site_candidates":result["supplier_site_candidates"]} if result.get("supplier_site_candidates") else {})}
 
 
 def rules_key(view):
