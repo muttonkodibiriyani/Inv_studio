@@ -169,3 +169,40 @@ def test_thousands_group_split_by_ocr_rejoins():
     assert [w["text"] for w in cti._join_split_tokens(row)] == ["1,234.50", "4006381333931"]
     barcode = [{**row[0], "text": "30,"}, {**row[2], "x0": 14}]
     assert [w["text"] for w in cti._join_split_tokens(barcode)] == ["30,", "4006381333931"]
+
+
+def test_ocr_number_row_with_logo_text_and_amount_between_label_rows(tmp_path):
+    rows = one_page()
+    rows[0][1] = [(31, "# ZZTI26-00000042"), (300, "SAMPLE LOGO")]
+    text, boxes, _ = read(pdf(tmp_path, rows))
+    split = ocr_style(boxes)
+    # The Sub Total amount sits lower than its label, still overlapping it most.
+    label = next(i for i, b in enumerate(split) if b["text"] == "Sub")
+    amount = next(b for b in split[label:] if b["text"] == "54.00")
+    shift = (amount["box"][3] - amount["box"][1]) * 0.4
+    amount["box"] = [amount["box"][0], amount["box"][1] + shift, amount["box"][2], amount["box"][3] + shift]
+    invoice, rec = cti.extract(text, split)
+    assert invoice["number"] == "ZZTI26-00000042" and invoice["net"] == Decimal("54.00")
+    assert rec["lines_sum_to_net"] and rec["net_plus_vat_is_total"]
+
+
+def test_amount_level_between_two_labels_stays_unread():
+    def w(text, x0, top):
+        return {"text": text, "page": 1, "x0": x0, "x1": x0 + 40, "top": top, "bottom": top + 10}
+    rows = [[w("Sub", 0, 0), w("Total,", 20, 0), w("XYZ:", 50, 0)],
+            [w("Total", 0, 10), w("VAT,", 20, 10), w("XYZ:", 50, 10), w("2.71", 120, 5)]]
+    assert cti._totals(rows) == {"Sub Total": None, "Total VAT": None}
+
+
+def test_ocr_split_accents_and_apostrophes_rejoin_but_dashes_and_plus_stay():
+    def row(*parts):
+        out, x = [], 0
+        for text, gap in parts:
+            x += gap
+            out.append({"text": text, "page": 1, "x0": x, "x1": x + 10 * len(text), "top": 0, "bottom": 20})
+            x += 10 * len(text)
+        return [w["text"] for w in cti._join_split_tokens(out)]
+    assert row(("Cr", 0), ("ème", 1)) == ["Crème"]
+    assert row(("L", 0), ("'", 1), ("Eau", 1)) == ["L'Eau"]
+    assert row(("Gel", 0), ("+", 8), ("Oil", 8)) == ["Gel", "+", "Oil"]
+    assert row(("Set", 0), ("–", 8), ("2", 8)) == ["Set", "–", "2"]

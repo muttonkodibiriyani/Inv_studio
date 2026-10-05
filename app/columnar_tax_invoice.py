@@ -24,13 +24,12 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 TITLE = re.compile(r"^TAX INVOICE(?:\s|$)")
-NUMBER = re.compile(r"^#\s*([A-Z0-9][A-Z0-9./_-]{2,79})$")
+NUMBER = re.compile(r"^#\s*([A-Z0-9][A-Z0-9./_-]{2,79})(?:\s|$)")
 # OCR readers may put logo text on the same row, to the right of the title and the date.
 ISSUED = re.compile(r"^Date of Issuing\s*:\s*([A-Za-z]{3,9}\.?\s+\d{1,2}\s*,\s*\d{4})(?:\s|$)")
 # Totals sit in the right-hand column; the amount in words may share their row on the left.
-SUB_TOTAL = re.compile(r"(?:^|.*\s)Sub Total\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
-TOTAL_VAT = re.compile(r"(?:^|.*\s)Total VAT\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
-TOTAL = re.compile(r"(?:^|.*\s)(?<!Sub )Total\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
+# Totals labels; each label's amount is the money word to its right that shares the label's height band.
+TOTAL_LABEL = re.compile(r"(?:^|(?<=\s))(Sub Total|Total VAT|Total)\s*,\s*([A-Z]{3})\s*:")
 # The buyer's order number; checked against the PO extract (RMS order numbers) before mapping to po.
 REFERENCE = re.compile(r"^Reference #\s*:\s*(\d{4,20})(?:\s+Reference Date\s*:.*)?$")
 TABLE_END = re.compile(r"^(TOTAL OF SUPPLY|Sub Total\s*,|Total VAT\s*,|Total\s*,|Terms and Conditions)")
@@ -82,26 +81,31 @@ def _rows(words):
 
 
 def _join_split_tokens(row):
-    """Rejoin tokens an OCR reader split off: 'Issuing' ':' and '1' ',' '234.50' or '1,' '234.50'.
+    """Rejoin tokens an OCR reader split off: 'Issuing' ':', '50ml' ')', '(' 'x' and '1' ',' '234.50'.
 
-    Only near neighbours join, and a thousands group joins only onto 1-3 digits; native words are unaffected.
+    Closing marks (and an accented letter) join the word before and opening marks the word after, as
+    typeset; marks that sit either way ('/', '-', '&', '+') are left as read. A thousands group joins only onto
+    1-3 digits.
     """
     out = []
     for w in row:
         prev = out[-1] if out else None
         gap = w["x0"] - prev["x1"] if prev else None
         height = w["bottom"] - w["top"]
-        join = prev is not None and (
-            (gap <= 0.8 * height and re.fullmatch(r"[:,]", w["text"]))
-            or (gap <= 0.25 * height and re.fullmatch(r"[.)%]+", w["text"]))
-            or (gap <= 0.8 * height and re.fullmatch(r"\d{1,3},", prev["text"])
-                and re.fullmatch(r"\d{3}\.\d{2}", w["text"])))
+        join = prev is not None and gap <= 0.8 * height and (
+            re.fullmatch(r"[:,.)%\u00ae\u2122']+", w["text"]) or _accented(w["text"][0])
+            or prev["text"][-1] in "('" or (gap <= 0.25 * height and _accented(prev["text"][-1]))
+            or (re.fullmatch(r"\d{1,3},", prev["text"]) and re.fullmatch(r"\d{3}\.\d{2}", w["text"])))
         if join:
             out[-1] = {**prev, "text": prev["text"] + w["text"], "x1": max(prev["x1"], w["x1"]),
                        "bottom": max(prev["bottom"], w["bottom"])}
         else:
             out.append(w)
     return out
+
+
+def _accented(char):
+    return not char.isascii() and char.isalpha()
 
 
 def _text(words):
@@ -145,15 +149,40 @@ def _header_row(row):
             "slack": max(3.0, heights[len(heights) // 2] * 0.4)}
 
 
+def _totals(rows):
+    """{'Sub Total' | 'Total VAT' | 'Total': {(currency, amount), ...}} paired by geometry, not by row.
+
+    OCR readers can place an amount between two label rows; the amount with the largest vertical overlap
+    with the label, to its right on the same page, belongs to it. Ties or no overlap leave it unread.
+    """
+    found = {}
+    money = [w for row in rows for w in row if MONEY.match(w["text"])]
+    for row in rows:
+        line, starts, pos = _text(row), [], 0
+        for w in row:
+            starts.append(pos)
+            pos += len(w["text"]) + 1
+        for match in TOTAL_LABEL.finditer(line):
+            label = [w for w, start in zip(row, starts) if match.start() <= start < match.end()]
+            top, bottom, right = min(w["top"] for w in label), max(w["bottom"] for w in label), label[-1]["x1"]
+            scored = sorted(((min(bottom, w["bottom"]) - max(top, w["top"]), w["text"]) for w in money
+                             if w["page"] == label[0]["page"] and w["x0"] > right), reverse=True)
+            best = [x for x in scored if x[0] > 0.5 * (bottom - top)]
+            amount = best[0][1] if best and (len(best) == 1 or best[1][0] < best[0][0]) else None
+            found.setdefault(match.group(1), set()).add((match.group(2), amount))
+    return {k: next(iter(v)) if len(v) == 1 and None not in next(iter(v)) else None for k, v in found.items()}
+
+
 def detect(text, boxes):
     """True only when every structural marker of the layout is present."""
-    lines = [_text(r) for r in _rows(_words(boxes))]
+    rows = _rows(_words(boxes))
+    lines = [_text(r) for r in rows]
     if not lines:
         return False
     has = lambda pattern: any(pattern.match(line) for line in lines)  # noqa: E731
-    return (has(TITLE) and has(NUMBER) and has(ISSUED) and has(SUB_TOTAL) and has(TOTAL_VAT) and has(TOTAL)
-            and any(_header_row(r) for r in _rows(_words(boxes)))
-            and any(PARTIES.match(line) for line in lines))
+    totals = _totals(rows)
+    return (has(TITLE) and has(NUMBER) and has(ISSUED) and has(PARTIES) and any(_header_row(r) for r in rows)
+            and all(totals.get(k) for k in ("Sub Total", "Total VAT", "Total")))
 
 
 def _one(lines, pattern):
@@ -245,7 +274,8 @@ def extract(text, boxes):
                 drafts[-1]["stray"] = drafts[-1].get("stray", []) + [_text(tail)]
             drafts[-1]["description"].append(_text(description))
             drafts[-1]["brand"].append(_text(brand))
-    sub_total, total_vat, total = _one(lines, SUB_TOTAL), _one(lines, TOTAL_VAT), _one(lines, TOTAL)
+    totals = _totals(rows)
+    sub_total, total_vat, total = totals.get("Sub Total"), totals.get("Total VAT"), totals.get("Total")
     currencies = {x[0] for x in (sub_total, total_vat, total) if x}
     issued = _one(lines, ISSUED)
     supplier, buyer = _party_names(rows)
