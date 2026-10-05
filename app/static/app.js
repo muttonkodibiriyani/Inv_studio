@@ -1201,7 +1201,9 @@ function fineRulesConfigGaps(config) {
   const gaps = [];
   const masterMarkets = Object.values(config?.location_master || {}).some((row) => row?.market);
   if (!masterMarkets && !Object.keys(config?.location_market || {}).length) gaps.push("location→market list (V-007)");
-  if (!(config?.supplier_site_currency || []).length) gaps.push("supplier-site currency list (V-010)");
+  if (!(config?.supplier_site_currency || []).length && !(config?.supplier_sites || []).length) {
+    gaps.push("supplier-site currency list (V-010)");
+  }
   return gaps;
 }
 

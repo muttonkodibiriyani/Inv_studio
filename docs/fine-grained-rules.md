@@ -110,7 +110,7 @@ engine routes the affected case to review rather than guessing.
 Code: `app/fine_rules.py` (engine), `app/fine_rules_source.py` (read-only lookup-catalog adapter; every term hit is re-checked against the original column; >50,000 rows refuses), `app/fine_rules_export.py` (review workbook with sheets 06/06A/07/08/09/10/11/12 + Lineage; target workbook with the unchanged 13/3/6 template columns, refused unless every invoice is `Approved`).
 Existing engine: `app/matching.py` compares barcodes after `strip_ult` on both sides; `app/excel.py` never writes `ULT_` into UPC.
 
-API: `GET/POST /api/fine-rules/config` (location master, location to market, supplier-site currency, USD exceptions, tolerances; validated, audited), `POST /api/fine-rules/run`, `POST /api/fine-rules/review.xlsx`, `POST /api/fine-rules/target.xlsx` (409 unless all Approved), `GET/POST /api/fine-rules/feedback`, `POST /api/fine-rules/feedback/{id}/decision`.
+API: `GET/POST /api/fine-rules/config` (location master, location to market, supplier-site currency, supplier sites, VAT codes, USD exceptions, tolerances; validated, audited by size), `POST /api/fine-rules/run`, `POST /api/fine-rules/review.xlsx`, `POST /api/fine-rules/target.xlsx` (409 unless all Approved), `GET/POST /api/fine-rules/feedback`, `POST /api/fine-rules/feedback/{id}/decision`.
 
 Tests: `tests/test_fine_rules.py` has one test per rule ID (`test_R_001_…` to `test_R_030_…`, `test_ALG_001_…` to `test_ALG_030_…`, `test_02A_target_mapping[02A-<column>]` for the 12 02A rows, `test_02A_unit_cost_line_value_reconciliation`, `test_working_sheets_have_exact_rulebook_headers`). `tests/test_fine_rules_api.py` runs the rules over an imported synthetic catalog using the deployed manifest's roles, plus the API. All fixtures are synthetic.
 
@@ -118,13 +118,34 @@ Tests: `tests/test_fine_rules.py` has one test per rule ID (`test_R_001_…` to 
 
 | Item | Effect until supplied | Unblocks |
 |---|---|---|
-| V-007 location to market map (R-011, R-027, R-030) | Market blank; no PO passes the R-030 gate, so nothing is `Approved`; the unique candidate is listed in the `Missing PO` exception | `POST /api/fine-rules/config` `location_master`/`location_market` |
-| V-010 supplier-site + market currency list (R-012, ALG-023/024/025) | Currency blank, `Currency Mapping` exception | `supplier_site_currency`, `usd_exceptions` |
+| V-007 location to market map (R-011, R-027, R-030) | Supplied by the owner (mapping workbook, 2026-10-05), loaded privately as `location_master`; until loaded: Market blank, no PO passes R-030 | `POST /api/fine-rules/config` `location_master`/`location_market` |
+| V-010 supplier-site + market currency list (R-012, ALG-023/024/025) | Supplied by the owner, loaded privately as `supplier_sites`; until loaded: Currency blank, `Currency Mapping` exception | `supplier_sites`, `supplier_site_currency`, `usd_exceptions` |
 | R-007 / ALG-022 Brand | Live catalog did not import `UDA_LV_1_VALUE`; Brand blank with a non-blocking `Data Quality` warning | Integrator re-imports the Item Master with `UDA_LV_1_VALUE` in the manifest |
 | V-001 RE2 entity | `Entity Hint` warning | Add the row to `entity_map` |
 | V-008 ambiguous dates | `Date Review` exception | Business date-format rule per supplier |
 | V-009 description threshold | Description route is review-only | Approved threshold |
-| R-016 tax mapping | `Unit Tax Code` only from the reviewed invoice tax code; blank = `Tax Code` exception | Approved ULTA tax mapping |
+| R-016 tax mapping | Owner VAT codes (type C / PV only) loaded privately as `vat_codes`; until loaded, `Unit Tax Code` only from the reviewed invoice tax code | `vat_codes` |
+
+### Owner mapping tables (private)
+
+The owner's mapping workbook (sheets VAT CODES, LOCATIONS, SUPPLIER SITES) is business data and never enters
+git, fixtures, docs or logs. `python -m app.fine_rules_tables WORKBOOK --out PRIVATE.json [--merge CURRENT.json]`
+reads it in place, writes a mode-0600 config and prints counts only; unusable rows are listed by sheet, row and
+reason. The service reads the tables from its private store through `POST /api/fine-rules/config`; the audit
+entry keeps table sizes, not rows. How the rules use them:
+
+- **Location (R-011, ALG-014, R-027):** type from WH/STORE (STORE = Store (S), W/H = Warehouse (W)) overrides the
+  800/380 prefix; Market is the location's COUNTRY (03_Entity_Map and 05_Location_Master treat market as the
+  country). The ENTITY AND CURRENCY code is kept for display only and decides nothing, so its currency letters are
+  never compared with a supplier-site currency. Market names compare without case.
+- **Currency (R-012, ALG-023/025):** an explicit `supplier_site_currency` row wins; otherwise the supplier site's
+  one currency from `supplier_sites`. A site marked Inactive is not a "current" setup (R-012) and goes to review.
+  A configured USD still needs a `usd_exceptions` entry (ALG-024). Rows without a site id cannot be keyed and are
+  counted, not loaded.
+- **Unit Tax Code (R-016, R-013):** blank on the invoice → the C/PV code of the receiving market's VAT region
+  (`<COUNTRY> Vat Region`), only from its active date and only when the printed tax agrees with the region rate on
+  the invoice net or line by line; otherwise a `Tax Code` exception. Regions that are not a location country
+  (the custom and special-purpose regions) are loaded but never selected: the rules say nothing about when they apply.
 
 ## Website panel (branch feat/fine-rules-ui)
 
