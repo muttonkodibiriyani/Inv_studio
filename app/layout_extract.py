@@ -155,8 +155,12 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
     currency = _extract_currency(lines)
     net_patterns = (
             re.compile(
-                r"(?i)(?:^|\s)net\s+amount\s*:?\s*(?:[A-Z]{3}\s*)?"
-                r"([0-9][0-9,]*(?:\.[0-9]+)?)\b"
+                r"(?i)^\s*net\s+total\s*:?\s*(?:[A-Z]{3}\s*)?"
+                r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*$"
+            ),
+            re.compile(
+                r"(?i)^\s*net\s+amount\s*:?\s*(?:[A-Z]{3}\s*)?"
+                r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*$"
             ),
             re.compile(
                 r"(?i)^\s*sub\s*total\s*:?\s*(?:[A-Z]{3}\s*)?"
@@ -201,6 +205,7 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
         po=po,
         location=None,
         date=invoice_date,
+        date_printed=_extract_printed_date(source_lines) or _extract_printed_date(lines),
         currency=currency,
         origin=None,
         market=None,
@@ -718,6 +723,28 @@ def _only_distinct(values: Iterable[str]) -> str | None:
     return next(iter(distinct.values()))
 
 
+def _extract_printed_date(lines: list[str]) -> str | None:
+    """Preserve a labelled source date even when its locale is ambiguous."""
+    date_pattern = r"(?:\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}|\d{1,2}[- /][A-Za-z]{3,9}[- /]\d{4})"
+    label = re.compile(r"(?i)\b(?:invoice|document)\s+date\s*:?\s*(" + date_pattern + r")(?!\d)")
+    values = []
+    for i, line in enumerate(lines):
+        match = label.search(line)
+        if match:
+            values.append(match.group(1).strip())
+        elif re.fullmatch(r"(?i)\s*(?:(?:tax\s+)?invoice\s+|document\s+)?date\s*:?\s*", line) and i + 1 < len(lines):
+            if re.fullmatch(date_pattern, lines[i + 1].strip()):
+                values.append(lines[i + 1].strip())
+        else:
+            bare = re.fullmatch(r"(?i)\s*date\s*:?\s*(" + date_pattern + r")\s*", line)
+            if bare:
+                values.append(bare.group(1).strip())
+    normalized = {}
+    for value in values:
+        normalized.setdefault(re.sub(r"\s*([-/.])\s*", r"\1", value).casefold(), value)
+    return next(iter(normalized.values())) if len(normalized) == 1 else None
+
+
 def _extract_date(lines: list[str]) -> str | None:
     priorities = (
         re.compile(r"(?i)\bdocument\s+date\s*:?\s*([0-9A-Z./ -]{6,24})"),
@@ -760,7 +787,9 @@ def _parse_date(value: str) -> str | None:
     numeric = re.fullmatch(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", cleaned)
     if numeric:
         day, month, year = map(int, numeric.groups())
-        if day <= 12:
+        if day <= 12 < month:
+            day, month = month, day
+        elif day <= 12 and day != month:
             return None
         try:
             return date(year, month, day).isoformat()
@@ -797,6 +826,7 @@ def _extract_currency(lines: list[str]) -> str | None:
         re.compile(r"(?i)\bcurrency\s*:\s*([A-Z]{3})\b"),
         re.compile(r"(?i)\btotal\s+in\s+([A-Z]{3})\b"),
         re.compile(r"(?i)^\s*total\s+([A-Z]{3})\s+[0-9][0-9,.]*\s*$"),
+        re.compile(r"(?i)\bamount\s+(AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\b"),
     )
     for line in lines:
         for pattern in patterns:

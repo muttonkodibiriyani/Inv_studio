@@ -122,7 +122,8 @@ def test_semantic_tables_handle_repeated_headers_and_page_continuation():
     assert result is not None
     assert result["number"] == "INV-100"
     assert result["po"] == "PO-9"
-    assert result["date"] == "04/10/2026"
+    assert result.get("date") is None
+    assert result["date_printed"] == "04/10/2026"
     assert result["currency"] == "AED"
     assert result["net"] == "8.500"
     assert result["tax"] == "0.425"

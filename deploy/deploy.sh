@@ -11,13 +11,14 @@ set -euo pipefail
 : "${INV_STUDIO_SITE:?Set the separate Firebase Hosting site ID}"
 : "${INV_STUDIO_DB_SECRET:=inv-studio-database-url}"
 : "${INV_STUDIO_VAULT_SECRET:=inv-studio-vault-key}"
+: "${INV_STUDIO_CPU:=2}"
 cd "$(dirname "$0")/.."
 
 gcloud run deploy inv-studio-api --project="$GCP_PROJECT" --region="$GCP_REGION" \
   --image="$INV_STUDIO_IMAGE" --service-account="$INV_STUDIO_RUNTIME_SA" \
   --set-cloudsql-instances="$INV_STUDIO_CLOUDSQL" \
   --set-secrets="INV_STUDIO_DATABASE_URL=$INV_STUDIO_DB_SECRET:latest,INV_STUDIO_VAULT_KEY=$INV_STUDIO_VAULT_SECRET:latest" \
-  --env-vars-file="$INV_STUDIO_ENV_FILE" --port=8080 --cpu=2 --memory=8Gi \
+  --env-vars-file="$INV_STUDIO_ENV_FILE" --port=8080 --cpu="$INV_STUDIO_CPU" --memory=8Gi \
   --max-instances=1 --min-instances=0 --concurrency=20 --timeout=300 \
   --no-cpu-throttling --execution-environment=gen2 --allow-unauthenticated --quiet
 

@@ -94,3 +94,25 @@ Revision `00008` passed adaptive Paddle, authenticated API and References UI loo
 - Managed Vertex: `15 documents/570 lines, all source-tested fields exact for one layout family; calculated usage USD 0.3719325`
 - Private catalog: `atomic cutover succeeded; live 412,139 = 114,940 item + 297,199 PO/GRN; archive receipt d06678…; 94 healthy guard probes; state 1.917 s; disk 5.244/10.464 GB; API lookup QA exact-name rank one 2.831 s, typo rank one 1.182 s, PO 0.462 s, impossible strict filter empty; UI exact/typo rank one 1.222/1.293 s, three exact PO results 0.446 s, warnings retained, zero mutations/page errors`
 - Hosted authenticated extension smoke: `native 193-row, Paddle 96/99 in 242.98 s, managed-AI 97/99 in 16.18 s, two-invoice review workbook, lookup, deletion/model and cancel-dialog checks passed; 00009-vxw owner-only allowlist and unauthenticated-denial cleanup PASSED`
+
+## Follow-up regression: numbered descriptions and continuation pages
+
+A newly supplied four-page invoice exposed three conversion defects: product-size numbers crossed into the quantity column; incidental footer tables suppressed native word-table recovery; and table headings were not carried to headerless continuation pages. An actual Docling run also exposed duplicate rows when flattened SKU/country metadata prevented structural and measured rows from matching.
+
+The patched converter uses measured column boundaries, rejects contaminated numeric cells, separates explicit SKU/country/customs metadata from product descriptions, and carries headings only with a matching invoice number, adjacent page, unchanged page size and consecutive printed serial. A merged serial/part OCR token is split only when its literal expected prefix and measured cross-column position agree; the evidence marks that repair for review. It preserves printed amounts and discounts without allocating or inventing values.
+
+Private source/gold and reader payloads stay outside this repository. On this **one 21-line invoice**, checked by source order:
+
+| Reader path | Checked result | Timing and limits |
+|---|---|---|
+| Native PDF text through invoice2data's structured adapter | 21/21 rows; 168/168 checks across SKU, description, quantity, UOM, price, printed net, printed tax and page | 2.261 seconds locally; this is the native adapter, not a supplier-template match |
+| Actual Docling output through the corrected converter | 21/21 rows; 168/168 checks across the same eight fields | Actual reader run about 74 seconds; retained reader payload was reconverted after the metadata fix |
+| Actual PaddleOCR output through the corrected converter | 21/21 rows; 160/168 checks across the same eight fields | Actual baseline reader run about 173 seconds on two CPU cores; all 21 quantities, units, prices, printed net and tax values match, but only 20/21 SKUs and 14/21 descriptions match |
+
+These are line-field results, not complete-invoice accuracy. The independent transcription has 267 source facts, including fields outside the current application schema; those unscored facts are not included in the 168-field denominator. Date locale, missing internal codes and discount reconciliation still need review. The prior 15-PDF native layout family was rerun after these changes: 570 rows and 3,990/3,990 checked line fields remained exact, in 18.261 seconds locally.
+
+Printed invoice dates are now retained separately as `date_printed`. Ambiguous numeric slash/hyphen dates remain visible next to the date picker; a reviewer chooses the canonical ISO date. This avoids silently swapping day and month, and does not bypass export validation.
+
+Bulk-performance follow-up: ten repetitions of that same private four-page PDF, using two workers in a two-CPU container with AI disabled, completed in **18.818 seconds** with 21 lines each through the explicitly labelled native-text path. This measures queue throughput for one layout, not ten distinct suppliers. Disabling the new PDF-text preference still runs the selected OCR engine. The fast path requires explicit identifiers, complete line quantities/units/prices/printed net values, and exact net reconciliation, including at most one explicitly printed document discount; it does not distribute discounts or approve an invoice.
+
+Two simultaneous actual Paddle reads, each limited to two CPU cores, completed in **168.506 seconds** total (164.313 and 166.619 seconds per run), with sampled combined peak memory about **2.09 GiB**. This compares with about 173 seconds for one earlier two-CPU read, or an estimated 346 seconds for two sequential reads. OCR concurrency remains one by default; a deployment can set `INV_LOCAL_OCR_CONCURRENCY=2` after allocating sufficient CPU and memory. `INV_STUDIO_CPU=4` sizes the deployment script for that tested two-slot configuration. Reader time and waiting time are recorded separately. Broad scan latency and supplier accuracy remain unproven.

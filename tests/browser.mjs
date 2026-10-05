@@ -278,9 +278,34 @@ try {
   await page.evaluate((id) => selectJob(id), demoJob.id);
   await waitForSelectedReview(demoJob.filename);
 
+  // Ambiguous printed dates remain visible source evidence while the canonical
+  // HTML date control stays blank until a reviewer chooses the calendar date.
+  await page.evaluate(() => {
+    const printedDateJob = structuredClone(app.currentJob);
+    printedDateJob.invoice.date_printed = "03-08-2026";
+    printedDateJob.invoice.date = null;
+    renderSelectedJob(printedDateJob);
+  });
+  const printedDate = page.locator('#header-fields input[name="date_printed"]');
+  const canonicalDate = page.locator('#header-fields input[name="date"]');
+  assert.equal(await printedDate.inputValue(), "03-08-2026");
+  assert.equal(await printedDate.getAttribute("readonly"), "");
+  assert.equal(await canonicalDate.inputValue(), "");
+  assert.match(
+    await canonicalDate.locator("xpath=..").locator("small").textContent(),
+    /day\/month ambiguous.*choose the intended calendar date/i,
+  );
+  await canonicalDate.fill("2026-08-03");
+  assert.equal(await printedDate.inputValue(), "03-08-2026", "Choosing a date changed the printed source value");
+  await page.evaluate((id) => selectJob(id), demoJob.id);
+  await waitForSelectedReview(demoJob.filename);
+
   // Reprocessing is separately gated, even when the document is already local.
   await page.locator("#retry-job").click();
   await page.locator("#retry-dialog").waitFor({ state: "visible" });
+  assert(await page.locator("#retry-prefer-native-text").isChecked(), "Native PDF text was not enabled by default");
+  await page.locator("#retry-prefer-native-text").locator("..").click();
+  assert.equal(await page.locator("#retry-prefer-native-text").isChecked(), false);
   const retryPreflightsBeforeCancel = requestLog.filter(
     (entry) => entry.method === "POST" && entry.path === "/api/preflight",
   ).length;
@@ -296,6 +321,7 @@ try {
 
   await page.locator("#retry-job").click();
   await page.locator("#retry-dialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#retry-prefer-native-text").isChecked(), false, "Retry lost the native-text preference");
   await page.locator("#retry-model").fill("synthetic-close-model");
   await page.locator("#retry-dialog").getByRole("button", { name: "Close", exact: true }).click();
   await page.locator("#retry-dialog").waitFor({ state: "hidden" });
@@ -308,13 +334,20 @@ try {
 
   await page.locator("#retry-job").click();
   await page.locator("#retry-dialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#retry-prefer-native-text").isChecked(), false, "Retry preference changed before preflight");
+  const retryPlanRequestPromise = page.waitForRequest((request) =>
+    request.method() === "POST" && new URL(request.url()).pathname === "/api/preflight",
+  );
   const retryResponse = await runPreflight(
     () => page.locator("#retry-dialog").getByRole("button", { name: "Reprocess" }).click(),
     `/api/jobs/${demoJob.id}/retry`,
     "Invoice retry",
   );
+  const retryPlanRequest = await retryPlanRequestPromise;
+  assert.equal(retryPlanRequest.postDataJSON().options.prefer_native_text, false);
   const retriedJob = await retryResponse.json();
   assert.equal(retriedJob.id, demoJob.id, "Retry returned a different invoice job");
+  assert.equal(retriedJob.options.prefer_native_text, false, "Retry did not retain its confirmed native-text rule");
   await waitForCompletedJob(demoJob.id);
   await waitForSelectedReview(demoJob.filename);
   assert.equal(
@@ -580,6 +613,7 @@ try {
   // Add a second, distinct synthetic invoice through the normal file-upload UI.
   await page.locator("[data-open-upload]").first().click();
   await page.locator("#upload-dialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#upload-prefer-native-text").isChecked(), false, "Upload did not share the native-text preference");
   const secondFilename = `smoke-${runId.toLowerCase()}-2.json`;
   await page.locator("#invoice-files").setInputFiles({
     name: secondFilename,
@@ -614,8 +648,11 @@ try {
     { timeout },
   );
   await page.locator("#start-upload").click();
-  await assertOk(await cancelledPlanPromise, "Cancelled upload preflight");
+  const cancelledPlanResponse = await cancelledPlanPromise;
+  await assertOk(cancelledPlanResponse, "Cancelled upload preflight");
+  assert.equal(cancelledPlanResponse.request().postDataJSON().options.prefer_native_text, false);
   await page.locator("#preflight-dialog").waitFor({ state: "visible" });
+  assert.match(await page.locator("#preflight-summary").textContent(), /PDF text\s*Disabled/i);
   assert.equal(
     requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/invoices")
       .length,
@@ -630,6 +667,7 @@ try {
     (await page.locator("#upload-queue").textContent())?.includes(secondFilename),
     "Cancelling preflight did not restore the original upload queue",
   );
+  assert.equal(await page.locator("#upload-prefer-native-text").isChecked(), false, "Cancelled preflight changed the native-text rule");
   assert.equal(
     requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/invoices")
       .length,
@@ -644,6 +682,7 @@ try {
   );
   const secondJob = await uploadResponse.json();
   assert.match(secondJob.id, /^[a-f0-9]{32}$/, "Upload did not return an invoice job id");
+  assert.equal(secondJob.options.prefer_native_text, false, "Upload did not retain its confirmed native-text rule");
   await waitForCompletedJob(secondJob.id);
   await waitForSelectedReview(secondJob.filename);
   const secondReadyJob = await saveConfirmedReview(secondJob.id, secondNumber);
@@ -865,6 +904,7 @@ print(json.dumps({
         method: "text_only",
         status: "text_only",
         seconds: 1.93,
+        queue_seconds: 4.5,
         text_characters: 1222,
         extracted_fields: 0,
         line_items: 0,
@@ -884,8 +924,8 @@ print(json.dumps({
     provenance: [],
   }));
   const traceEvidence = await page.locator("#trace-list li").allTextContents();
-  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s · 1,222 text characters · 0 fields · 0 items · 0% field completeness/);
-  assert.match(traceEvidence[1], /Docling: Extracted · Table and word geometry conversion · 7\.25 s · 31,717 text characters · 6 fields · 5 items · 80% field completeness/);
+  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s reading · 4\.50 s waiting for a reader · 1,222 text characters · 0 fields · 0 items · 0% field completeness/);
+  assert.match(traceEvidence[1], /Docling: Extracted · Table and word geometry conversion · 7\.25 s reading · 31,717 text characters · 6 fields · 5 items · 80% field completeness/);
   await page.evaluate(() => renderTrace({selected_engine: "paddleocr", trace: [
     {engine: "paddleocr", status: "extracted"}, {engine: "docling", status: "extracted"},
   ]}));

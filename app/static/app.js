@@ -18,7 +18,8 @@ const HEADER_FIELDS = [
   ["buyer", "Buyer code · reference", "text"],
   ["po", "Purchase order", "text"],
   ["location", "Delivery location", "text"],
-  ["date", "Invoice date", "date"],
+  ["date_printed", "Printed invoice date · source", "text", { readOnly: true }],
+  ["date", "Invoice date · confirm YYYY-MM-DD", "date"],
   ["currency", "Currency", "text"],
   ["origin", "Origin", "text"],
   ["market", "Market", "text"],
@@ -39,6 +40,19 @@ const STATUS_LABELS = {
   exported: "Exported",
   error: "Needs attention",
 };
+
+const NATIVE_TEXT_PREFERENCE = "invoice-studio-prefer-native-text";
+
+function savedNativeTextPreference() {
+  try {
+    const saved = window.localStorage.getItem(NATIVE_TEXT_PREFERENCE);
+    return { value: saved === null ? true : saved !== "false", explicit: saved !== null };
+  } catch (_) {
+    return { value: true, explicit: false };
+  }
+}
+
+const initialNativeTextPreference = savedNativeTextPreference();
 
 const app = {
   state: null,
@@ -73,7 +87,21 @@ const app = {
   providerModels: {},
   providerVerified: {},
   modelLoadTokens: {},
+  preferNativeText: initialNativeTextPreference.value,
+  nativeTextPreferenceExplicit: initialNativeTextPreference.explicit,
 };
+
+function setNativeTextPreference(value, { remember = true } = {}) {
+  app.preferNativeText = Boolean(value);
+  ["upload", "retry"].forEach((prefix) => {
+    const input = $(`#${prefix}-prefer-native-text`);
+    if (input) input.checked = app.preferNativeText;
+  });
+  if (!remember) return;
+  app.nativeTextPreferenceExplicit = true;
+  try { window.localStorage.setItem(NATIVE_TEXT_PREFERENCE, String(app.preferNativeText)); }
+  catch (_) { /* Browser storage is optional; the in-memory preference remains. */ }
+}
 
 async function studioFetch(path, options = {}) {
   const config = { ...options, headers: { ...(options.headers || {}) } };
@@ -717,17 +745,27 @@ function renderInvoiceForm(job) {
   const invoice = job.invoice || {};
   const fields = $("#header-fields");
   fields.replaceChildren();
-  HEADER_FIELDS.forEach(([name, label, type]) => {
+  HEADER_FIELDS.forEach(([name, label, type, options = {}]) => {
     const wrapper = make("label", "field-wrap");
     wrapper.append(make("span", "", label));
     const input = make("input");
     input.name = name;
     input.type = type;
+    input.readOnly = Boolean(options.readOnly);
+    if (input.readOnly) input.setAttribute("aria-readonly", "true");
     if (type === "number") input.step = "any";
     if (name === "currency") { input.maxLength = 3; input.autocapitalize = "characters"; }
     input.value = invoice[name] ?? "";
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
+    if (name === "date_printed") {
+      wrapper.append(make("small", "", invoice.date_printed
+        ? "Read-only source evidence. It is never converted automatically."
+        : "No separate printed source date was captured."));
+    }
+    if (name === "date" && invoice.date_printed && !invoice.date) {
+      wrapper.append(make("small", "", "The printed value may be day/month ambiguous. Choose the intended calendar date before approval."));
+    }
     fields.append(wrapper);
   });
   const lines = $("#line-items");
@@ -874,7 +912,9 @@ function renderTrace(job) {
       };
       const method = entry.method ? ` · ${methodNames[entry.method] || humanize(entry.method)}` : "";
       const seconds = Number(entry.seconds);
-      const timing = Number.isFinite(seconds) ? ` · ${seconds.toFixed(2)} s` : "";
+      const queued = Number(entry.queue_seconds);
+      const timing = (Number.isFinite(seconds) ? ` · ${seconds.toFixed(2)} s reading` : "")
+        + (Number.isFinite(queued) && queued > 0.05 ? ` · ${queued.toFixed(2)} s waiting for a reader` : "");
       const evidence = [];
       const textCharacters = Number(entry.text_characters);
       if (Number.isFinite(textCharacters)) evidence.push(`${textCharacters.toLocaleString()} text characters`);
@@ -1323,6 +1363,7 @@ function openUpload() {
   $("#upload-ai-fallback").checked = settings.ai_fallback !== false;
   $("#upload-engine").value = "auto";
   $("#upload-language").value = "en";
+  setNativeTextPreference(app.preferNativeText, { remember: false });
   $("#upload-progress").hidden = true;
   updateUploadReadiness();
   $("#upload-dialog").showModal();
@@ -1330,8 +1371,11 @@ function openUpload() {
 }
 
 function processingOptions(prefix = "upload") {
+  const preferNativeText = $(`#${prefix}-prefer-native-text`).checked;
+  setNativeTextPreference(preferNativeText);
   return {
     engine: $(`#${prefix}-engine`).value,
+    prefer_native_text: preferNativeText,
     ai_fallback: $(`#${prefix}-ai-fallback`).checked,
     provider: $(`#${prefix}-provider`).value,
     model: $(`#${prefix}-model`).value.trim(),
@@ -1399,7 +1443,7 @@ async function prepareDemo() {
     if (!sample) throw new Error("Demo invoice metadata is unavailable.");
     await requestPreflight({
       kind: "demo",
-      options: { engine: "auto", ai_fallback: true, provider: "openai", model: "", language: "en" },
+      options: { engine: "auto", prefer_native_text: true, ai_fallback: true, provider: "openai", model: "", language: "en" },
       files: [{ name: sample.name, size: sample.size }],
     });
   } catch (error) {
@@ -1426,6 +1470,7 @@ function renderPreflight(plan, request) {
   const details = [
     ["Files", String(plan.summary.file_count)],
     ["Engine", humanize(plan.summary.engine)],
+    ["PDF text", plan.summary.prefer_native_text ? "Use when available (faster)" : "Disabled — force the selected OCR reader"],
     ["AI fallback", plan.summary.ai_fallback ? "Allowed" : "Disabled (local only)"],
     ["Provider", plan.summary.ai_fallback || plan.summary.engine === "ai" ? humanize(plan.summary.provider) : "Not used"],
     ["Model", plan.summary.ai_fallback || plan.summary.engine === "ai" ? (plan.summary.model || "Not selected") : "Not used"],
@@ -2105,6 +2150,11 @@ function bindEvents() {
   ["dragleave", "drop"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragover"); }));
   dropZone.addEventListener("drop", (event) => queueFiles(event.dataTransfer.files));
   ["#upload-ai-fallback", "#upload-engine", "#upload-provider", "#upload-model"].forEach((selector) => $(selector).addEventListener("input", updateUploadReadiness));
+  ["upload", "retry"].forEach((prefix) => {
+    $(`#${prefix}-prefer-native-text`).addEventListener("change", (event) => {
+      setNativeTextPreference(event.currentTarget.checked);
+    });
+  });
   $("#upload-provider").addEventListener("change", () => loadProviderModels("upload", { providerChanged: true }));
   $("#upload-form").addEventListener("submit", beginUploadPreflight);
 
@@ -2113,6 +2163,10 @@ function bindEvents() {
     const options = { ...rawOptions, ...offeredAISettings(rawOptions) };
     $("#retry-engine").value = options.engine || "auto";
     $("#retry-language").value = options.language || "en";
+    const preferNativeText = app.nativeTextPreferenceExplicit
+      ? app.preferNativeText
+      : options.prefer_native_text !== false;
+    setNativeTextPreference(preferNativeText, { remember: false });
     $("#retry-ai-fallback").checked = options.ai_fallback !== false;
     $("#retry-provider").value = options.provider || "openai";
     $("#retry-model").value = options.model || "";
