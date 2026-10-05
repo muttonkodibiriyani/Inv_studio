@@ -20,7 +20,8 @@ from .authentication import actor
 
 
 ADVISORY_LOCK_ID = 0x496E7653
-PERSISTED_DIRS = frozenset(("uploads", "templates"))
+PERSISTED_DIRS = frozenset(("uploads", "templates", "learned"))
+SYNCED_PREFIXES = ("templates", "learned")
 
 SCHEMA = (
     "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
@@ -297,7 +298,7 @@ class PostgresStore:
         except ValueError:
             raise ValueError("Cloud blobs must stay inside the application data directory") from None
         if not relative.parts or relative.parts[0] not in PERSISTED_DIRS:
-            raise ValueError("Only uploads and supplier templates are persisted in cloud storage")
+            raise ValueError("Only uploads, supplier templates and the learned store are persisted in cloud storage")
         return target,relative.as_posix()
 
     def _download(self,blob,target):
@@ -335,16 +336,29 @@ class PostgresStore:
                 if getattr(error,"code",None)!=404:raise
             target.unlink(missing_ok=True)
 
-    def sync_templates(self):
-        template_root=(self.root/"templates").resolve()
+    def remove_blob(self,path):
+        # Only the learned store (app.learned) deletes its own files; uploads go through delete_upload.
+        target,name=self._blob_target(path)
+        if PurePosixPath(name).parts[0]!="learned":
+            raise ValueError("Only learned-store files can be removed through this operation")
         with self._blob_lock:
-            for blob in self.bucket.list_blobs(prefix="templates/"):
-                name=PurePosixPath(blob.name)
-                parts=name.parts
-                if len(parts)<2 or parts[0]!="templates" or any(part in ("",".","..") for part in parts):
-                    raise ValueError("Cloud template object has an unsafe name")
-                target=template_root.joinpath(*parts[1:]).resolve()
-                if not target.is_relative_to(template_root):
-                    raise ValueError("Cloud template object has an unsafe name")
-                if not target.exists():
-                    self._download(blob,target)
+            try:self.bucket.blob(name).delete()
+            except Exception as error:
+                if getattr(error,"code",None)!=404:raise
+            target.unlink(missing_ok=True)
+
+    def sync_templates(self):
+        # Supplier templates and the private learned store are restored from the bucket on start.
+        for prefix in SYNCED_PREFIXES:
+            local_root=(self.root/prefix).resolve()
+            with self._blob_lock:
+                for blob in self.bucket.list_blobs(prefix=prefix+"/"):
+                    name=PurePosixPath(blob.name)
+                    parts=name.parts
+                    if len(parts)<2 or parts[0]!=prefix or any(part in ("",".","..") for part in parts):
+                        raise ValueError("Cloud template object has an unsafe name")
+                    target=local_root.joinpath(*parts[1:]).resolve()
+                    if not target.is_relative_to(local_root):
+                        raise ValueError("Cloud template object has an unsafe name")
+                    if not target.exists():
+                        self._download(blob,target)

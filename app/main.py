@@ -23,6 +23,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 from .authentication import CloudIdentity, actor
 from .engines import capabilities, process
+from .learned import LearnedStore
 from .excel import workbook, batch_workbook
 from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
@@ -157,13 +158,17 @@ def create_app(data_dir=None):
         store_type=PostgresStore
     store=store_type(Path(data_dir or os.getenv("INV_STUDIO_DATA",ROOT/".data")))
     if identity.cloud:store.sync_templates()
-    auth=ChatGPTAuth(store);providers=Providers(store,auth)
+    learned=None
+    if os.getenv("INV_STUDIO_LEARN","1")!="0":
+        learned=LearnedStore(store.root,persist=getattr(store,"persist_blob",None) if identity.cloud else None,
+                             remove=getattr(store,"remove_blob",None) if identity.cloud else None)
+    auth=ChatGPTAuth(store);providers=Providers(store,auth,learned)
     lookup=ReferenceLookup(store)
     products=ProductCandidates(lookup)
     pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix="invoice")
     slots=threading.BoundedSemaphore(20)
     plans={};plans_lock=threading.RLock()
-    app.state.store=store;app.state.providers=providers;app.state.auth=auth;app.state.pool=pool
+    app.state.store=store;app.state.providers=providers;app.state.auth=auth;app.state.pool=pool;app.state.learned=learned
     allowed_origins={x.strip() for x in os.getenv("INV_STUDIO_ALLOWED_ORIGINS","").split(",") if x.strip()}
     hosts=["127.0.0.1","localhost","testserver"]
     if identity.cloud:hosts += ["*.run.app"]+[urlparse(x).netloc for x in allowed_origins]
@@ -417,9 +422,13 @@ def create_app(data_dir=None):
             raise ValueError("Select each invoice only once")
         try:
             with plans_lock,store.connection(True) as connection:
-                return delete_invoices(store,body.jobs,connection)
+                outcome=delete_invoices(store,body.jobs,connection)
         except DeletionError as error:
             raise HTTPException(error.status_code,error.detail) from None
+        if learned is not None:
+            try:learned.forget_sources([item.id for item in body.jobs])
+            except Exception as error:store.audit("learned_failed",{"stage":"forget","error_type":type(error).__name__})
+        return outcome
 
     @app.get("/api/jobs/{jid}")
     def get_job(jid:str):return public(evaluate(job_or_404(jid)))
@@ -490,6 +499,7 @@ def create_app(data_dir=None):
                      "allocations":[m["allocation"] for m in j["validation"]["matches"]]}
             c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(eid,key(inv),jid,json.dumps(receipt),content))
             j.update(status="exported",export_id=eid,revision=j["revision"]+1);store.job(jid,j,c);store.audit("exported",receipt,c)
+        learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
     @app.get("/api/exports/{eid}")
@@ -538,6 +548,7 @@ def create_app(data_dir=None):
                 c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(receipt["id"],receipt["invoice_key"],j["id"],json.dumps(receipt),content))
                 j.update(status="exported",export_id=receipt["id"],batch_id=batch_id,transaction_number=receipt["transaction_number"],revision=j["revision"]+1)
                 store.job(j["id"],j,c);store.audit("exported",receipt,c)
+        for j,_ in selected:learn_later(j)
         return {"id":batch_id,"url":"/api/batches/"+batch_id,"count":len(selected)}
 
     @app.get("/api/batches/{bid}")
@@ -726,7 +737,51 @@ def create_app(data_dir=None):
             log=decide_feedback(store.get("fine_rules_feedback",[],c),fid,body.approver,body.decision,body.version)
             store.set("fine_rules_feedback",log,c)
             entry=next(x for x in log if x["Feedback ID"]==fid);store.audit("fine_rules_feedback_decided",entry,c)
+            if learned is not None:
+                try:
+                    if entry["Decision"]=="Approved":
+                        record=learned.promote_feedback(entry,store.jobs(c))
+                        store.audit("learned_correction",{"feedback_id":fid,"supplier_key":record["supplier_key"]},c)
+                    else:learned.retract_feedback(fid)
+                except Exception as error:store.audit("learned_failed",{"stage":"feedback","error_type":type(error).__name__},c)
         return entry
+
+    def learn_from_job(j):
+        # A verified (exported) invoice teaches its supplier's template and the AI examples.
+        try:
+            from .ocr_worker import structured_extract, templates_from
+            try:baseline,_=structured_extract(j.get("text") or "",j.get("boxes") or [],
+                                              templates_from([ROOT/"templates",store.root/"templates"]),j.get("tables") or [])
+            except Exception:baseline=None
+            outcome=learned.record_verified(j["invoice"],j.get("text") or "",j["id"],"export",baseline)
+            store.audit("learned_recorded",{"job_id":j["id"],"supplier_key":outcome.get("supplier_key"),
+                        "template":outcome.get("template"),"examples":outcome.get("examples"),
+                        "fixes":outcome.get("fixes",[]),"reason":outcome.get("reason")})
+        except Exception as error:
+            store.audit("learned_failed",{"job_id":j.get("id"),"stage":"record","error_type":type(error).__name__})
+
+    def learn_later(j):
+        if learned is not None:pool.submit(copy_context().run,learn_from_job,dict(j))
+
+    @app.get("/api/learned")
+    def learned_summary():
+        if learned is None:return {"enabled":False,"suppliers":[],"corrections":0,"unassigned_corrections":0}
+        return {"enabled":True,**learned.summary()}
+
+    @app.post("/api/learned/jobs/{jid}")
+    def learn_job(jid:str):
+        if learned is None:raise HTTPException(409,"Learning is switched off")
+        j=job_or_404(jid)
+        if j["status"]!="exported":raise HTTPException(409,"Only exported invoices count as verified")
+        learn_from_job(j)
+        return learned.summary()
+
+    @app.delete("/api/learned/{key}")
+    def forget_learned(key:str):
+        if learned is None:raise HTTPException(409,"Learning is switched off")
+        existed=learned.forget(key)
+        store.audit("learned_forgotten",{"supplier_key":key,"existed":existed})
+        return {"forgotten":existed}
 
     @app.post("/api/jobs/{jid}/draft")
     def manual_draft(jid:str,body:ManualDraftRequest):

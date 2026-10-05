@@ -5,6 +5,7 @@ import json
 import math
 import multiprocessing
 import os
+import re
 import tempfile
 import time
 from datetime import date, datetime
@@ -108,29 +109,127 @@ def paddle_reader(language, max_side=None):
 
 def templates_from(paths):
     from invoice2data.extract.loader import read_templates
-    return [t for path in paths for t in read_templates(str(path))]
+    return [t for path in paths if Path(path).is_dir() for t in read_templates(str(path))]
 
 
-def template_extract(text, templates):
+def _learned_meta(result, templates):
+    # A learned template (app.learned) carries its provenance and row conventions in a 'learned' block.
+    name=result.get("template_name")
+    for template in templates:
+        if template.get("template_name")==name:
+            return template.get("learned") if isinstance(template.get("learned"),dict) else None
+    return None
+
+
+def template_extract(text, templates, with_meta=False):
     # Reuse invoice2data's parser after a local OCR/layout engine has read text.
     from invoice2data import extract_data
     class TextReader:
         @staticmethod
         def to_text(_): return text
     result=extract_data("ocr-text", templates=templates, input_module=TextReader, ai_fallback=False)
-    if not result: return None
+    if not result: return (None,None) if with_meta else None
+    meta=_learned_meta(result,templates)
     fields={"invoice_number":"number","amount":"net"}
     allowed={"number","supplier_name","buyer_name","seller","site","buyer","po","location","date_printed","date","currency","origin","market","taxCode","net","tax","lines"}
     out={fields.get(k,k):v for k,v in result.items() if fields.get(k,k) in allowed}
+    if meta is not None:
+        # A learned regex that matches more than once yields a list: one value when they agree, else nothing.
+        for key in [k for k,v in out.items() if k!="lines" and isinstance(v,list)]:
+            if len({str(v) for v in out[key]})==1:out[key]=out[key][0]
+            else:del out[key]
+        for field,candidates in (meta.get("fallbacks") or {}).items():
+            # The learner ranked further anchors for this field; the first that finds one value wins.
+            if out.get(field) not in (None,""):continue
+            for candidate in candidates:
+                try:found={m for m in re.findall(candidate["regex"],text)}
+                except re.error:continue
+                if len(found)!=1:continue
+                value=found.pop()
+                if field=="date":
+                    try:value=datetime.strptime(value,candidate.get("date_format") or "%Y-%m-%d").strftime("%Y-%m-%d")
+                    except ValueError:continue
+                elif field in ("net","tax"):
+                    try:value=float(value.replace(",",""))
+                    except ValueError:continue
+                out[field]=value
+                break
     if isinstance(out.get("date"),(date,datetime)):out["date"]=out["date"].strftime("%Y-%m-%d")
     from .models import Line
     lines=[]
     for row in out.get("lines",[]):
         row=dict(row)
         if "description" not in row and "name" in row:row["description"]=row["name"]
+        if meta is not None:
+            from .learned import finish_row
+            row=finish_row(row,meta)
         lines.append({k:v for k,v in row.items() if k in Line.model_fields})
     out["lines"]=lines
-    return out
+    if meta is not None:
+        for field in ("net","tax"):
+            if isinstance(out.get(field),float):
+                value=Decimal(str(out[field]))
+                places=(meta.get("decimals") or {}).get(field)  # keep the decimals the supplier prints
+                if places is not None:value=value.quantize(Decimal(1).scaleb(-int(places)))
+                out[field]=format(value,"f")
+    return (out,meta) if with_meta else out
+
+
+LEARNED_HEADER_FIELDS=("number","date","currency","net","tax","po")
+
+
+def _same_arithmetic(baseline,candidate):
+    left=(baseline or {}).get("lines") or [];right=(candidate or {}).get("lines") or []
+    if len(left)!=len(right):return False
+    for a,b in zip(left,right):
+        for field in ("qty","price","net_amount"):
+            if _visible_decimal(a.get(field))!=_visible_decimal(b.get(field)):return False
+    return True
+
+
+def _document_reconciles(invoice):
+    lines=(invoice or {}).get("lines") or []
+    if not lines:return False
+    net=_visible_decimal((invoice or {}).get("net"))
+    amounts=[_visible_decimal(line.get("net_amount")) for line in lines]
+    if net is not None:
+        return None not in amounts and sum(amounts)==net
+    checks=_line_reconciliation(invoice)
+    return all(check is True for check in checks)
+
+
+def apply_learned(text,learned_templates,baseline,method):
+    """Learned supplier templates stay behind the built-in readers.
+
+    They read alone only when the built-in reading has no lines; when both agree on every
+    row's qty, price and amount they may overlay only the fields the template was proven to
+    fix on its verified source; otherwise they replace the built-in reading only when the
+    learned one reconciles with the document and the built-in one does not.
+    """
+    if not text or not learned_templates:return baseline,method,None
+    try:candidate,meta=template_extract(text,learned_templates,with_meta=True)
+    except Exception as error:return baseline,method,{"mode":"error","error":type(error).__name__}
+    if candidate is None or meta is None:return baseline,method,None
+    note={"template":meta.get("supplier_key"),"source_id":meta.get("source_id")}
+    if not (baseline or {}).get("lines"):
+        return candidate,"learned_template",dict(note,mode="read")
+    if _same_arithmetic(baseline,candidate):
+        merged=json.loads(json.dumps(baseline));changed=[]
+        for field in meta.get("fixes") or []:
+            if field in LEARNED_HEADER_FIELDS:
+                if candidate.get(field) not in (None,"") and str(candidate[field])!=str(merged.get(field)):
+                    merged[field]=candidate[field];changed.append(field)
+            elif field!="rows":
+                for row,learned_row in zip(merged["lines"],candidate["lines"]):
+                    value=learned_row.get(field)
+                    if value not in (None,"") and str(value)!=str(row.get(field)):
+                        row[field]=value
+                        if field not in changed:changed.append(field)
+        if changed:return merged,method+"+learned",dict(note,mode="overlay",fields=changed)
+        return baseline,method,None
+    if _document_reconciles(candidate) and not _document_reconciles(baseline):
+        return candidate,"learned_template",dict(note,mode="replace")
+    return baseline,method,None
 
 
 def structured_extract(text, boxes, templates, tables=None):
@@ -503,9 +602,15 @@ def main():
     p.add_argument("--file",type=Path,required=True);p.add_argument("--output",type=Path,required=True)
     p.add_argument("--templates",type=Path,action="append",default=[]);p.add_argument("--language",default="en")
     p.add_argument("--budget-seconds",type=int,default=PADDLE_WORKER_BUDGET_SECONDS)
+    p.add_argument("--learned-templates",type=Path,action="append",default=[],
+                   help="private directory of learned supplier templates (app.learned); missing dirs are ignored")
+    p.add_argument("--learned-only",action="store_true",
+                   help="diagnostic: read with the learned templates alone, skipping the built-in readers")
     args=p.parse_args()
+    if not args.learned_templates and os.getenv("INV_STUDIO_LEARNED_TEMPLATES"):
+        args.learned_templates=[Path(item) for item in os.getenv("INV_STUDIO_LEARNED_TEMPLATES").split(os.pathsep) if item]
     try:
-        worker_started=time.monotonic();tables=[];parser_error=None;recovery=None
+        worker_started=time.monotonic();tables=[];parser_error=None;recovery=None;learned=None
         if args.engine=="invoice2data":
             if args.file.suffix.lower()==".pdf":text,boxes,tables=digital(args.file,with_tables=True)
             else:text,boxes=digital(args.file)
@@ -515,24 +620,36 @@ def main():
             baseline_seconds=time.monotonic()-baseline_started
         else:text,boxes,tables=docling(args.file,args.language)
         templates=templates_from(args.templates)
+        learned_templates=templates_from(args.learned_templates)
         if args.file.suffix.lower()==".json":
             from .models import Invoice
             parsed=Invoice.model_validate_json(text).model_dump(mode="json")
             extraction_method="template"
+        elif args.learned_only:
+            try:
+                parsed,meta=template_extract(text,learned_templates,with_meta=True) if text else (None,None)
+                extraction_method="learned_template" if parsed is not None else "text_only"
+                learned=None if meta is None else {"mode":"only","template":meta.get("supplier_key"),
+                                                   "source_id":meta.get("source_id")}
+            except Exception as parse_error:
+                parsed=None;extraction_method="text_only";parser_error=type(parse_error).__name__
         else:
             try:
                 parsed,extraction_method=structured_extract(text,boxes,templates,tables)
             except Exception as parse_error:
                 parsed=None;extraction_method="text_only";parser_error=type(parse_error).__name__
-        if args.engine=="paddleocr" and parser_error is None:
+        if args.engine=="paddleocr" and parser_error is None and not args.learned_only:
             text,boxes,parsed,extraction_method,recovery=maybe_recover_paddle(
                 args.file,args.language,templates,text,boxes,parsed,extraction_method,
                 baseline_seconds,time.monotonic()-worker_started,args.budget_seconds,
             )
+        if learned_templates and parser_error is None and not args.learned_only:
+            parsed,extraction_method,learned=apply_learned(text,learned_templates,parsed,extraction_method)
         payload={"text":text[:150000],"boxes":boxes[:10000],
             "invoice":parsed,"extraction_method":extraction_method,"tables":tables,
             "parser_error":parser_error}
         if recovery is not None:payload["recovery"]=recovery
+        if learned is not None:payload["learned"]=learned
         args.output.write_text(json.dumps(payload,default=str))
     except Exception as e:
         # No document or credential content in a user-facing error.

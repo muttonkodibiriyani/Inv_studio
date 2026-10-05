@@ -155,6 +155,10 @@ class FakeBlob:
         Path(filename).write_bytes(self.bucket.objects[self.name])
 
     def delete(self):
+        if self.name not in self.bucket.objects:
+            error=Exception("No such object: "+self.name)  # google.api_core NotFound carries code 404
+            error.code=404
+            raise error
         self.bucket.objects.pop(self.name)
 
 
@@ -359,7 +363,7 @@ def test_gcs_upload_restore_and_startup_template_sync(tmp_path,cloud_env):
 
     cache=store.root/"work"/"temporary.json"
     cache.write_text("ephemeral")
-    with pytest.raises(ValueError,match="Only uploads and supplier templates"):
+    with pytest.raises(ValueError,match="Only uploads, supplier templates and the learned store"):
         store.persist_blob(cache)
     with pytest.raises(ValueError,match="inside the application data directory"):
         store.ensure_blob(tmp_path/"outside.pdf")
@@ -473,3 +477,26 @@ def test_live_postgres_store_contract_when_test_database_is_configured(tmp_path,
     finally:
         with psycopg.connect(database_url,autocommit=True) as admin:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+def test_learned_store_is_persisted_restored_and_removed_only_under_its_own_prefix(tmp_path,cloud_env):
+    bucket=FakeBucket({"learned/templates/acme.yml":b"keywords: [acme]","learned/suppliers/acme.json":b"{}"})
+    store,_,_=make_store(tmp_path,cloud_env,bucket=bucket,sync_templates=True)
+    restored=store.root/"learned"/"templates"/"acme.yml"
+    assert restored.read_bytes() == b"keywords: [acme]"
+    assert stat.S_IMODE(restored.stat().st_mode) == 0o600
+    assert (store.root/"learned"/"suppliers"/"acme.json").read_bytes() == b"{}"
+
+    corrections=store.root/"learned"/"corrections.json"
+    corrections.write_text("[]")
+    assert store.persist_blob(corrections) == "learned/corrections.json"
+    assert bucket.objects["learned/corrections.json"] == b"[]"
+    store.remove_blob(corrections)
+    assert "learned/corrections.json" not in bucket.objects and not corrections.exists()
+    store.remove_blob(corrections)  # already gone on both sides: not an error
+
+    upload=store.root/"uploads"/"invoice.pdf"
+    upload.write_bytes(b"synthetic invoice")
+    with pytest.raises(ValueError,match="Only learned-store files"):
+        store.remove_blob(upload)
+    assert upload.exists()

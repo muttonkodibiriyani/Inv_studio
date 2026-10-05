@@ -601,3 +601,17 @@ def test_prompt_asks_for_the_printed_description_only():
     assert "description is the product name exactly as printed" in provider_module.PROMPT
     assert "a barcode belongs in gtin" in provider_module.PROMPT
     assert "sku is null and a code that is part of the name text stays in the description" in provider_module.PROMPT
+
+
+def test_prompt_appends_learned_examples_and_survives_a_broken_store(store):
+    class Learned:
+        def prompt_examples(self, text):
+            return "\n\nVerified examples for " + text
+
+    class Broken:
+        def prompt_examples(self, text):
+            raise RuntimeError("store unavailable")
+
+    assert Providers(store, FakeChatGPT()).prompt("doc") == provider_module.PROMPT
+    assert Providers(store, FakeChatGPT(), Learned()).prompt("doc") == provider_module.PROMPT + "\n\nVerified examples for doc"
+    assert Providers(store, FakeChatGPT(), Broken()).prompt("doc") == provider_module.PROMPT
