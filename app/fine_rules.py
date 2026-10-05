@@ -38,7 +38,7 @@ FAILURE_STATUS = {
     "Supplier Exception": ("Supplier Exception", "C-03"),
     "POGRN Supplier Exception": ("POGRN Supplier Exception", "C-04"),
     "Supplier Site Exception": ("Supplier Site Exception", "C-05"),
-    "Item Exception": ("Item Exception", "C-08"), "Item Conflict": ("Item Conflict", "C-09"),
+    "Item Exception": ("Item Exception", "C-08"), "Item Review": ("Item Exception", "C-08"), "Item Conflict": ("Item Conflict", "C-09"),
     "Line Exception": ("Line Parsing Exception", "C-10"),
     "Item Quantity Mismatch": ("Quantity Mismatch", "C-11"),
     "Missing PO": ("Missing/Ambiguous PO", "C-12"), "Ambiguous PO": ("Missing/Ambiguous PO", "C-12"),
@@ -68,7 +68,7 @@ ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master 
 # Exception types whose presence still allows approval (warnings only).
 # GRN quantity differences are warnings (owner form 01a10c4d qty_cost_tolerance = invoice_flag).
 NON_BLOCKING = {"Data Quality", "Entity Hint", "Description Check", "Totals Audit", "Quantity Mismatch",
-                "Item Quantity Mismatch"}
+                "Item Quantity Mismatch", "Item Review"}
 
 # Owner form 01a10c4f (2026-10-05): item-line check; below the threshold the owner validates.
 ITEM_LINE_THRESHOLD = Decimal("0.95")
@@ -523,10 +523,11 @@ def parse_printed_date(printed, parsed):
 
 
 class Run:
-    def __init__(self, invoice, config, filename):
+    def __init__(self, invoice, config, filename, ocr_lines=False):
         self.invoice = invoice
         self.config = config
         self.filename = filename
+        self.ocr_lines = ocr_lines  # the lines were read by OCR or the AI from a scan, never from a text layer
         self.exceptions = []
         self.lineage = []
         # R-006: cited supplier-code candidates offered for the reviewer's pick; never a filled value.
@@ -574,6 +575,52 @@ def _constrain(rows, sites):
     return (narrowed, True) if narrowed else (rows, False)
 
 
+OCR_SWAPS = {"I": "1", "1": "I", "O": "0", "0": "O"}
+OCR_ENGINES = ("paddleocr", "invoice2data + PaddleOCR")
+
+
+def ocr_read(job):
+    """Decision 44: True when the selected reader is local OCR or the AI on a scan, never a text layer."""
+    selected = str(job.get("selected_engine") or "")
+    if selected in OCR_ENGINES:
+        return True
+    # The AI is selected as "<provider> / <model>"; its trace row names the provider.
+    return any(t.get("method") == "vision_ai" and selected.startswith(f"{t.get('engine')} /") for t in job.get("trace") or [])
+OCR_MAX_POSITIONS = 8
+
+
+def _ocr_variants(value):
+    """Every value with some of its I/1 and O/0 characters swapped (never the value itself)."""
+    positions = [i for i, ch in enumerate(value) if ch in OCR_SWAPS]
+    if not positions or len(positions) > OCR_MAX_POSITIONS:
+        return []
+    out = []
+    for mask in range(1, 2 ** len(positions)):
+        chars = list(value)
+        for bit, i in enumerate(positions):
+            if mask >> bit & 1:
+                chars[i] = OCR_SWAPS[chars[i]]
+        out.append("".join(chars))
+    return out
+
+
+def ocr_vpn(source, vpns, sites):
+    """Decision 44: a VPN-column value an OCR or AI scan read may have I/1 or O/0 confused. Returns the one
+    (candidate, variant, rows) when exactly one variant of exactly one printed value matches exactly one
+    ITEM_PARENT within the known supplier sites; otherwise None."""
+    hits = []
+    for candidate in vpns:
+        if candidate["origin"] != "VPN column":
+            continue
+        for variant in _ocr_variants(candidate["value"]):
+            rows = [r for r in source.items_by_vpn(variant)
+                    if text(r.get("VPN")) == variant and text(r.get("SUPPLIER")) in sites]
+            if rows:
+                hits.append((candidate, variant, rows))
+    parents = {p for _, _, rows in hits for p in _unique_parents(rows)}
+    return hits[0] if len(hits) == 1 and len(parents) == 1 else None
+
+
 def match_line(run, n, line, source, sites=None):
     """R-003/R-005/R-015, ALG-015..ALG-021, ALG-027, ALG-029: one invoice line to one ITEM_PARENT."""
     barcodes = barcode_candidates(line)
@@ -592,6 +639,14 @@ def match_line(run, n, line, source, sites=None):
         rows = [r for r in source.items_by_vpn(candidate["value"]) if text(r.get("VPN")) == candidate["value"]]
         if rows:
             vpn_hits[candidate["value"]] = (candidate, rows)
+    ocr = None
+    if not barcode_hits and not vpn_hits and run.ocr_lines and sites:
+        # Only after both exact routes found nothing, on a scan read, under a known supplier (decision 44).
+        ocr = ocr_vpn(source, vpns, sites)
+        if ocr:
+            printed_vpn, variant, rows = ocr
+            vpns = [{**printed_vpn, "value": variant, "printed": printed_vpn["value"]}]
+            vpn_hits = {variant: (vpns[0], rows)}
 
     if not barcodes:
         result["checks"]["barcode"] = RECORDED_NO_BARCODE
@@ -685,9 +740,14 @@ def match_line(run, n, line, source, sites=None):
     if result["checks"]["description"] == "Weak":
         run.exception("Description Check", "Description is weakly consistent; exact identifier kept (ALG-020)",
                       "ALG-020", n, evidence=f"score {result['description_score']}")
+    if ocr:
+        result["method"], result["checks"]["vpn"] = "VPN OCR variant", "Pass (OCR I/1 O/0)"
+        run.exception("Item Review", f"Printed VPN {ocr[0]['value']} read by OCR matches Item Master VPN {ocr[1]} "
+                      "(I/1, O/0 only); check the correction", "ALG-018-OCR", n,
+                      evidence=f"printed {ocr[0]['value']} read as {ocr[1]}", owner="Item steward")
     result["status"] = "Matched"
     run.trace("Item", parent, "ALG-021", "Item Master ITEM_PARENT", reference=_refs(rows), line=n,
-              original=result["barcode"] or result["vpn"])
+              original=ocr[0]["value"] if ocr else result["barcode"] or result["vpn"])
     result["rule"] = rule
     return result
 
@@ -1417,11 +1477,12 @@ def item_resolution(run, matches, group):
 
 
 def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=(), page_count=None,
-                transaction=1, seen_documents=None, owner_supplier_code=None):
+                transaction=1, seen_documents=None, owner_supplier_code=None, ocr_lines=False):
     """Run the whole rule chain for one invoice (ALG-028: every invoice, every rule). ``owner_supplier_code`` is
     the owner's pick among the R-006 candidates of an earlier run (decision 41)."""
     config = config or RulesConfig()
-    run = Run(invoice, config, filename)
+    # The probe pass stays exact; only the recorded pass may correct an OCR I/1, O/0 read (decision 44).
+    run = Run(invoice, config, filename, ocr_lines)
     scan = scan_pages(text_value, boxes, page_count)
     if scan["unreadable_pages"]:
         run.exception("OCR Review", f"Pages without readable text: {scan['unreadable_pages']}", "ALG-001",
@@ -1685,7 +1746,7 @@ def run_batch(entries, source, config=None):
         try:
             result = run_invoice(entry["invoice"], source, config, entry.get("filename", ""), entry.get("text", ""),
                                  entry.get("boxes", ()), entry.get("page_count"), transaction, seen,
-                                 entry.get("owner_supplier_code"))
+                                 entry.get("owner_supplier_code"), ocr_lines=entry.get("ocr_lines", False))
         except Exception as error:  # isolated per invoice; the error is the evidence
             result = {"status": "Blocked", "filename": entry.get("filename", ""), "transaction": transaction,
                       "header": {"Document": text(entry["invoice"].number), "Validation Status": "Blocked"},

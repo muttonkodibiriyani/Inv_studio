@@ -960,3 +960,68 @@ def test_exception_types_are_the_owner_checklist_failure_statuses():
     assert fr.FAILURE_STATUS["Value Mismatch"] == ("Value Mismatch", "C-16")
     assert fr.FAILURE_STATUS["Quantity Mismatch"] == ("Quantity Mismatch", "C-15")
     assert fr.FAILURE_STATUS["Malformed Source Row"] == ("Audit Exception", "C-17")
+
+
+# --------------------------------------------------------------------------- decision 44: OCR I/1, O/0 VPN lookup
+
+OCR_ITEMS = ITEMS + [
+    item("345000010", "ULT_7770001112223", "IO10AB", desc="Velvet Blush Pink", ref=10),
+    item("345000011", "ULT_7770001112224", "OI20CD", desc="Velvet Blush Coral", ref=11),
+    item("345000012", "ULT_7770001112225", "OI2OCD", desc="Velvet Blush Peach", ref=12),
+]
+
+
+def ocr_lines(sku):
+    # The second line is exact and fixes the supplier; the first carries the OCR-read VPN only.
+    return lines(first={"gtin": None, "sku": sku, "description": "Velvet Blush"})
+
+
+def test_decision_44_ocr_vpn_variant_fills_only_one_parent_with_a_review_flag():
+    result = run(invoice(lines=ocr_lines("1O10AB")), items=OCR_ITEMS, ocr_lines=True)
+    first = result["lines"][0]
+    assert first["Item"] == "345000010" and first["Match Method"] == "VPN OCR variant"
+    assert first["VPN Check"] == "Pass (OCR I/1 O/0)"
+    flag = next(e for e in result["exceptions"] if e["Rule ID"] == "ALG-018-OCR")
+    assert (flag["Engine Type"], flag["Exception Type"], flag["Check ID"], flag["blocking"]) == \
+        ("Item Review", "Item Exception", "C-08", False)
+    assert flag["Candidates / Evidence"] == "printed 1O10AB read as IO10AB"
+    trace = next(t for t in result["lineage"] if t["target"] == "Item" and t["line"] == 1)
+    assert trace["original"] == "1O10AB" and trace["reference"] == "Items!10"
+
+
+def test_decision_44_never_on_text_reads_ambiguous_variants_or_unknown_supplier():
+    # A text-layer or docling read (ocr_lines False) never tries.
+    off = run(invoice(lines=ocr_lines("1O10AB")), items=OCR_ITEMS)
+    assert off["lines"][0]["Item"] == "" and "ALG-018-OCR" not in [e["Rule ID"] for e in off["exceptions"]]
+    # Two variants hitting two parents (OI20CD, OI2OCD): stays unmatched.
+    two = run(invoice(lines=ocr_lines("0I2OCD")), items=OCR_ITEMS, ocr_lines=True)
+    assert two["lines"][0]["Item"] == ""
+    # The printed token alone, with no variant in the master: stays unmatched.
+    none = run(invoice(lines=ocr_lines("ZZ99XY")), items=OCR_ITEMS, ocr_lines=True)
+    assert none["lines"][0]["Item"] == ""
+    # An exact VPN is never re-read.
+    exact = run(invoice(lines=ocr_lines("IO10AB")), items=OCR_ITEMS, ocr_lines=True)
+    assert exact["lines"][0]["Match Method"] == "VPN exact"
+    # No supplier constraint: a unique parent across the whole master is too weak.
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "VPN column"}], {"22001"})
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "VPN column"}], {"99999"}) is None
+    m = fr.match_line(fr.Run(invoice(), fr.RulesConfig(), "", ocr_lines=True), 1,
+                      Line(sku="1O10AB", description="x"), fr.RowsSource(OCR_ITEMS, POGRN), None)
+    assert m["parent"] is None
+    # The ITM-004 description route is digits only and never varied.
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "description start"}],
+                      {"22001"}) is None
+    assert fr._ocr_variants("ABC") == [] and len(fr._ocr_variants("I0I0I0I0I")) == 0  # over 8 positions
+    assert sorted(fr._ocr_variants("I0")) == ["10", "1O", "IO"]
+
+
+def test_ocr_read_only_for_local_ocr_or_ai_selected():
+    ai = {"engine": "vertex", "method": "vision_ai"}
+    assert fr.ocr_read({"selected_engine": "paddleocr"})
+    assert fr.ocr_read({"selected_engine": "invoice2data + PaddleOCR"})
+    assert fr.ocr_read({"selected_engine": "vertex / model-x", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "native PDF text", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "docling", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "other / model-x", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "vertex / model-x", "trace": [{"engine": "vertex", "method": "text_only"}]})
+    assert not fr.ocr_read({})
