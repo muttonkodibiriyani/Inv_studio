@@ -55,8 +55,153 @@ function rulesCell(cell, name, line) {
   const empty = !cell || cell.value === null || cell.value === undefined;
   if (empty) td.append(make("span", "rules-flagged", cell?.reason === "No evidence" ? "Empty · no evidence" : "Not found"));
   else td.append(make("span", "", cell.value), make("small", "", evidenceText(cell.evidence)));
+  td.append(...readerNotes(app.currentJob, "line", name, line));
   if ((empty && RULES_REQUIRED_LINE.has(name)) || enteredByReviewer(cell)) td.append(rulesEntry(cell, name, "line", name, line));
   return td;
+}
+
+// Which reader produced a field and where readers disagreed (TRAIN's job.readers / evidence.*.review).
+// Both are keyed by invoice field names; line cells map from the target column. Absent keys show nothing.
+const READER_LINE_FIELDS = { Item: "sku", UPC: "gtin", "Unit Cost": "price", Quantity: "qty" };
+
+function readerNotes(job, scope, column, line) {
+  const key = scope === "header" ? column : READER_LINE_FIELDS[column];
+  const readers = scope === "header" ? job?.readers?.header : job?.readers?.lines?.[line - 1];
+  const evidence = scope === "header" ? job?.evidence?.header : job?.evidence?.lines?.[line - 1];
+  const notes = [];
+  const reader = readers?.[key];
+  if (typeof reader === "string" && reader) notes.push(make("span", `reader-badge reader-${reader}`, reader));
+  const review = evidence?.[key]?.review;
+  if (review?.reason) notes.push(make("small", "rules-flagged", `Readers disagree: ${review.reason}`));
+  return notes;
+}
+
+const TARGET_GROUPS = [
+  ["needs_checking", "Needs checking"],
+  ["empty_flagged", "Empty (flagged)"],
+  ["verified", "Verified"],
+  ["empty_owner_rule", "Empty by owner rule"],
+];
+const TARGET_STATUS_LABELS = {
+  verified: "Verified", empty_owner_rule: "Empty by owner rule", empty_flagged: "Empty (flagged)", mismatch: "Mismatch",
+  over_cited: "Over-cited", no_evidence: "No evidence", unverifiable: "Unverifiable", data_gap: "Data gap",
+  owner_entry_unattributed: "Owner entry not attributed",
+};
+
+function targetCellName(cell) {
+  return `${cell.sheet}.${cell.column}${cell.line ? ` line ${cell.line}` : ""}`;
+}
+
+function targetEvidence(evidence = {}) {
+  return [evidence.source, evidence.reference, evidence.rule].filter(Boolean).join(" · ") || "No evidence cited";
+}
+
+// The per-invoice target-sheet check: the owner line, the checks, and every cell by status with its evidence.
+function renderTargetCheck(job) {
+  const panel = $("#target-check");
+  const check = job.rules?.target_check;
+  panel.hidden = !rulesJob(job) || !check?.cells;
+  if (panel.hidden) return;
+  $("#target-check-line").textContent = check.summary;
+  const failed = (check.checks || []).filter((item) => item.status === "fail");
+  const hold = $("#target-check-hold");
+  hold.textContent = check.holds
+    ? (job.status === "ready" || job.status === "exported" ? "Confirmed by owner" : "Held at review: confirm after checking")
+    : "No hold";
+  hold.className = `status-pill ${check.holds && !["ready", "exported"].includes(job.status) ? "warning" : "success"}`;
+  panel.classList.toggle("holds", Boolean(check.holds));
+  if (panel.dataset.job !== job.id) panel.open = Boolean(check.holds) && !["ready", "exported"].includes(job.status);
+  panel.dataset.job = job.id;
+
+  const checks = $("#target-check-checks");
+  checks.replaceChildren();
+  (check.checks || []).forEach((item) => {
+    const row = make("p", `target-check-row ${item.status}`);
+    row.append(make("span", `status-pill ${item.status === "fail" ? "error" : item.status === "pass" ? "success" : "warning"}`, item.status),
+      make("strong", "", humanize(item.check)), make("small", "", item.detail || ""));
+    checks.append(row);
+  });
+  if (failed.length) checks.prepend(make("p", "rules-flagged", `${failed.length} check${failed.length === 1 ? "" : "s"} failed`));
+
+  const cells = $("#target-check-cells");
+  cells.replaceChildren();
+  TARGET_GROUPS.forEach(([group, label]) => {
+    const picked = check.cells.filter((cell) => cell.group === group);
+    if (!picked.length) return;
+    const details = make("details", `target-group ${group}`);
+    details.open = group === "needs_checking";
+    details.append(make("summary", "", `${label} · ${picked.length}`));
+    const table = make("table", "line-table target-cells");
+    const head = make("tr");
+    ["Cell", "Status", "Value", "Reason", "Evidence"].forEach((name) => head.append(make("th", "", name)));
+    table.append(make("thead"), make("tbody"));
+    table.tHead.append(head);
+    picked.forEach((cell) => {
+      const tr = make("tr");
+      const status = TARGET_STATUS_LABELS[cell.status] || humanize(cell.status);
+      tr.append(make("td", "", targetCellName(cell)), make("td", "", cell.sub === "owner_entry" ? `${status} (owner entry)` : status),
+        make("td", "", cell.value || "—"), make("td", "", cell.reason || ""), make("td", "", targetEvidence(cell.evidence)));
+      table.tBodies[0].append(tr);
+    });
+    const scroll = make("div", "table-scroll");
+    scroll.append(table);
+    details.append(scroll);
+    cells.append(details);
+  });
+}
+
+// Inbox indicator from the trimmed target_check (counts only).
+function targetChip(job) {
+  const check = job.rules?.target_check;
+  if (!check?.counts) return null;
+  const waiting = Number(check.counts.needs_checking || 0);
+  const confirmed = ["ready", "exported"].includes(job.status);
+  const text = !check.holds ? "Target verified" : confirmed ? "Target confirmed" : waiting ? `${waiting} to check` : "Target check failed";
+  const chip = make("span", `target-chip ${!check.holds || confirmed ? "success" : "warning"}`, text);
+  chip.title = check.summary || "";
+  return chip;
+}
+
+function accuracyPercent(rate) {
+  return rate?.accuracy === null || rate?.accuracy === undefined ? "—" : `${(Number(rate.accuracy) * 100).toFixed(1)}%`;
+}
+
+function accuracyRows(body, rates, label = (key) => key) {
+  body.replaceChildren();
+  const entries = Object.entries(rates || {});
+  if (!entries.length) {
+    const tr = make("tr");
+    const td = make("td", "table-empty", "No confirms in this period.");
+    td.colSpan = 5;
+    tr.append(td);
+    body.append(tr);
+  }
+  entries.forEach(([key, rate]) => {
+    const tr = make("tr");
+    tr.append(make("td", "", label(key) || "—"), make("td", "", String(rate.cells)), make("td", "", String(rate.unchanged)),
+      make("td", "", String(rate.changed)), make("td", "", accuracyPercent(rate)));
+    body.append(tr);
+  });
+}
+
+async function loadAccuracy() {
+  const select = $("#accuracy-supplier");
+  const supplier = select.value;
+  const summary = await api(`/api/target-check/accuracy${supplier ? `?supplier=${encodeURIComponent(supplier)}` : ""}`);
+  if (!supplier) {
+    const codes = Object.keys(summary.periods?.all?.suppliers || {}).filter(Boolean);
+    select.replaceChildren(make("option", "", "All suppliers"), ...codes.map((code) => make("option", "", code)));
+    select.options[0].value = "";
+  }
+  $$("[data-accuracy-period]").forEach((button) => button.setAttribute("aria-pressed", String(button.dataset.accuracyPeriod === app.accuracyPeriod)));
+  const period = summary.periods?.[app.accuracyPeriod] || {};
+  const overall = period.overall || {};
+  $("#accuracy-overall").textContent = period.confirms
+    ? `${period.confirms} confirmed invoice${period.confirms === 1 ? "" : "s"} · ${overall.cells} cells · ${overall.unchanged} unchanged by the owner · accuracy ${accuracyPercent(overall)}`
+    : "No confirmed invoices in this period yet.";
+  accuracyRows($("#accuracy-fields"), period.fields);
+  accuracyRows($("#accuracy-statuses"), period.by_status_before, (key) => TARGET_STATUS_LABELS[key] || humanize(key));
+  accuracyRows($("#accuracy-suppliers"), period.suppliers);
 }
 
 function collectEntries() {
@@ -90,6 +235,7 @@ function renderRulesResult(job) {
     if (empty) {
       dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence" : "Not found in owner sheets or on the invoice"));
     } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
+    dd.append(...readerNotes(job, "header", key));
     if ((empty && RULES_REQUIRED_HEADER.has(key)) || enteredByReviewer(field)) dd.append(rulesEntry(field, field.label, "header", key));
     if (field.target === "Order No" && Number(rules.po_candidates) > 1) {
       dd.append(make("small", "rules-flagged", `Ambiguous: ${rules.po_candidates} candidate orders — owner review`));
@@ -166,6 +312,7 @@ const app = {
   selectedJobId: null,
   selectedForBatch: new Set(),
   inboxSort: "newest",
+  accuracyPeriod: "all",
   reviewDirty: false,
   uploadFiles: [],
   pollTimer: null,
@@ -686,6 +833,7 @@ function navigate(sectionName) {
   $("#main-content").focus({ preventScroll: true });
   if (sectionName === "references") ensureReferenceLookup().catch((error) => notify(error.message, "error"));
   if (sectionName === "engines" && app.state) loadProviderModels("settings");
+  if (sectionName === "accuracy") loadAccuracy().catch((error) => notify(error.message, "error"));
 }
 
 async function loadState({ preserveSelection = true } = {}) {
@@ -747,6 +895,8 @@ function renderJobs() {
     const secondary = job.invoice?.number ? `${job.invoice.number} · ${STATUS_LABELS[job.status] || humanize(job.status)}` : STATUS_LABELS[job.status] || humanize(job.status);
     const meta = make("span", "job-meta");
     meta.append(make("span", "job-meta-status", secondary));
+    const chip = targetChip(job);
+    if (chip) meta.append(chip);
     const added = formatAddedTime(job.created_at, now);
     if (added) {
       const time = make("time", "job-time", added);
@@ -947,6 +1097,7 @@ function renderSelectedJob(job) {
   }
   renderInvoiceForm(job);
   renderValidation(job);
+  renderTargetCheck(job);
   renderTrace(job);
   renderReviewActions(job);
 }
@@ -2559,6 +2710,11 @@ function bindEvents() {
   }));
   $$('[data-nav]').forEach((control) => control.addEventListener("click", (event) => { event.preventDefault(); navigate(control.dataset.nav); }));
   $$('[data-open-upload]').forEach((button) => button.addEventListener("click", openUpload));
+  $$("[data-accuracy-period]").forEach((button) => button.addEventListener("click", () => {
+    app.accuracyPeriod = button.dataset.accuracyPeriod;
+    loadAccuracy().catch((error) => notify(error.message, "error"));
+  }));
+  $("#accuracy-supplier").addEventListener("change", () => loadAccuracy().catch((error) => notify(error.message, "error")));
   $("#job-search").addEventListener("input", renderJobs);
   $$("[data-inbox-sort]").forEach((button) => button.addEventListener("click", () => {
     app.inboxSort = button.dataset.inboxSort;
@@ -2745,7 +2901,7 @@ async function startWorkspace() {
   try {
     await loadState();
     const route = location.hash.slice(1);
-    navigate(["workspace", "references", "engines"].includes(route) ? route : "workspace");
+    navigate(["workspace", "references", "engines", "accuracy"].includes(route) ? route : "workspace");
     if (app.state.jobs.length) await selectJob(sortJobsByAdded(app.state.jobs)[0].id);
     $("#auth-gate").hidden = true;
     $("#app-shell").hidden = false;
