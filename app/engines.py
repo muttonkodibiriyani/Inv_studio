@@ -10,7 +10,7 @@ import threading
 import uuid
 from pathlib import Path
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from .models import Invoice
 
 ROOT=Path(__file__).resolve().parent
@@ -89,7 +89,22 @@ def native_pdf_quality(i:Invoice | None,text=""):
     if i.net is not None and i.lines and all(line.net_amount is not None for line in i.lines):
         if _native_reconciliation(i,text) is None:
             issues.append("printed line amounts do not reconcile with net total or one explicit document discount")
+    identityless=[x for x in issues if x.endswith(" item identity")]
+    if identityless and len(identityless)<len(i.lines) and len(identityless)==len(issues) and _arithmetic_complete(i):
+        # The line prints no code: keep the printed read with the code blank, flagged for review.
+        return True,[f"{x.removesuffix(' item identity')} prints no item code; kept blank for review"
+                     for x in identityless]
     return not issues,issues
+
+
+def _arithmetic_complete(i:Invoice):
+    """Every printed amount checks: qty x price per line, lines to net, line tax to tax."""
+    cent=Decimal("0.01")
+    for line in i.lines:
+        if line.tax_amount is None:return False
+        if (line.qty*line.price).quantize(cent,ROUND_HALF_UP)!=line.net_amount:return False
+    return (sum((line.net_amount for line in i.lines),Decimal(0))==i.net
+            and sum((line.tax_amount for line in i.lines),Decimal(0))==i.tax)
 
 
 def local_read(engine,path,root,language="en"):
@@ -117,7 +132,7 @@ def local_read(engine,path,root,language="en"):
 
 def process(path,options,store,ai_reader,progress=lambda *args:None):
     trace=[];best=None;best_score=-1;text="";boxes=[];selected="none"
-    document_type_hint=None;extraction_note=None
+    document_type_hint=None;extraction_note=None;native_review=[]
     ai_attempted=False;invoice2data_ocr=False
     def read_ai():
         nonlocal best,best_score,selected,ai_attempted
@@ -135,7 +150,8 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             has_fields=bool(candidate.lines or any(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines"))
             trace.append({"engine":options.provider,"model":options.model,"status":"extracted" if has_fields else "no_fields","completeness":score,"seconds":round(time.monotonic()-start,2),"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines"),"line_items":len(candidate.lines),"text_characters":len(text),"method":"vision_ai","reason":"Invoice fields returned; review against the source" if has_fields else "AI returned no invoice fields; another reader or manual entry is required","usage":meta})
             # Each candidate stays intact; never blend conflicting engine values.
-            if has_fields and score>=best_score:best=candidate;best_score=score;selected=f"{options.provider} / {options.model}"
+            # A local read is kept on a completeness tie; the AI must read strictly more.
+            if has_fields and score>best_score:best=candidate;best_score=score;selected=f"{options.provider} / {options.model}"
             return bool(candidate.number and candidate.lines and candidate.net is not None and all(l.qty is not None and l.price is not None for l in candidate.lines))
         except Exception as e:
             trace.append({"engine":options.provider,"model":options.model,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2)})
@@ -193,6 +209,8 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 if native_suitable else None)
             reason=("Embedded PDF text has complete line facts reconciled through the document's explicit discount"
                 if native_reconciliation=="explicit_document_discount" else
+                "Embedded PDF text passes every arithmetic check; "+"; ".join(native_issues)
+                if native_suitable and native_issues else
                 "Embedded PDF text has complete, reconciled line facts"
                 if native_suitable else "; ".join(native_issues)
                 if engine=="native_pdf_text" else
@@ -210,6 +228,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
             if engine=="native_pdf_text":
                 if native_suitable:
+                    native_review=native_issues
                     trace.append({"engine":native_preflight_engine,"status":"skipped",
                         "reason":"Embedded PDF text passed the structured quality checks; the selected OCR reader did not run. Disable native-text preference to force OCR."})
                     break
@@ -242,6 +261,9 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2),"queue_seconds":round(queue_seconds,2) if queue_seconds is not None else None})
             progress(engine,"Reader attempt finished",{"trace":list(trace),"characters":len(text)})
     _,missing=quality(best)
+    if native_review and selected=="native PDF text":
+        # The gate already checked every amount; an unprinted code is for review, not for the AI to supply.
+        missing=[x for x in missing if not x.endswith(" item identity")]
     if document_type_hint=="possible_purchase_order":
         trace.append({"engine":options.provider,"status":"skipped","reason":"The document is labelled Purchase Order; invoice extraction needs the supplier invoice."})
     elif not ai_attempted and (options.engine=="ai" or (options.ai_fallback and missing)):
@@ -249,6 +271,8 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         else:read_ai()
     if best is not None and best.lines and best.number and document_type_hint is None:
         extraction_note=None
+    if native_review and selected=="native PDF text":
+        extraction_note="Read from the PDF text; every printed amount checks. Review: "+"; ".join(native_review)+"."
     return {"invoice":(best or Invoice()).model_dump(mode="json"),"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
             "document_type_hint":document_type_hint,"extraction_note":extraction_note}
