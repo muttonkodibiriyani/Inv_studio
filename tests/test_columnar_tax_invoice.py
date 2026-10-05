@@ -30,7 +30,8 @@ GTIN_A, GTIN_B, GTIN_C = gtin("400000000001"), gtin("400000000002"), gtin("40000
 def heading(number="ZZTI26-00000042", issued="March 7, 2026"):
     return [[(220, "TAX INVOICE")], [(31, f"# {number}")], [(31, f"Date of Issuing: {issued}")],
             [(31, "Date of Supply: March 7, 2026")], [(31, "Issued By:"), (300, "Issued To:")],
-            [(31, "Example Trading LLC"), (300, "Sample Retail Co")], [(31, "Reference #: 7")]]
+            [(31, "Example Trading LLC"), (300, "Sample Retail Co")],
+            [(31, "Reference #: 13000042"), (200, "Reference Date:")]]
 
 
 def item(no, desc, brand, qty, uom, price, amount, rate, vat, total):
@@ -89,7 +90,7 @@ def test_one_page_reads_header_lines_and_barcodes(tmp_path):
     assert rec["line_numbers_contiguous"] and rec["lines_sum_to_net"]
     assert rec["line_vat_sums_to_vat"] and rec["net_plus_vat_is_total"]
     parsed, method = structured_extract(text, boxes, [], tables)
-    assert method == "columnar_tax_invoice" and parsed["po"] is None  # 'Reference #' is not a PO label
+    assert method == "columnar_tax_invoice" and parsed["po"] == "13000042"
     assert native_pdf_quality(Invoice.model_validate(parsed), text) == (True, [])
 
 

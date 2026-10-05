@@ -8,6 +8,7 @@ The layout is recognised by its structure, never by a supplier name:
 * an item table headed ``# Description Brand Quantity UOM`` followed by the
   price, amount (excl. VAT), VAT %, VAT amount and amount (incl. VAT) columns,
   with the currency code repeated under the money columns;
+* an optional ``Reference #:`` carrying the buyer's order number;
 * ``Sub Total, CUR:``, ``Total VAT, CUR:`` and ``Total, CUR:`` lines.
 
 Words are placed in columns by their x position against the table header, so
@@ -29,6 +30,8 @@ ISSUED = re.compile(r"^Date of Issuing:\s*([A-Za-z]{3,9}\.?\s+\d{1,2},\s*\d{4})$
 SUB_TOTAL = re.compile(r"(?:^|.*\s)Sub Total,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
 TOTAL_VAT = re.compile(r"(?:^|.*\s)Total VAT,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
 TOTAL = re.compile(r"(?:^|.*\s)(?<!Sub )Total,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
+# The buyer's order number; checked against the PO extract (RMS order numbers) before mapping to po.
+REFERENCE = re.compile(r"^Reference #:\s*(\d{4,20})(?:\s+Reference Date:.*)?$")
 TABLE_END = re.compile(r"^(TOTAL OF SUPPLY|Sub Total,|Total VAT,|Total,|Terms and Conditions)")
 PAGE_FOOTER = re.compile(r"^Made with \w+")
 MONEY = re.compile(r"^-?[0-9][0-9,]*\.\d{2}$")
@@ -229,6 +232,7 @@ def extract(text, boxes):
         })
     invoice = {
         "number": (_one(lines, NUMBER) or [None])[0],
+        "po": (_one(lines, REFERENCE) or [None])[0],
         "supplier_name": supplier, "buyer_name": buyer,
         "date_printed": issued[0] if issued else None, "date": _long_date(issued[0]) if issued else None,
         "currency": currencies.pop() if len(currencies) == 1 else None,
