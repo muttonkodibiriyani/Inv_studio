@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from app import matching
 from app.excel import HEADERS, rules_workbook
-from app.matching import printed_evidence, rules_validation, rules_view
+from app.matching import extraction_evidence, printed_evidence, rules_validation, rules_view
 from tests.test_fine_rules_api import CONFIG, INVOICE, imported
 
 H = {"x-studio-request": "1"}
@@ -350,3 +350,34 @@ def test_upc_defaults_to_empty_per_the_owner(production):
     assert client.get("/api/target-export/config").json()["upc"] == "empty"
     assert client.post("/api/target-export/config", json={"upc": "barcode"}, headers=H).status_code == 200
     assert client.get("/api/target-export/config").json()["upc"] == "barcode"
+
+
+def test_deferred_extraction_evidence_refreshes_the_rules_view_without_a_revision(production):
+    app, client = production
+    app.state.store.job("job-1", job())
+    first = client.get("/api/jobs/job-1").json()
+    # A deferred OCR pass adds evidence with boxes; status and revision stay the same.
+    later = {**app.state.store.job("job-1"), "evidence": {"header": {"number": {"quote": "Invoice SYN", "page": None, "source": "ocr"}}, "lines": []}}
+    app.state.store.job("job-1", later)
+    second = client.get("/api/jobs/job-1").json()
+    assert second["revision"] == first["revision"]
+    assert second["rules"]["evidence_hash"] != first["rules"]["evidence_hash"]
+    assert client.get("/api/jobs/job-1").json()["rules"]["computed_at"] == second["rules"]["computed_at"]
+
+
+def test_extraction_evidence_without_a_page_is_not_given_a_page():
+    assert extraction_evidence({"quote": "SYN", "page": None, "source": "native"})["reference"] == "page not given"
+    # An entry placed on a page but not on a text-layer row has no box; a line with nothing located is {}.
+    assert extraction_evidence({"quote": "SYN", "page": 2, "source": "ai"})["reference"] == "page 2"
+    result = {"status": "Review", "header": {"Document": "SYN-3"}, "lines": [{"line": 1}, {"line": 2}], "lineage": [], "exceptions": []}
+    view = rules_view(result, printed={"header": {}, "lines": [{}, {"qty": {"quote": "2", "page": 1, "source": "ocr"}}]})
+    assert len(view["lines"]) == 2
+
+
+def test_an_order_selected_by_the_rules_is_shown_as_picked_not_printed():
+    result = {"status": "Review", "header": {"Document": "SYN-4", "Order No": "70002"}, "lines": [], "exceptions": [],
+              "lineage": [{"target": "Order No", "line": None, "original": "", "value": "70002", "rule": "POG-001",
+                           "source": "Selected by POG-001 among 2 order/location candidates; not printed on the invoice",
+                           "reference": "POGRN!12", "confidence": "Derived from POGRN", "evidence_kind": "selected"}]}
+    po = rules_view(result)["fields"]["po"]
+    assert po["value"] == "70002" and po["evidence"][0]["kind"] == "selected"

@@ -262,7 +262,7 @@ def test_R_020_no_pogrn_rows_for_ebs_code_is_missing_po():
 
 def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
     # Owner form 01a10c4d qty_cost_tolerance = invoice_flag: POG-006 and C-11 warn, they do not block.
-    result = run(rows=both("13000001", "38091", q2="1"))
+    result = run(invoice(po="13000001"), rows=both("13000001", "38091", q2="1"))
     assert result["header"]["Order No"] == "13000001" and result["pogrn_validation"][0]["Qty Match"] == "Fail"
     assert result["pogrn_validation"][0]["Validation Status"] == "Pass"
     assert [line["Quantity"] for line in result["lines"]] == [D(3), D(2)]  # the invoice figures
@@ -273,7 +273,7 @@ def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
 
 
 def test_R_022_value_mismatch_beyond_tolerance_is_never_auto_approved():
-    result = run(rows=both("13000001", "38091", c2="45"))
+    result = run(invoice(po="13000001"), rows=both("13000001", "38091", c2="45"))
     assert result["header"]["Order No"] == "13000001" and result["pogrn_validation"][0]["Pre-Tax Value Match"] == "Fail"
     assert "Value Mismatch" in types(result, "POG-007") and result["status"] == "Review"
 
@@ -315,25 +315,36 @@ def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
 
 
 def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
-    # The only order under the code is linked even without the invoice items; the item check then fails it.
-    lone = run(rows=[pogrn("13000001", "38091", "5", "70")])
-    assert lone["header"]["Order No"] == "13000001" and lone["status"] == "Review"
-    assert lone["pogrn_validation"][0]["Items Check"] == "Fail"
-    # Two orders under the code are ambiguous even when only one carries the items.
-    two = run(rows=POGRN + [pogrn("13000003", "38091", "1", "1", item="345000099")])
-    assert two["header"]["Order No"] == "" and "Ambiguous PO" in types(two, "POG-001")
-    assert two["po_candidates"] == 2
+    # Decision 16: within the 6-character code, POG-001 picks the one order/location whose quantity and value agree.
+    picked = run(rows=POGRN + both("13000003", "38091", q1="9"))
+    assert picked["header"]["Order No"] == "13000001" and picked["po_candidates"] == 1
+    trace = next(x for x in picked["lineage"] if x["target"] == "Order No")
+    assert "decision 16" in trace["source"] and "POGRN!2" in trace["reference"]
+    assert trace["evidence_kind"] == fr.EVIDENCE_SELECTED and "among 2 order/location candidates" in trace["source"]
+    printed = run(invoice(po="13000001"))
+    assert next(x for x in printed["lineage"] if x["target"] == "Order No")["evidence_kind"] == fr.EVIDENCE_PRINTED
+    # A lone order that disagrees is not linked; items never rescue it.
+    lone = run(rows=[pogrn("13000001", "38091", "6", "70")])
+    assert lone["header"]["Order No"] == "" and "Missing PO" in types(lone, "POG-001")
+    # The agreeing order of another code is never a candidate.
+    other = run(rows=both("13000009", "38091", ebs="XYZ002") + [pogrn("13000001", "38091", "6", "70")])
+    assert other["header"]["Order No"] == ""
+    # Two agreeing order/location groups are ambiguous, even when only one carries the invoice items.
+    two = run(rows=POGRN + [pogrn("13000003", "38091", "5", "70", item="345000099")])
+    assert two["header"]["Order No"] == "" and "Ambiguous PO" in types(two, "POG-001") and two["po_candidates"] == 2
+    split = run(rows=both("13000001", "38091") + both("13000001", "38092"))
+    assert split["header"]["Order No"] == "" and "Ambiguous PO" in types(split, "POG-001")
 
 
 # --------------------------------------------------------------------------- owner POGRN rules
 
 
 def test_R_025_location_is_exact_order_location_and_never_combined():
-    result = run(rows=both("13000001", "38091") + both("13000001", "38092"))
+    result = run(invoice(po="13000001"), rows=both("13000001", "38091") + both("13000001", "38092"))
     assert result["header"]["Order No"] == "13000001" and result["header"]["Location"] == ""
     assert "Location ID" in types(result, "POG-002")
     assert all("several locations" in g["Exception Reason"] for g in result["pogrn_validation"])
-    blank = run(rows=both("13000001", ""))
+    blank = run(invoice(po="13000001"), rows=both("13000001", ""))
     assert "Location ID blank" in blank["pogrn_validation"][0]["Exception Reason"]
     assert blank["header"]["Location"] == "" and blank["status"] != "Approved"
 
@@ -423,6 +434,9 @@ def test_ALG_005_supplier_site_is_item_master_supplier_as_text():
     assert result["header"]["Supplier Site"] == "22001"
     site = next(x for x in result["lineage"] if x["target"] == "Supplier Site")
     assert site["rule"] == "SUP-003" and "Items!2" in site["reference"]
+    other_site = ITEMS + [item("345000001", "ULT_0012345678905", "100001", site="22009", name="ABC001RZ1ZZD", ref=12)]
+    cited = next(x for x in run(items=other_site)["lineage"] if x["target"] == "Supplier Site")["reference"]
+    assert "Items!2" in cited and "Items!12" not in cited  # only the chosen site's rows are cited
 
 
 def test_ALG_006_pogrn_searched_by_six_character_ebs_key():
@@ -783,7 +797,7 @@ def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
 def test_item_resolution_counts_lines_whose_quantity_agrees_with_the_order():
     good = run()["item_resolution"]
     assert (good["resolved"], good["total"], good["below"]) == (2, 2, False)
-    short = run(rows=both("13000001", "38091", q2="1"))
+    short = run(invoice(po="13000001"), rows=both("13000001", "38091", q2="1"))
     assert short["item_resolution"]["resolved"] == 1 and short["item_resolution"]["below"] is True
     assert "Item Quantity Mismatch" in types(short, "C-11") and "Owner Validation" in types(short, "ITEM-LINE-95")
 

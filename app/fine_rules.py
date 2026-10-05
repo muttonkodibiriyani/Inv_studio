@@ -57,6 +57,7 @@ RECORDED_NO_BARCODE, RECORDED_NO_VPN = "Recorded No Barcode", "Recorded No VPN" 
 BUYER_RULE = "BUYER-NAME"
 BUYER_RULE_EVIDENCE = "owner rule BUYER-NAME (2026-10-05)"
 EVIDENCE_PRINTED, EVIDENCE_OWNER_RULE = "printed", "owner_rule"
+EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not printed on the invoice
 EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
 
@@ -701,7 +702,9 @@ def supplier_family(run, candidates):
 
 
 def _site_names(source, site, rows):
-    names = {text(r.get("SUPPLIER_NAME")) for r in rows if text(r.get("SUPPLIER")) == site} - {""}
+    """The site's Item Master SUPPLIER_NAMEs and only the rows of that site (cited as its lineage)."""
+    rows = [r for r in rows if text(r.get("SUPPLIER")) == site]
+    names = {text(r.get("SUPPLIER_NAME")) for r in rows} - {""}
     if not names and hasattr(source, "items_by_site"):
         rows = [r for r in source.items_by_site(site) if text(r.get("SUPPLIER")) == site]
         names = {text(r.get("SUPPLIER_NAME")) for r in rows} - {""}
@@ -960,7 +963,8 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
     """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
     Owner form 01a10c4d order_link = strict_6: Order No is the printed order under the supplier's 6-character EBS
-    code, or the only order under that code. Items, quantity and value validate the linked order, never find one.
+    code, or (decision 16) the only order/location under that code whose quantity and value agree. Items never
+    find an order.
     Zero or several candidates leave it empty and flagged; never the closest.
     """
     invoice = run.invoice
@@ -976,7 +980,8 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         if not rows:
             run.exception("Missing PO", "Printed PO is not an RMS_ORDER_NO in the POGRN report (order not found)",
                           "POG-001", evidence=POGRN_REPORT, owner="Buyer")
-            run.trace("Order No", printed, "R-024", "Invoice PO (not in POGRN)", confidence="Unvalidated")
+            run.trace("Order No", printed, "R-024", "Invoice PO (not in POGRN)", confidence="Unvalidated",
+                      evidence_kind=EVIDENCE_PRINTED)
             outcome.update(order=printed, source=FROM_INVOICE, status="Order not found")
             return outcome
         evaluated, _ = evaluate_pogrn(run, rows, *common)
@@ -993,7 +998,7 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
             outcome.update(order=None, source=None, candidates=0, status="Printed PO not validated")
             return outcome
         run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO of the supplier's "
-                  "6-character EBS code", reference=_refs(rows))
+                  "6-character EBS code", reference=_refs(rows), evidence_kind=EVIDENCE_PRINTED)
         outcome.update(order=printed, source=FROM_INVOICE, candidates=1)
         if len(mine) > 1:
             run.exception("Location ID", "Printed order has several locations; no approved multi-location rule",
@@ -1016,29 +1021,32 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         run.exception("POGRN Supplier Exception", "No POGRN rows for the supplier's EBS code", "SUP-002",
                       evidence="/".join(sorted(keys)), owner="Buyer")
         return outcome
-    # Owner form 01a10c4d order_link = strict_6: the candidates are the orders of the 6-character EBS code only;
-    # items never find an order. Exactly one order is linked; several are ambiguous (POG-001).
+    # Owner form 01a10c4d order_link = strict_6 with Dispatcher decision 16: the candidates are the
+    # (RMS_ORDER_NO, LOCATION) groups under the supplier's 6-character EBS code only. POG-001 selects the one whose
+    # quantity and pre-tax value agree (value within the owner's tolerance); none or several leave it empty.
     evaluated, _ = evaluate_pogrn(run, rows, *common)
-    outcome["validation"] = evaluated
-    orders = sorted({g["POGRN RMS Order No"] for g in evaluated})
-    outcome["candidates"] = len(orders)
-    if len(orders) > 1:
-        run.exception("Ambiguous PO", f"No printed PO and {len(orders)} POGRN orders under the supplier's "
-                      "6-character EBS code; owner review", "POG-001", evidence=", ".join(orders[:20]), owner="Buyer")
+    selected = [g for g in evaluated if g["_checks"]["qty"] and g["_checks"]["value"]]
+    outcome["validation"] = selected or evaluated
+    outcome["candidates"] = len(selected)
+    if not selected:
+        run.exception("Missing PO", f"No printed PO and none of the {len(evaluated)} order/location groups under the "
+                      "supplier's 6-character EBS code agrees on quantity and value (order not found)", "POG-001",
+                      evidence=POGRN_REPORT, owner="Buyer")
+        return outcome
+    if len(selected) > 1:
+        run.exception("Ambiguous PO", f"No printed PO and {len(selected)} order/location groups under the supplier's "
+                      "6-character EBS code agree on quantity and value; owner review", "POG-001",
+                      evidence=", ".join(f"{g['POGRN RMS Order No']}/{g['POGRN Location ID']}" for g in selected[:20]),
+                      owner="Buyer")
         outcome["status"] = "Ambiguous PO"
         return outcome
-    derived = orders[0]
-    identified = evaluated
-    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO (only order under the supplier's 6-character EBS "
-              "code, SUP-002)", reference=_refs([r for g in identified for r in g["_rows"]]),
-              confidence=DERIVED_FROM_POGRN)
+    group = selected[0]
+    derived = group["POGRN RMS Order No"]
+    run.trace("Order No", derived, "POG-001", f"Selected by POG-001 among {len(evaluated)} order/location "
+              f"candidates under the supplier's 6-character EBS code {'/'.join(sorted(keys))}: the only one whose "
+              "quantity and value agree (form 01a10c4d, decision 16); not printed on the invoice",
+              reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN, evidence_kind=EVIDENCE_SELECTED)
     outcome.update(order=derived, source=DERIVED_FROM_POGRN)
-    if len(identified) > 1:
-        run.exception("Location ID", "Derived order has several locations; no approved multi-location rule",
-                      "POG-002", evidence=f"{len(identified)} locations", owner="Buyer")
-        outcome["status"] = "Location ambiguous"
-        return outcome
-    group = identified[0]
     group.update({"Derived PO Number": derived, "PO Source": DERIVED_FROM_POGRN})
     _validate_accepted(run, group)
     outcome.update(group=group, status="Approved" if group["_passed"] else "Accepted, checks to verify")
