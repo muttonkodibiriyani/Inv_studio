@@ -229,7 +229,8 @@ def rules_view(result,text="",boxes=(),printed=None):
         issues.append({"code":str(e.get("Exception Type") or "Exception"),"message":str(e.get("Description") or ""),
                        "owner":str(e.get("Owner") or ""),"line":e.get("Line No.") or None,"rule":str(e.get("Rule ID") or ""),
                        "evidence":str(e.get("Candidates / Evidence") or ""),"blocking":bool(e.get("blocking",True))})
-    if below:
+    # RULES raises its own ITEM-LINE-95 exception when lines exist; add ours only when it did not.
+    if below and not any(i["rule"]=="ITEM-LINE-95" for i in issues):
         issues.append({"code":"Owner Review","message":f"Item lines resolved {resolved}/{total}: below 95%, owner review required",
                        "owner":"Owner","line":None,"rule":"ITEM-95","evidence":"","blocking":True})
     # A second reader (OCR) disagreeing with the extracted value never edits it; it is surfaced for the reviewer.

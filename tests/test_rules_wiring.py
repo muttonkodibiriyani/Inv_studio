@@ -260,3 +260,12 @@ def test_owner_rule_and_printed_evidence_kinds_and_buyer_name():
     assert not any("Buyer" in i["message"] for i in view["issues"])
     result["header"]["Buyer Name"]=""
     assert "buyer_name" not in rules_view(result)["fields"]
+
+
+def test_owner_review_is_not_doubled_when_rules_raises_it():
+    result={"status":"Review","header":{},"lines":[],"lineage":[],
+            "item_resolution":{"resolved":1,"total":2,"rate":"0.5","threshold":"0.95","below":True,"definition":"d"},
+            "exceptions":[{"Exception Type":"Owner Validation","Description":"Item-line check 1/2 is below 95 %","Rule ID":"ITEM-LINE-95","blocking":True}]}
+    view=rules_view(result)
+    assert view["item_lines"]["owner_review"] is True
+    assert [i["rule"] for i in view["issues"] if i["rule"] in ("ITEM-95","ITEM-LINE-95")]==["ITEM-LINE-95"]
