@@ -606,6 +606,8 @@ def main():
                    help="private directory of learned supplier templates (app.learned); missing dirs are ignored")
     p.add_argument("--learned-only",action="store_true",
                    help="diagnostic: read with the learned templates alone, skipping the built-in readers")
+    p.add_argument("--text-only",action="store_true",
+                   help="return the text layer and word boxes only (evidence for values read elsewhere); no parsing")
     args=p.parse_args()
     if not args.learned_templates and os.getenv("INV_STUDIO_LEARNED_TEMPLATES"):
         args.learned_templates=[Path(item) for item in os.getenv("INV_STUDIO_LEARNED_TEMPLATES").split(os.pathsep) if item]
@@ -619,6 +621,10 @@ def main():
             text,boxes=paddle(args.file,args.language)
             baseline_seconds=time.monotonic()-baseline_started
         else:text,boxes,tables=docling(args.file,args.language)
+        if args.text_only:
+            args.output.write_text(json.dumps({"text":text[:150000],"boxes":boxes[:10000],"invoice":None,
+                "extraction_method":"text_only","tables":tables,"parser_error":None},default=str))
+            return
         templates=templates_from(args.templates)
         learned_templates=templates_from(args.learned_templates)
         if args.file.suffix.lower()==".json":

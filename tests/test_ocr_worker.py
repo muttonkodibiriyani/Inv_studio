@@ -382,3 +382,20 @@ def test_cloud_reader_latency_respects_parent_budget(tmp_path, monkeypatch, budg
     assert bool(calls) is attempted
     if calls:
         assert calls[0] + 136.0 <= budget - 20.0
+
+
+def test_text_only_returns_the_layer_and_boxes_without_parsing(tmp_path, monkeypatch):
+    import json, sys
+    boxes = [{"text": "SYN-1", "page": 1, "box": [1, 2, 30, 12], "size": [600, 800]}]
+    def digital(path, with_tables=False):
+        return ("Invoice SYN-1", boxes, []) if with_tables else ("Invoice SYN-1", boxes)
+    monkeypatch.setattr(ocr_worker, "digital", digital)
+    parsed = []
+    monkeypatch.setattr(ocr_worker, "structured_extract", lambda *a, **k: parsed.append(a) or (None, "text_only"))
+    out = tmp_path / "out.json"
+    monkeypatch.setattr(sys, "argv", ["ocr_worker", "--engine", "invoice2data", "--file", str(tmp_path / "scan.pdf"),
+                                      "--output", str(out), "--text-only"])
+    ocr_worker.main()
+    payload = json.loads(out.read_text())
+    assert payload["invoice"] is None and payload["extraction_method"] == "text_only"
+    assert payload["boxes"] == boxes and payload["text"] == "Invoice SYN-1" and parsed == []

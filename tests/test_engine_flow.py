@@ -343,3 +343,44 @@ def test_auto_identity_gap_that_fails_a_check_still_reaches_the_ai(monkeypatch,t
     result,calls=ai_on(monkeypatch,tmp_path,native,invented_code_ai_read(),'auto')
     assert calls==['invoice2data','ai'] and result['extraction_note'] is None
     assert 'line 2 item identity' in result['trace'][0]['reason']
+
+
+def test_ai_evidence_is_carried_beside_the_invoice_not_in_the_trace(monkeypatch,tmp_path):
+    from app.models import Invoice
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
+    def ai(*args):
+        return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5','evidence':'2 x 5.00','page':1}]),{
+            'promptTokenCount':1,'evidence':{'number':{'quote':'Invoice SYN-1','page':1},'po':{'quote':'PO 7','page':1}}}
+    result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
+    assert result['selected_engine']=='vertex / gemini-test'
+    assert result['evidence']['header']=={'number':{'quote':'Invoice SYN-1','page':1,'source':'ai'}}
+    assert result['evidence']['lines']==[{'qty':{'quote':'2 x 5.00','page':1,'source':'ai'},
+                                          'price':{'quote':'2 x 5.00','page':1,'source':'ai'}}]
+    assert next(t for t in result['trace'] if t['engine']=='vertex')['usage']=={'promptTokenCount':1}
+    assert 'header_evidence' not in result['invoice'] and 'evidence' not in result['invoice']
+    assert engines.needs_scan_evidence(result,opts)
+
+
+def test_native_evidence_locates_values_in_the_text_layer(monkeypatch,tmp_path):
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    boxes=[{'text':'NATIVE-1','page':1,'box':[100,50,160,60],'size':[600,800]},
+           {'text':'0123456789012','page':1,'box':[100,90,190,100],'size':[600,800]}]
+    def read(engine,*args):
+        return {'text':'Invoice NATIVE-1 '*20,'boxes':boxes,'invoice':complete_native_invoice()}
+    monkeypatch.setattr(engines,'local_read',read)
+    result=engines.process(tmp_path/'digital.pdf',opts,store,None)
+    number=result['evidence']['header']['number']
+    assert number['source']=='native' and number['page']==1 and number['box'][0]==round(100/600,4)
+    assert result['evidence']['lines'][1]['gtin']['quote']=='0123456789012'
+    assert result['evidence']['lines'][0]=={}
+    assert not engines.needs_scan_evidence(result,opts)
+
+
+def test_verify_scan_asks_the_local_reader_for_text_only_under_the_ocr_slots(monkeypatch,tmp_path):
+    seen=[]
+    def read(engine,path,root,language='en',extra=()):
+        seen.append((engine,tuple(extra)));return {'text':'INV-1','boxes':[{'text':'INV-1'}],'invoice':None}
+    monkeypatch.setattr(engines,'local_read',read)
+    assert engines.verify_scan(tmp_path/'scan.pdf',tmp_path)==([{'text':'INV-1'}],'INV-1')
+    assert seen==[('paddleocr',('--text-only',))]

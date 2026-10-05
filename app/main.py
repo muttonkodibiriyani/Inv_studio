@@ -22,7 +22,8 @@ from pydantic import Field, SecretStr, ValidationError
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 from .authentication import CloudIdentity, actor
-from .engines import capabilities, process
+from .engines import capabilities, needs_scan_evidence, process, verify_scan
+from .evidence import annotate as annotate_evidence, verify_with_ocr
 from .learned import LearnedStore
 from .excel import UPC_MODES, workbook, batch_workbook, rules_workbook
 from . import target_check as tc
@@ -315,6 +316,24 @@ def create_app(data_dir=None):
             if reset:store.audit("review_reset",{"job_id":jid,"revision":current["revision"],"reason":"fine rules issues changed"},c)
             store.audit("fine_rules_applied",{"job_id":jid,"revision":current["revision"],"status":view["status"],
                         "item_lines":view["item_lines"],"approved":False},c)
+    def scan_evidence(jid,path,opts,selected_engine):
+        """After an AI-only scan read is saved: a local OCR pass that adds boxes and review flags to the
+        job's evidence. The AI values, revision and status never change; the pass is recorded in the trace."""
+        started=time.monotonic();boxes=None
+        try:
+            boxes,_=verify_scan(path,store.root,opts.language)
+            entry={"engine":"paddleocr","status":"evidence","method":"ocr_text","seconds":round(time.monotonic()-started,2),
+                   "reason":"Local OCR text layer read for evidence only; the AI values are unchanged"}
+        except Exception as exc:
+            entry={"engine":"paddleocr","status":"evidence_failed","seconds":round(time.monotonic()-started,2),
+                   "reason":("Local OCR evidence pass failed: "+str(exc))[:240]}
+        with plans_lock,store.connection(True) as c:
+            job=job_or_404(jid,c)
+            if job.get("status")!="review" or job.get("selected_engine")!=selected_engine:return
+            if boxes is not None:
+                job["evidence"]=verify_with_ocr(job.get("invoice") or {},job.get("evidence"),boxes)
+            job["trace"]=list(job.get("trace") or [])+[entry]
+            store.job(jid,job,c)
 
     def run(jid,opts):
         try:
@@ -346,7 +365,8 @@ def create_app(data_dir=None):
                 outcome="fields_extracted" if header_fields or extracted_lines else "text_read" if result.get("text","").strip() else "extraction_failed"
                 if demo_references:inv,provenance=enrich(raw,references(c)) if unchanged else (raw,[])
                 else:inv,provenance=raw,[]
-                job.update(result);job.update(invoice=inv.model_dump(mode="json"),provenance=provenance,
+                job.update(result);job.update(evidence=annotate_evidence(result.get("evidence"),result["invoice"],filename=job.get("filename")))
+                job.update(invoice=inv.model_dump(mode="json"),provenance=provenance,
                             extraction_status=outcome,
                             status="review" if unchanged else "error",reviewed=False,progress=None,revision=job["revision"]+1,
                             error=None if unchanged else "Rules or references changed during extraction. Review a new processing plan and retry.")
@@ -358,6 +378,11 @@ def create_app(data_dir=None):
                             "header_fields":header_fields,"line_items":extracted_lines,
                             "text_characters":len(result.get("text","")),"approved":False,
                             "confirmed_rules_unchanged":unchanged},c)
+            if unchanged and needs_scan_evidence(result,opts) and os.getenv("INV_STUDIO_VERIFY_SCANS","1")!="0":
+                # The result is saved and reviewable; a failing evidence pass must not turn it into an error.
+                try:scan_evidence(jid,Path(job["path"]),opts,result["selected_engine"])
+                except Exception as exc:
+                    store.audit("evidence_pass_failed",{"job_id":jid,"error_type":type(exc).__name__,"approved":False})
         except Exception as exc:
             job=job_or_404(jid);job.update(status="error",error=f"Processing failed ({type(exc).__name__}). Retry with another engine or review the document.",progress=None)
             store.job(jid,job)
@@ -420,7 +445,7 @@ def create_app(data_dir=None):
         # The confirm-time snapshot and records are served by the target-check endpoints, not with every job.
         j={k:v for k,v in j.items() if k not in ("path","target_system","target_accuracy")}
         if not full:
-            j.pop("text",None);j.pop("boxes",None)
+            j.pop("text",None);j.pop("boxes",None);j.pop("evidence",None)
             check=(j.get("rules") or {}).get("target_check")
             if check:j["rules"]={**j["rules"],"target_check":{k:check[k] for k in ("counts","metric","holds","summary","upc")}}
         return j

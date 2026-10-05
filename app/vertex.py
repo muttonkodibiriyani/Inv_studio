@@ -3,11 +3,12 @@ import io
 import mimetypes
 import os
 import re
+import time
 from pathlib import Path
 
 import httpx
 
-from .models import Invoice, extraction_schema
+from .models import ai_schema, parse_ai_output
 
 
 DEFAULT_MODEL = "gemini-3.7-flash"
@@ -16,6 +17,10 @@ ADC_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 MAX_INLINE_BYTES = 12_000_000
 MAX_RESPONSE_BYTES = 5_000_000
 MAX_OCR_CHARS = 100_000
+# A burst of uploads can hit the per-minute quota: one retry after a short pause, then the local readers.
+RETRY_AFTER_SECONDS = 12
+MAX_RETRY_AFTER_SECONDS = 30
+_sleep = time.sleep
 
 _PROJECT_ID = re.compile(r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$")
 _LOCATION = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -127,6 +132,15 @@ def _endpoint(project, location, model):
     )
 
 
+def _retry_after(response):
+    """Seconds to wait before the one retry: the server's Retry-After when sane, else a fixed pause."""
+    try:
+        value = int(float((getattr(response, "headers", None) or {}).get("Retry-After", "")))
+    except (TypeError, ValueError):
+        return RETRY_AFTER_SECONDS
+    return max(1, min(value, MAX_RETRY_AFTER_SECONDS))
+
+
 def _provider_error(status):
     messages = {
         400: "Vertex AI rejected this model, document or output schema.",
@@ -159,7 +173,7 @@ class VertexProvider:
             "contents": [{"role": "user", "parts": parts}],
             "generationConfig": {
                 "responseMimeType": "application/json",
-                "responseSchema": _vertex_schema(extraction_schema()),
+                "responseSchema": _vertex_schema(ai_schema()),
                 "maxOutputTokens": 32768,
                 "thinkingConfig": {"thinkingLevel": "LOW"},
             },
@@ -175,6 +189,11 @@ class VertexProvider:
                 response = http.post(
                     _endpoint(project, location, selected_model), headers=headers, json=body
                 )
+                if response.status_code == 429:
+                    _sleep(_retry_after(response))
+                    response = http.post(
+                        _endpoint(project, location, selected_model), headers=headers, json=body
+                    )
         except httpx.TimeoutException:
             raise ValueError("Vertex AI request timed out. Retry or review manually.") from None
         except httpx.RequestError:
@@ -196,9 +215,9 @@ class VertexProvider:
             )
             if not output or len(output.encode()) > MAX_RESPONSE_BYTES:
                 raise ValueError
-            invoice = Invoice.model_validate_json(output)
+            invoice, evidence = parse_ai_output(output)
         except Exception:
             raise ValueError(
                 "Vertex AI did not return a complete valid invoice. Review the document manually."
             ) from None
-        return invoice, result.get("usageMetadata", {})
+        return invoice, {**result.get("usageMetadata", {}), **({"evidence": evidence} if evidence else {})}

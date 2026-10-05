@@ -12,6 +12,7 @@ from pathlib import Path
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from .models import Invoice
+from .evidence import build as build_evidence
 
 ROOT=Path(__file__).resolve().parent
 # A recovery reader can coexist with its original process briefly. Keep heavy
@@ -107,7 +108,7 @@ def _arithmetic_complete(i:Invoice):
             and sum((line.tax_amount for line in i.lines),Decimal(0))==i.tax)
 
 
-def local_read(engine,path,root,language="en"):
+def local_read(engine,path,root,language="en",extra=()):
     output=root/"work"/(uuid.uuid4().hex+".json")
     timeout=int(os.getenv("INV_ENGINE_TIMEOUT","360" if engine=="paddleocr" else "240"))
     cmd=[sys.executable,"-m","app.ocr_worker","--engine",engine,"--file",str(path),"--output",str(output),
@@ -116,6 +117,7 @@ def local_read(engine,path,root,language="en"):
     if os.getenv("INV_STUDIO_LEARN","1")!="0":
         # Learned supplier templates live in the private data directory (app.learned), never in the repo.
         cmd+=["--learned-templates",str(root/"learned"/"templates")]
+    cmd+=list(extra)
     # Workers receive runtime paths, not the application's API keys or provider tokens.
     allowed_env={"PATH","HOME","LANG","LC_ALL","LD_LIBRARY_PATH","SSL_CERT_FILE","SSL_CERT_DIR",
                  "REQUESTS_CA_BUNDLE","TMPDIR","TMP","TEMP","XDG_CACHE_HOME","HF_HOME",
@@ -133,17 +135,34 @@ def local_read(engine,path,root,language="en"):
     finally:output.unlink(missing_ok=True)
 
 
+def verify_scan(path,root,language="en"):
+    """A local OCR pass over a scan the AI read alone: the text layer and word boxes only, as evidence.
+
+    It runs under the same local OCR slots as any reader and never produces invoice values.
+    """
+    with _LOCAL_OCR_SLOTS:
+        result=local_read("paddleocr",path,root,language,extra=("--text-only",))
+    return result.get("boxes") or [],result.get("text") or ""
+
+
+def needs_scan_evidence(result,options):
+    """True when the AI read a scan alone: no usable text layer, so its evidence has no boxes yet."""
+    return (str(result.get("selected_engine","")).startswith(f"{options.provider} /")
+            and len(str(result.get("text") or "").strip())<40 and not result.get("boxes"))
+
+
 def process(path,options,store,ai_reader,progress=lambda *args:None):
-    trace=[];best=None;best_score=-1;text="";boxes=[];selected="none"
+    trace=[];best=None;best_score=-1;text="";boxes=[];selected="none";best_evidence={}
     document_type_hint=None;extraction_note=None;native_review=[]
     ai_attempted=False;invoice2data_ocr=False
     def read_ai():
-        nonlocal best,best_score,selected,ai_attempted
+        nonlocal best,best_score,selected,ai_attempted,best_evidence
         ai_attempted=True
         progress(options.provider,"AI is reading the invoice")
         start=time.monotonic()
         try:
             candidate,meta=ai_reader(path,text,options)
+            meta=dict(meta or {});ai_evidence=meta.pop("evidence",None) or {}
             internal_fields=("seller","site","buyer","location","origin","market","taxCode")
             ignored=[field for field in internal_fields if getattr(candidate,field) is not None]
             candidate=candidate.model_copy(update={field:None for field in internal_fields})
@@ -154,7 +173,9 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             trace.append({"engine":options.provider,"model":options.model,"status":"extracted" if has_fields else "no_fields","completeness":score,"seconds":round(time.monotonic()-start,2),"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines"),"line_items":len(candidate.lines),"text_characters":len(text),"method":"vision_ai","reason":"Invoice fields returned; review against the source" if has_fields else "AI returned no invoice fields; another reader or manual entry is required","usage":meta})
             # Each candidate stays intact; never blend conflicting engine values.
             # A local read is kept on a completeness tie; the AI must read strictly more.
-            if has_fields and score>best_score:best=candidate;best_score=score;selected=f"{options.provider} / {options.model}"
+            if has_fields and score>best_score:
+                best=candidate;best_score=score;selected=f"{options.provider} / {options.model}"
+                best_evidence=build_evidence(candidate.model_dump(mode="json"),boxes,"ai",header=ai_evidence)
             return bool(candidate.number and candidate.lines and candidate.net is not None and all(l.qty is not None and l.price is not None for l in candidate.lines))
         except Exception as e:
             trace.append({"engine":options.provider,"model":options.model,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2)})
@@ -235,6 +256,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 best=candidate;best_score=score
                 selected=("native PDF text" if engine=="native_pdf_text" else
                     "invoice2data + PaddleOCR" if invoice2data_ocr and engine=="paddleocr" else engine)
+                best_evidence=build_evidence(result["invoice"],result.get("boxes",[]),"ocr" if engine=="paddleocr" else "native")
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
             if engine=="native_pdf_text":
                 if native_suitable:
@@ -285,4 +307,5 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         extraction_note="Read from the PDF text; every printed amount checks. Review: "+"; ".join(native_review)+"."
     return {"invoice":(best or Invoice()).model_dump(mode="json"),"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
-            "document_type_hint":document_type_hint,"extraction_note":extraction_note}
+            "document_type_hint":document_type_hint,"extraction_note":extraction_note,
+            "evidence":best_evidence if best is not None else {}}

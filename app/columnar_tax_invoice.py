@@ -191,19 +191,42 @@ def _one(lines, pattern):
 
 
 def _party_names(rows):
-    """Names on the row under 'Issued By:  Issued To:', split at the 'Issued To:' column."""
+    """Names on the row under 'Issued By:  Issued To:', split at the column gap between the two labels.
+
+    The buyer's first words may start well left of its label, so the label's own x is only the fallback split.
+    """
     for i, row in enumerate(rows[:-1]):
         if not PARTIES.match(_text(row)):
             continue
-        split = next(w["x0"] for w, nxt in zip(row, row[1:]) if w["text"] == "Issued" and nxt["text"].startswith("To")
+        label = next(w for w, nxt in zip(row, row[1:]) if w["text"] == "Issued" and nxt["text"].startswith("To")
                      and w is not row[0])
         below = rows[i + 1]
         if below[0]["page"] != row[0]["page"]:
             return None, None
+        split = label["x0"]
+        k = _column_gap(below, row[0]["x0"], label["x1"], minimum=label["x1"] - label["x0"])
+        if k is not None:
+            return _text(below[:k + 1]) or None, _text(below[k + 1:]) or None
         left = _text([w for w in below if w["x1"] <= split + 1]) or None
         right = _text([w for w in below if w["x0"] >= split - 1]) or None
         return left, right
     return None, None
+
+
+def _column_gap(words, left, right, minimum):
+    """Index of the word before the widest gap centred between ``left`` and ``right``, or None.
+
+    The gap must be at least ``minimum`` wide and clearly wider than the row's ordinary word spacing.
+    """
+    gaps = [nxt["x0"] - w["x1"] for w, nxt in zip(words, words[1:])]
+    positive = sorted(g for g in gaps if g > 0)
+    floor = max(minimum, 2.5 * positive[len(positive) // 2]) if len(positive) >= 3 else minimum
+    best = None
+    for k, (w, nxt) in enumerate(zip(words, words[1:])):
+        gap = nxt["x0"] - w["x1"]
+        if gap >= floor and left <= (w["x1"] + nxt["x0"]) / 2 <= right and (best is None or gap > best[1]):
+            best = (k, gap)
+    return None if best is None else best[0]
 
 
 def _tail(words):
