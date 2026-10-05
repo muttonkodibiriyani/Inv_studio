@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from app import matching
 from app.excel import HEADERS, rules_workbook
-from app.matching import printed_evidence, rules_validation, rules_view
+from app.matching import extraction_evidence, printed_evidence, rules_validation, rules_view
 from tests.test_fine_rules_api import CONFIG, INVOICE, imported
 
 H = {"x-studio-request": "1"}
@@ -350,3 +350,20 @@ def test_upc_defaults_to_empty_per_the_owner(production):
     assert client.get("/api/target-export/config").json()["upc"] == "empty"
     assert client.post("/api/target-export/config", json={"upc": "barcode"}, headers=H).status_code == 200
     assert client.get("/api/target-export/config").json()["upc"] == "barcode"
+
+
+def test_deferred_extraction_evidence_refreshes_the_rules_view_without_a_revision(production):
+    app, client = production
+    app.state.store.job("job-1", job())
+    first = client.get("/api/jobs/job-1").json()
+    # A deferred OCR pass adds evidence with boxes; status and revision stay the same.
+    later = {**app.state.store.job("job-1"), "evidence": {"header": {"number": {"quote": "Invoice SYN", "page": None, "source": "ocr"}}, "lines": []}}
+    app.state.store.job("job-1", later)
+    second = client.get("/api/jobs/job-1").json()
+    assert second["revision"] == first["revision"]
+    assert second["rules"]["evidence_hash"] != first["rules"]["evidence_hash"]
+    assert client.get("/api/jobs/job-1").json()["rules"]["computed_at"] == second["rules"]["computed_at"]
+
+
+def test_extraction_evidence_without_a_page_is_not_given_a_page():
+    assert extraction_evidence({"quote": "SYN", "page": None, "source": "native"})["reference"] == "page not given"

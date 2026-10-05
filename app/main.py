@@ -275,8 +275,11 @@ def create_app(data_dir=None):
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
         view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),
                         j.get("owner_entries") if entries is None else entries)
-        view.update(signature=signature,computed_at=datetime.now(timezone.utc).isoformat())
+        view.update(signature=signature,evidence_hash=evidence_hash(j),computed_at=datetime.now(timezone.utc).isoformat())
         return view
+    def evidence_hash(j):
+        # Extraction evidence (boxes from a deferred OCR pass) can arrive without a revision change.
+        return hashlib.sha256(json.dumps(j.get("evidence") or {},sort_keys=True,default=str).encode()).hexdigest()
     def fresh_rules(j):
         r=j.get("rules")
         return r if r and r.get("revision")==j["revision"] else None
@@ -286,11 +289,11 @@ def create_app(data_dir=None):
         j=job_or_404(jid)
         if j["status"] in ("queued","processing","error") or j.get("export_id"):return
         with store.connection() as c:signature=rules_signature(c)
-        if fresh_rules(j) and j["rules"].get("signature")==signature:return
+        if fresh_rules(j) and j["rules"].get("signature")==signature and j["rules"].get("evidence_hash")==evidence_hash(j):return
         view=compute_rules(Invoice.model_validate(j["invoice"]),j)
         with store.connection(True) as c:
             current=job_or_404(jid,c)
-            if current["revision"]!=j["revision"]:return
+            if current["revision"]!=j["revision"] or evidence_hash(current)!=view["evidence_hash"]:return
             view["revision"]=current["revision"]
             # New review-level issues from changed tables were not seen by the reviewer: ask for a fresh confirm.
             reset=bool(current.get("reviewed")) and accepted_ids(current.get("rules"))!=accepted_ids(view)

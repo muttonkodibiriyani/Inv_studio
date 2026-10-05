@@ -169,7 +169,8 @@ PRINTED_KEYS=("number","date","currency","net","tax")
 def extraction_evidence(entry):
     """job.evidence entry {quote, page, box?, source} -> a printed evidence item, or None."""
     if not isinstance(entry,dict) or not str(entry.get("quote") or "").strip():return None
-    where=f"page {entry.get('page') or 1}"+(f" box {list(entry['box'])}" if isinstance(entry.get("box"),(list,tuple)) else "")
+    page=entry.get("page")
+    where=(f"page {page}" if page else "page not given")+(f" box {list(entry['box'])}" if isinstance(entry.get("box"),(list,tuple)) else "")
     return {"kind":"printed","source":f"Invoice ({entry.get('source') or 'ai'})","reference":where,"original":str(entry["quote"])[:120],
             "rule":"","confidence":""}
 
