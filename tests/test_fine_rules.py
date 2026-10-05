@@ -851,6 +851,9 @@ def test_TGT_001_amount_printed_with_two_decimals_or_thousands_separators_is_fou
     assert fr._printed_page(scan, D("520.0")) == 2
     assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("1520.0")) == 1
     assert fr._printed_page({"pages": {1: "Total 1,520"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Total KWD 1,520.000"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Net 520.000"}}, D("520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Net 520.0005"}}, D("520.0")) is None
     assert fr._printed_page(scan, D("520.5")) is None
     assert fr._printed_page({"pages": {1: "Total 520.50"}}, D("520.0")) is None
     assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("520.0")) is None
