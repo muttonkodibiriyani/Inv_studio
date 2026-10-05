@@ -133,3 +133,39 @@ def test_other_layouts_are_not_claimed(tmp_path):
     assert structured_extract(text, boxes, [], tables)[1] != "columnar_tax_invoice"
     plain = pdf(tmp_path, [[[(40, "INVOICE")], [(40, "Invoice No: INV-1")], [(40, "Total 10.00")]]])
     assert cti.extract(*read(plain)[:2]) is None
+
+
+def ocr_style(boxes, scale=1.7):
+    """Pixel coordinates and split-off punctuation, as an OCR reader returns words."""
+    out = []
+    for b in boxes:
+        x0, top, x1, bottom = (v * scale for v in b["box"])
+        text, height = b["text"], bottom - top
+        if len(text) > 1 and text[-1] in ":,":
+            cut = x1 - height * 0.3
+            out += [{**b, "text": text[:-1], "box": [x0, top, cut - height * 0.5, bottom]},
+                    {**b, "text": text[-1], "box": [cut, top, x1, bottom]}]
+        else:
+            out.append({**b, "box": [x0, top, x1, bottom]})
+    return out
+
+
+def test_ocr_words_with_split_punctuation_read_the_same(tmp_path):
+    text, boxes, _ = read(pdf(tmp_path, one_page()))
+    native, _ = cti.extract(text, boxes)
+    split = ocr_style(boxes)
+    assert any(b["text"] == ":" for b in split)
+    ocr, rec = cti.extract(text, split)
+    assert {k: v for k, v in ocr.items() if k != "lines"} == {k: v for k, v in native.items() if k != "lines"}
+    assert [(line["gtin"], line["net_amount"]) for line in ocr["lines"]] == [
+        (line["gtin"], line["net_amount"]) for line in native["lines"]]
+    assert all(line["reconciled"] for line in rec["lines"])
+
+
+def test_thousands_group_split_by_ocr_rejoins():
+    row = [{"text": "1,", "page": 1, "x0": 0, "x1": 10, "top": 0, "bottom": 20},
+           {"text": "234.50", "page": 1, "x0": 18, "x1": 60, "top": 0, "bottom": 20},
+           {"text": "4006381333931", "page": 1, "x0": 90, "x1": 200, "top": 0, "bottom": 20}]
+    assert [w["text"] for w in cti._join_split_tokens(row)] == ["1,234.50", "4006381333931"]
+    barcode = [{**row[0], "text": "30,"}, {**row[2], "x0": 14}]
+    assert [w["text"] for w in cti._join_split_tokens(barcode)] == ["30,", "4006381333931"]

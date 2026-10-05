@@ -23,16 +23,18 @@ import re
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
-TITLE = re.compile(r"^TAX INVOICE$")
+TITLE = re.compile(r"^TAX INVOICE(?:\s|$)")
 NUMBER = re.compile(r"^#\s*([A-Z0-9][A-Z0-9./_-]{2,79})$")
-ISSUED = re.compile(r"^Date of Issuing:\s*([A-Za-z]{3,9}\.?\s+\d{1,2},\s*\d{4})$")
+# OCR readers may put logo text on the same row, to the right of the title and the date.
+ISSUED = re.compile(r"^Date of Issuing\s*:\s*([A-Za-z]{3,9}\.?\s+\d{1,2}\s*,\s*\d{4})(?:\s|$)")
 # Totals sit in the right-hand column; the amount in words may share their row on the left.
-SUB_TOTAL = re.compile(r"(?:^|.*\s)Sub Total,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
-TOTAL_VAT = re.compile(r"(?:^|.*\s)Total VAT,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
-TOTAL = re.compile(r"(?:^|.*\s)(?<!Sub )Total,\s*([A-Z]{3}):\s*([0-9][0-9,]*\.\d{2})$")
+SUB_TOTAL = re.compile(r"(?:^|.*\s)Sub Total\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
+TOTAL_VAT = re.compile(r"(?:^|.*\s)Total VAT\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
+TOTAL = re.compile(r"(?:^|.*\s)(?<!Sub )Total\s*,\s*([A-Z]{3})\s*:\s*([0-9][0-9,]*\.\d{2})$")
 # The buyer's order number; checked against the PO extract (RMS order numbers) before mapping to po.
-REFERENCE = re.compile(r"^Reference #:\s*(\d{4,20})(?:\s+Reference Date:.*)?$")
-TABLE_END = re.compile(r"^(TOTAL OF SUPPLY|Sub Total,|Total VAT,|Total,|Terms and Conditions)")
+REFERENCE = re.compile(r"^Reference #\s*:\s*(\d{4,20})(?:\s+Reference Date\s*:.*)?$")
+TABLE_END = re.compile(r"^(TOTAL OF SUPPLY|Sub Total\s*,|Total VAT\s*,|Total\s*,|Terms and Conditions)")
+PARTIES = re.compile(r"^Issued By\s*:.*\sIssued To\s*:")
 PAGE_FOOTER = re.compile(r"^Made with \w+")
 MONEY = re.compile(r"^-?[0-9][0-9,]*\.\d{2}$")
 QTY = re.compile(r"^[0-9][0-9,]*(?:\.\d{1,4})?$")
@@ -76,7 +78,30 @@ def _rows(words):
             current.append(w)
         if current:
             rows.append(sorted(current, key=lambda w: w["x0"]))
-    return rows
+    return [_join_split_tokens(row) for row in rows]
+
+
+def _join_split_tokens(row):
+    """Rejoin tokens an OCR reader split off: 'Issuing' ':' and '1' ',' '234.50' or '1,' '234.50'.
+
+    Only near neighbours join, and a thousands group joins only onto 1-3 digits; native words are unaffected.
+    """
+    out = []
+    for w in row:
+        prev = out[-1] if out else None
+        gap = w["x0"] - prev["x1"] if prev else None
+        height = w["bottom"] - w["top"]
+        join = prev is not None and (
+            (gap <= 0.8 * height and re.fullmatch(r"[:,]", w["text"]))
+            or (gap <= 0.25 * height and re.fullmatch(r"[.)%]+", w["text"]))
+            or (gap <= 0.8 * height and re.fullmatch(r"\d{1,3},", prev["text"])
+                and re.fullmatch(r"\d{3}\.\d{2}", w["text"])))
+        if join:
+            out[-1] = {**prev, "text": prev["text"] + w["text"], "x1": max(prev["x1"], w["x1"]),
+                       "bottom": max(prev["bottom"], w["bottom"])}
+        else:
+            out.append(w)
+    return out
 
 
 def _text(words):
@@ -91,7 +116,7 @@ def _decimal(value):
 
 
 def _long_date(value):
-    match = re.fullmatch(r"([A-Za-z]{3,9})\.?\s+(\d{1,2}),\s*(\d{4})", value.strip())
+    match = re.fullmatch(r"([A-Za-z]{3,9})\.?\s+(\d{1,2})\s*,\s*(\d{4})", value.strip())
     if not match or match.group(1)[:3].lower() not in MONTHS:
         return None
     try:
@@ -113,8 +138,11 @@ def _header_row(row):
     if not all(n in names for n in ("Description", "Brand", "Quantity", "UOM")):
         return None
     pick = {w["text"]: w for w in row}
+    heights = sorted(w["bottom"] - w["top"] for w in row)
     return {"description": pick["Description"]["x0"], "brand": pick["Brand"]["x0"],
-            "quantity": pick["Quantity"]["x0"], "uom": pick["UOM"]["x0"]}
+            "quantity": pick["Quantity"]["x0"], "uom": pick["UOM"]["x0"],
+            # Column slack follows the text size, so point (PDF) and pixel (OCR) coordinates both work.
+            "slack": max(3.0, heights[len(heights) // 2] * 0.4)}
 
 
 def detect(text, boxes):
@@ -125,7 +153,7 @@ def detect(text, boxes):
     has = lambda pattern: any(pattern.match(line) for line in lines)  # noqa: E731
     return (has(TITLE) and has(NUMBER) and has(ISSUED) and has(SUB_TOTAL) and has(TOTAL_VAT) and has(TOTAL)
             and any(_header_row(r) for r in _rows(_words(boxes)))
-            and any(line.startswith("Issued By:") and "Issued To:" in line for line in lines))
+            and any(PARTIES.match(line) for line in lines))
 
 
 def _one(lines, pattern):
@@ -136,10 +164,9 @@ def _one(lines, pattern):
 def _party_names(rows):
     """Names on the row under 'Issued By:  Issued To:', split at the 'Issued To:' column."""
     for i, row in enumerate(rows[:-1]):
-        texts = [w["text"] for w in row]
-        if texts[:2] != ["Issued", "By:"] or "To:" not in texts:
+        if not PARTIES.match(_text(row)):
             continue
-        split = next(w["x0"] for w, nxt in zip(row, row[1:]) if w["text"] == "Issued" and nxt["text"] == "To:"
+        split = next(w["x0"] for w, nxt in zip(row, row[1:]) if w["text"] == "Issued" and nxt["text"].startswith("To")
                      and w is not row[0])
         below = rows[i + 1]
         if below[0]["page"] != row[0]["page"]:
@@ -188,7 +215,8 @@ def extract(text, boxes):
             continue
         if not in_table:
             # Body starts below the currency row; a page without its own header continues the table.
-            if all(re.fullmatch(r"[A-Z]{3}", w["text"]) for w in row) and len(row) >= 2:
+            codes = [w for w in row if re.fullmatch(r"[A-Z]{3}", w["text"])]
+            if len(codes) >= 2 and all(w in codes or w["text"] == "%" for w in row):
                 in_table = True
                 continue
             if drafts and row[0]["page"] != drafts[-1]["page"] and not header:
@@ -201,12 +229,13 @@ def extract(text, boxes):
         if TABLE_END.match(line):
             finished = True
             continue
-        left = columns["description"] - 3
-        number = row[0]["text"] if re.fullmatch(r"\d{1,4}", row[0]["text"]) and row[0]["x1"] <= left + 6 else None
+        slack = columns["slack"]
+        left = columns["description"] - slack
+        number = row[0]["text"] if re.fullmatch(r"\d{1,4}", row[0]["text"]) and row[0]["x1"] <= left + 2 * slack else None
         body = row[1:] if number else row
-        description = [w for w in body if w["x0"] < columns["brand"] - 3]
-        brand = [w for w in body if columns["brand"] - 3 <= w["x0"] < columns["quantity"] - 3]
-        tail = [w for w in body if w["x0"] >= columns["quantity"] - 3]
+        description = [w for w in body if w["x0"] < columns["brand"] - slack]
+        brand = [w for w in body if columns["brand"] - slack <= w["x0"] < columns["quantity"] - slack]
+        tail = [w for w in body if w["x0"] >= columns["quantity"] - slack]
         if number:
             drafts.append({"no": int(number), "page": row[0]["page"], "description": [_text(description)],
                            "brand": [_text(brand)], "tail": _tail(tail), "raw_tail": _text(tail)})
