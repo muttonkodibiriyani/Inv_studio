@@ -702,7 +702,9 @@ def supplier_family(run, candidates):
 
 
 def _site_names(source, site, rows):
-    names = {text(r.get("SUPPLIER_NAME")) for r in rows if text(r.get("SUPPLIER")) == site} - {""}
+    """The site's Item Master SUPPLIER_NAMEs and only the rows of that site (cited as its lineage)."""
+    rows = [r for r in rows if text(r.get("SUPPLIER")) == site]
+    names = {text(r.get("SUPPLIER_NAME")) for r in rows} - {""}
     if not names and hasattr(source, "items_by_site"):
         rows = [r for r in source.items_by_site(site) if text(r.get("SUPPLIER")) == site]
         names = {text(r.get("SUPPLIER_NAME")) for r in rows} - {""}

@@ -434,6 +434,9 @@ def test_ALG_005_supplier_site_is_item_master_supplier_as_text():
     assert result["header"]["Supplier Site"] == "22001"
     site = next(x for x in result["lineage"] if x["target"] == "Supplier Site")
     assert site["rule"] == "SUP-003" and "Items!2" in site["reference"]
+    other_site = ITEMS + [item("345000001", "ULT_0012345678905", "100001", site="22009", name="ABC001RZ1ZZD", ref=12)]
+    cited = next(x for x in run(items=other_site)["lineage"] if x["target"] == "Supplier Site")["reference"]
+    assert "Items!2" in cited and "Items!12" not in cited  # only the chosen site's rows are cited
 
 
 def test_ALG_006_pogrn_searched_by_six_character_ebs_key():
