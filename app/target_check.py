@@ -95,7 +95,8 @@ def printed(text, original):
 
 
 DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%d-%m-%y", "%d/%m/%y",
-                "%B %d, %Y", "%b %d, %Y")
+                "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d-%B-%Y", "%B %d %Y")
+ORDINAL_DAY = re.compile(r"(?i)\b(\d{1,2})(st|nd|rd|th)\b")
 
 
 def same(value, original):
@@ -107,9 +108,10 @@ def same(value, original):
     a, b = _dec(value), _dec(original)
     if a is not None and b is not None:
         return a == b
+    printed = ORDINAL_DAY.sub(r"\1", str(original).strip())  # "3rd March 2031" reads as "3 March 2031"
     for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(str(original).strip(), fmt).date().isoformat() == str(value)
+            return datetime.strptime(printed, fmt).date().isoformat() == str(value)
         except ValueError:
             pass
     return False

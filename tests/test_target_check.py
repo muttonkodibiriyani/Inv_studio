@@ -330,3 +330,9 @@ def test_lines_to_net_within_unit_cost_rounding_is_a_warning():
     assert k["status"] == "warning" and "rounding" in k["detail"]
     v = view(fields={"currency": field("SYD", sd), "net": net}, lines=[line(1, cost="0.66", qty="6")])
     assert check(tc.check_view(v, sources()), "lines_to_net")["status"] == "fail"
+
+
+def test_a_printed_date_with_an_ordinal_day_or_a_full_month_name_equals_its_iso_value():
+    assert tc.same("2031-03-03", "3rd March 2031") and tc.same("2031-03-03", "3 Mar 2031")
+    assert tc.same("2031-03-21", "21st-March-2031") and tc.same("2031-03-22", "March 22nd 2031")
+    assert not tc.same("2031-03-04", "3rd March 2031") and not tc.same("2031-03-03", "3rd Marchy 2031")
