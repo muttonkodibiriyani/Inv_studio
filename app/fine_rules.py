@@ -1247,6 +1247,37 @@ def _printed_page(scan, amount):
     return None
 
 
+_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_DISCOUNT = re.compile(r"(?i)\bdiscount\b")
+
+
+def _printed_values(value, places):
+    """Numeric tokens of a text, commas stripped, sign and brackets ignored, at ``places``."""
+    return {Decimal(t.replace(",", "")).quantize(places, rounding=ROUND_HALF_UP)
+            for t in _NUMBER.findall(value) if t.replace(",", "")}
+
+
+def invoice_discount(invoice, scan):
+    """02A with an invoice-level discount (shared with target_check lines_to_net, agreed with INHERIT): at the
+    printed Header net's precision (at least two decimals), D = sum(qty x unit cost) - Header net is > 0 and is
+    printed on a text line with the word 'discount', and sum(qty x unit cost) is printed somewhere. Fine rules
+    also need sum(line net) == Header net. Returns (D, page) or None."""
+    lines = invoice.lines
+    if invoice.net is None or not lines or any(None in (l.qty, l.price, l.net_amount) for l in lines):
+        return None
+    places = Decimal(1).scaleb(min(invoice.net.as_tuple().exponent, -2))
+    q = lambda v: v.quantize(places, rounding=ROUND_HALF_UP)  # noqa: E731
+    total, net = q(sum((l.qty * l.price for l in lines), Decimal(0))), q(invoice.net)
+    if q(sum((l.net_amount for l in lines), Decimal(0))) != net or total - net <= 0:
+        return None
+    pages = scan["pages"].items()
+    if not any(total in _printed_values(value, places) for _, value in pages):
+        return None
+    page = next((p for p, value in pages for row in value.splitlines()
+                 if _DISCOUNT.search(row) and total - net in _printed_values(row, places)), None)
+    return (total - net, page) if page else None
+
+
 def _different_company(name, owner):
     """A buyer names a different company only when it has a name beyond company-type words and that name does
     not contain the owner's entity. Company-type fragments (a reader miss such as "Co. L.L.C") are not one."""
@@ -1457,6 +1488,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     tax_code = resolve_tax_code(run, market, document_date)
     tax_source = "Reviewed invoice tax code" if text(invoice.taxCode) else "Owner VAT code table (C/PV), receiving market"
     lines_out = []
+    discount = invoice_discount(invoice, scan)
     for line, m in zip(invoice.lines, matches):
         n = m["line"]
         brand = ""
@@ -1482,7 +1514,8 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         elif line.net_amount is not None:
             # 02A Unit Cost: line/value reconciliation at the printed line amount's precision.
             computed = (line.qty * line.price).quantize(line.net_amount, rounding=ROUND_HALF_UP)
-            if computed != line.net_amount:
+            # A printed invoice-level discount explains a line amount below quantity x unit cost.
+            if computed != line.net_amount and not (discount and 0 <= line.net_amount <= computed):
                 line_ok = False
                 run.exception("Line Exception", f"Quantity x unit cost {computed} differs from line amount "
                               f"{line.net_amount}", "02A-Unit Cost", n)

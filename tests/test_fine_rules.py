@@ -837,6 +837,22 @@ def test_R_006_two_supplier_codes_resolved_by_the_printed_deliver_to_location_en
                                                  text_value="Deliver To: Store 38091"))
 
 
+def test_02A_line_below_quantity_x_cost_is_explained_by_a_printed_invoice_discount():
+    def unit_cost_lines(first, second, net, text_value):
+        inv = invoice(net=D(net), lines=lines(first={"net_amount": D(first)}, second={"net_amount": D(second)}))
+        result = run(inv, text_value=text_value)
+        return [e["Line No."] for e in result["exceptions"] if e["Rule ID"] == "02A-Unit Cost"]
+
+    printed = "Invoice\fTotal 70.00\nDiscount -15.00\nNet Total 55.00"
+    assert unit_cost_lines("15", "40", "55", printed) == []
+    assert unit_cost_lines("0", "40", "40", "Total 70.000\nLess: Discount (30.000)\nNet 40.000") == []
+    assert unit_cost_lines("15", "40", "55", printed.replace("Discount", "Less")) == [1]
+    assert unit_cost_lines("15", "40", "55", printed.replace("-15.00", "-10.00")) == [1]
+    assert unit_cost_lines("15", "40", "55", printed.replace("Total 70.00", "Total")) == [1]
+    assert unit_cost_lines("15", "40", "60", printed) == [1]
+    assert unit_cost_lines("45", "10", "55", printed) == [1]
+
+
 def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     traced = run(text_value="Net 70.000\fTax 0\nTotal 70")
     refs = {x["target"]: x["reference"] for x in traced["lineage"]}
