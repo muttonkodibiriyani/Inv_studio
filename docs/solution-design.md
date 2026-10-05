@@ -29,10 +29,10 @@ Large source extracts feed a separate read-only evidence lookup. Its atomic cuto
 | Readable-PDF path | Native text can bypass image OCR; invoice headings, explicit labels and spatial columns are required | Expand rules only from adjudicated failures; do not infer internal codes or ambiguous facts |
 | AI fallback | Managed Vertex AI plus OpenAI, Anthropic, ChatGPT and restricted Claude adapters; strict schema and failure handling; saved versus verified access is explicit | Complete the private held-out evaluation and measure corrections, latency and cost |
 | Matching | Deterministic supplier/site/route/PO/item/receipt/tax rules | Data-owner-approved reference snapshot |
-| Excel | Exact approved three-sheet output plus combined `EXTRACTION_REVIEW_ONLY` and all-field `DRAFT_UNVALIDATED` paths | Hosted verification and downstream acceptance of each visible boundary |
-| Business references | Canonical import plus a distinct 412,139-row private source profile | Restore hosted import; record recovery receipt; approve mappings separately |
-| Owner connections | API keys, hosted Claude setup-token CLI, and move-only ChatGPT local-to-hosted credential transfer in source | Release validation, hosted deployment and live owner-account evaluation |
-| Invoice deletion | Confirmed removal of live job/source/audit/workbook data with minimal approved-ledger tombstones | Verify the upcoming cloud bundle and document provider backup/version retention |
+| Excel | Exact approved three-sheet output plus hosted-verified combined review and all-field manual draft paths | Downstream business acceptance of each visible boundary |
+| Business references | Canonical import plus 412,139 live private evidence rows; authenticated API and UI search verified | Approve mapping, receipt-status and prior-invoicing semantics separately |
+| Owner connections | Hosted model loading and invalid-key handling verified; Claude and ChatGPT transfer adapters implemented | Replace the rejected Anthropic key; verify live owner subscription access and inference |
+| Invoice deletion | Hosted confirmed deletion verified; live evidence removed with minimal approved-ledger tombstones retained | Agree provider backup/version retention and operational ownership |
 | Restricted cloud pilot | Firebase sign-in, Cloud Run, Cloud SQL, private evidence storage and managed secrets | Business acceptance and operational hardening |
 | Shared enterprise service | Design below | Role separation, durable workers, operational controls and load testing |
 
