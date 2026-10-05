@@ -372,3 +372,12 @@ def test_extraction_evidence_without_a_page_is_not_given_a_page():
     result = {"status": "Review", "header": {"Document": "SYN-3"}, "lines": [{"line": 1}, {"line": 2}], "lineage": [], "exceptions": []}
     view = rules_view(result, printed={"header": {}, "lines": [{}, {"qty": {"quote": "2", "page": 1, "source": "ocr"}}]})
     assert len(view["lines"]) == 2
+
+
+def test_an_order_selected_by_the_rules_is_shown_as_picked_not_printed():
+    result = {"status": "Review", "header": {"Document": "SYN-4", "Order No": "70002"}, "lines": [], "exceptions": [],
+              "lineage": [{"target": "Order No", "line": None, "original": "", "value": "70002", "rule": "POG-001",
+                           "source": "Selected by POG-001 among 2 order/location candidates; not printed on the invoice",
+                           "reference": "POGRN!12", "confidence": "Derived from POGRN", "evidence_kind": "selected"}]}
+    po = rules_view(result)["fields"]["po"]
+    assert po["value"] == "70002" and po["evidence"][0]["kind"] == "selected"

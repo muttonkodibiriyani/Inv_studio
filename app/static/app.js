@@ -21,6 +21,7 @@ function evidenceText(evidence) {
     const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
       : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
         : entry.kind === "owner_rule" ? `owner rule · ${entry.reference}`
+        : entry.kind === "selected" ? `selected by rule, not printed · ${entry.reference}`
         : entry.kind === "owner_entry" ? `entered by reviewer${entry.original ? ` · ${entry.original}` : ""}`
         : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
           : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;

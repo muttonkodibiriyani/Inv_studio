@@ -130,6 +130,8 @@ def _evidence(entry):
     source=str(entry.get("source") or "")
     if entry.get("evidence_kind")=="owner_rule":kind="owner_rule"
     elif entry.get("evidence_kind")=="printed":kind="printed"
+    # Picked by the rules among candidate orders (decision 16): never shown as printed.
+    elif entry.get("evidence_kind")=="selected":kind="selected"
     elif _SHEET_ROW.match(reference):kind="sheet"
     elif "|" in reference:kind="table"
     elif source.startswith("Invoice"):kind="printed"
