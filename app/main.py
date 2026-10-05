@@ -26,7 +26,9 @@ from .engines import capabilities, process
 from .excel import workbook, batch_workbook
 from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
+from .deletion import DeletionError, delete_invoices
 from .reference_lookup import ReferenceLookup
+from .product_candidates import ProductCandidates
 from .matching import enrich, key, validate
 from .models import Invoice, Policy, ProcessingOptions, StrictModel
 from .oauth import ChatGPTAuth
@@ -63,6 +65,16 @@ class Batch(StrictModel):
 
 class ExtractionBatch(Batch):
     acknowledge_unvalidated: bool = Field(default=False,strict=True)
+
+
+class DeleteItem(StrictModel):
+    id: str = Field(min_length=1,max_length=200)
+    revision: int = Field(ge=1,strict=True)
+
+
+class DeleteJobsRequest(StrictModel):
+    jobs: list[DeleteItem] = Field(min_length=1,max_length=100)
+    confirm_permanent: bool = Field(default=False,strict=True)
 
 
 class Retry(StrictModel):
@@ -125,6 +137,7 @@ def create_app(data_dir=None):
     if identity.cloud:store.sync_templates()
     auth=ChatGPTAuth(store);providers=Providers(store,auth)
     lookup=ReferenceLookup(store)
+    products=ProductCandidates(lookup)
     pool=ThreadPoolExecutor(max_workers=2,thread_name_prefix="invoice")
     slots=threading.BoundedSemaphore(20)
     plans={};plans_lock=threading.RLock()
@@ -342,6 +355,9 @@ def create_app(data_dir=None):
     @app.post("/api/preflight")
     def preflight(body:Preflight):
         warnings=[];blocking=[];opts=body.options
+        if opts.engine=="invoice2data":warnings.append("invoice2data reads native text and supplier templates. Scanned PDFs and images use PaddleOCR locally as the input reader; the trace names both components.")
+        if opts.engine in ("auto","invoice2data","paddleocr"):
+            warnings.append("Short scanned PDFs with unread quantities or prices may receive one higher-resolution local OCR pass, within a six-minute reader limit. It is retained only when consistency checks improve; all values still require review. Local OCR files wait their turn to keep the workspace responsive.")
         if not references():warnings.append("No reference files loaded. Extraction can run, but Excel export stays on hold until references are imported and checked.")
         if opts.ai_fallback or opts.engine=="ai":
             if not opts.model:warnings.append("No AI model selected. If local reading fails, this batch will wait for an AI connection or manual review.")
@@ -370,6 +386,18 @@ def create_app(data_dir=None):
     async def upload(file:UploadFile=File(...),options:str=Form("{}"),preflight_token:str=Form("")):
         content=await file.read(MAX_UPLOAD+1);name=file.filename or "invoice.pdf";opts=ProcessingOptions.model_validate_json(options)
         return submit(content,name,opts,preflight_token)
+
+    @app.post("/api/jobs/delete")
+    def delete_jobs(body:DeleteJobsRequest):
+        if not body.confirm_permanent:
+            raise HTTPException(400,"Confirm permanent invoice deletion")
+        if len({item.id for item in body.jobs})!=len(body.jobs):
+            raise ValueError("Select each invoice only once")
+        try:
+            with plans_lock,store.connection(True) as connection:
+                return delete_invoices(store,body.jobs,connection)
+        except DeletionError as error:
+            raise HTTPException(error.status_code,error.detail) from None
 
     @app.get("/api/jobs/{jid}")
     def get_job(jid:str):return public(evaluate(job_or_404(jid)))
@@ -600,6 +628,10 @@ def create_app(data_dir=None):
     @app.get("/api/reference-lookup/search")
     def lookup_search(kind:str,q:str,cursor:str="",limit:int=25,site:str="",supplier:str="",po:str=""):
         return lookup.search(kind,q,cursor,limit,site=site,supplier=supplier,po=po)
+
+    @app.get("/api/reference-lookup/products")
+    def product_candidates(q:str,limit:int=25,site:str="",supplier:str="",po:str="",invoice_po:str="",price:str="",qty:str="",currency:str="",uom:str=""):
+        return products.search(q,limit=limit,site=site,supplier=supplier,po=po,invoice_po=invoice_po,price=price,qty=qty,currency=currency,uom=uom)
 
     @app.post("/api/jobs/{jid}/draft")
     def manual_draft(jid:str,body:ManualDraftRequest):

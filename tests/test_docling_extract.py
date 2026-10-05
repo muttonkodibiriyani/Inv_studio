@@ -140,9 +140,195 @@ def test_semantic_tables_handle_repeated_headers_and_page_continuation():
     ]
 
 
+def test_explicit_repeated_header_table_beats_captions_and_ranked_currency_totals():
+    document_header = [
+        "Tax Invoice No.", "Tax Invoice Date", "Currency", "Customer PO No",
+    ]
+    document_values = ["INV-200", "05.10.2026", "AED", "PO-200"]
+    line_header = ["Product Reference", "Product Description", "Qty", "Selling Price"]
+    line = ["SKU-200", "Visible product", "2", "4.50"]
+    tables = [
+        {"page": 1, "rows": [document_header, document_values]},
+        {"page": 1, "rows": [line_header, line]},
+        {"page": 2, "rows": [document_header, document_values]},
+        {"page": 2, "rows": [
+            [None, "Net Amount", "9.00"],
+            [None, "VAT Amount", "0.45"],
+            [None, "VAT Amount in AED", "0.00"],
+        ]},
+        {"page": 2, "rows": [["Invoice", "To Ship To"], ["Currency", "DUE"]]},
+    ]
+
+    result = extract_invoice_from_tables(
+        "Invoice\nTo Ship To\nPurchase Order BOX: 999\nCurrency DUE",
+        tables,
+    )
+
+    assert result is not None
+    assert {key: result.get(key) for key in ("number", "date", "currency", "po", "net", "tax")} == {
+        "number": "INV-200",
+        "date": "2026-10-05",
+        "currency": "AED",
+        "po": "PO-200",
+        "net": "9.00",
+        "tax": "0.45",
+    }
+
+
+def test_conflicting_repeated_table_headers_are_left_unset():
+    line_table = {
+        "page": 1,
+        "rows": [
+            ["Product Reference", "Product Description", "Qty", "Selling Price"],
+            ["SKU-1", "Visible product", "1", "2.00"],
+        ],
+    }
+    tables = [
+        {"page": 1, "rows": [["Tax Invoice No.", "Currency"], ["INV-1", "AED"]]},
+        line_table,
+        {"page": 2, "rows": [["Tax Invoice No.", "Currency"], ["INV-2", "AED"]]},
+    ]
+
+    result = extract_invoice_from_tables("Tax Invoice", tables)
+
+    assert result is not None
+    assert result.get("number") is None
+    assert result["currency"] == "AED"
+
+
 def test_table_without_semantic_identity_is_not_invented():
     tables = [{"page": 1, "rows": [["Quantity", "Unit price"], ["4", "9.99"]]}]
     assert extract_invoice_from_tables("", tables) is None
+
+
+def test_name_only_table_preserves_description_and_never_uses_serial_as_sku():
+    tables = [{
+        "page": 1,
+        "rows": [
+            ["S.No", "Product Name", "Quantity", "Unit Price"],
+            ["1", "Synthetic consulting service", "3", "8.00"],
+        ],
+    }]
+
+    result = extract_invoice_from_tables("Tax Invoice", tables)
+
+    assert result is not None
+    assert result["lines"] == [{
+        "description": "Synthetic consulting service",
+        "qty": "3",
+        "price": "8.00",
+        "page": 1,
+        "evidence": "table page 1 row 2",
+    }]
+
+
+def test_measured_rows_replace_overlapping_structural_rows_on_same_page():
+    structural = {
+        "page": 1,
+        "source": "docling",
+        "rows": [
+            ["Item Code", "Description", "Quantity", "Unit Price"],
+            ["SYN-1\ncontinued", "Synthetic service", "2", "4.00"],
+        ],
+    }
+    measured = {
+        "page": 1,
+        "source": "docling_word_cells",
+        "rows": [
+            ["sku", "description", "qty", "price"],
+            ["SYN-1", "Synthetic service", "2", "4.00"],
+        ],
+    }
+
+    result = extract_invoice_from_tables("Tax Invoice", [structural, measured])
+
+    assert result is not None
+    assert len(result["lines"]) == 1
+    assert result["lines"][0]["sku"] == "SYN-1"
+
+
+def test_incomplete_measured_rows_do_not_drop_structural_rows():
+    structural = {
+        "page": 1,
+        "source": "docling",
+        "rows": [
+            ["Item Code", "Description", "Quantity", "Unit Price"],
+            ["SYN-1", "First synthetic service", "2", "4.00"],
+            ["SYN-2", "Second synthetic service", "1", "7.00"],
+        ],
+    }
+    measured = {
+        "page": 1,
+        "source": "docling_word_cells",
+        "rows": [
+            ["sku", "description", "qty", "price"],
+            ["SYN-1", "First synthetic service", "2", "4.00"],
+        ],
+    }
+
+    result = extract_invoice_from_tables("Tax Invoice", [structural, measured])
+
+    assert result is not None
+    assert [line["sku"] for line in result["lines"]] == ["SYN-1", "SYN-2"]
+
+
+def test_explicit_total_line_count_can_prove_measured_rows_complete():
+    structural = {
+        "page": 1,
+        "source": "docling",
+        "rows": [
+            ["Item Code", "Description", "Quantity", "Unit Price"],
+            ["SYN-2", "Second synthetic service", "99", "7.00"],
+        ],
+    }
+    measured = {
+        "page": 1,
+        "source": "docling_word_cells",
+        "rows": [
+            ["sku", "description", "qty", "price"],
+            ["SYN-1", "First synthetic service", "2", "4.00"],
+            ["SYN-2", "Second synthetic service", "1", "7.00"],
+        ],
+    }
+
+    result = extract_invoice_from_tables(
+        "Tax Invoice\nTotal Lines: 2 Total Qty: 3",
+        [structural, measured],
+    )
+
+    assert result is not None
+    assert [line["sku"] for line in result["lines"]] == ["SYN-1", "SYN-2"]
+
+
+def test_merged_serial_item_description_header_maps_visible_columns():
+    tables = [{
+        "page": 1,
+        "source": "docling",
+        "rows": [
+            ["Bill To", "Synthetic Buyer Company P.O.Box: 100", None, None, None, None, None, None, None],
+            [
+                "S.No Item Code Description", "S.No Item Code Description", None,
+                "Uom", "Qty", "Unit Price", "Sub Total", "VAT Amt", "Total",
+            ],
+            ["1", "SYN-1", "Synthetic service", "EA", "2", "4.00", "8.00", "0.40", "8.40"],
+        ],
+    }]
+
+    result = extract_invoice_from_tables("Tax Invoice", tables)
+
+    assert result is not None
+    assert result["buyer_name"] == "Synthetic Buyer Company"
+    assert result["lines"] == [{
+        "sku": "SYN-1",
+        "description": "Synthetic service",
+        "uom": "EA",
+        "qty": "2",
+        "price": "4.00",
+        "net_amount": "8.00",
+        "tax_amount": "0.40",
+        "page": 1,
+        "evidence": "table page 1 row 3",
+    }]
 
 
 def test_measured_words_recover_borderless_semantic_table():
@@ -169,4 +355,28 @@ def test_measured_words_recover_borderless_semantic_table():
         "sku": "SKU-1", "description": "Visible item", "gtin": "0123456789012",
         "qty": "2", "price": "1.250", "net_amount": "2.500", "tax_amount": "0.125",
         "page": 1, "evidence": "table page 1 row 2",
+    }]
+
+
+def test_measured_size_column_does_not_contaminate_quantity_and_keeps_partial_line():
+    header = [
+        ("Description", 15), ("SKU", 65), ("Size", 95),
+        ("Quantity", 125), ("Unit Price", 160), ("Amount", 195),
+    ]
+    data = [
+        ("Synthetic item", 15), ("SYN-1", 65), ("125ML", 95),
+        ("unreadable", 125), ("4.00", 160), ("12.00", 195),
+    ]
+    boxes = [
+        {"text": value, "page": 1, "box": [x - 4, y, x + 4, y + 6], "size": [220, 100]}
+        for y, row in ((10, header), (22, data))
+        for value, x in row
+    ]
+
+    result = extract_invoice_from_tables("Tax Invoice", [], boxes=boxes)
+
+    assert result is not None
+    assert result["lines"] == [{
+        "description": "Synthetic item", "sku": "SYN-1", "price": "4.00",
+        "net_amount": "12.00", "page": 1, "evidence": "table page 1 row 2",
     }]

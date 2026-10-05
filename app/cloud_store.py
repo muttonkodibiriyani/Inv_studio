@@ -44,6 +44,12 @@ SCHEMA = (
         workbook BYTEA NOT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
     )""",
+    """CREATE TABLE IF NOT EXISTS deleted_invoices (
+        job_id TEXT PRIMARY KEY,
+        invoice_key TEXT UNIQUE,
+        payload TEXT NOT NULL,
+        deleted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""",
     """CREATE TABLE IF NOT EXISTS audit (
         id BIGSERIAL PRIMARY KEY,
         event TEXT NOT NULL,
@@ -272,7 +278,14 @@ class PostgresStore:
         )
 
     def ledger(self,c):
-        return [json.loads(row[0]) for row in c.execute("SELECT payload FROM exports")]
+        receipts=[json.loads(row[0]) for row in c.execute("SELECT payload FROM exports")]
+        receipts.extend(
+            json.loads(row[0])
+            for row in c.execute(
+                "SELECT payload FROM deleted_invoices WHERE invoice_key IS NOT NULL"
+            )
+        )
+        return receipts
 
     def _blob_target(self,path):
         target=Path(path)
@@ -311,6 +324,16 @@ class PostgresStore:
         with self._blob_lock:
             self.bucket.blob(name).upload_from_filename(str(target))
         return name
+
+    def delete_upload(self,path):
+        target,name=self._blob_target(path)
+        if PurePosixPath(name).parts[0]!="uploads":
+            raise ValueError("Only invoice uploads can be deleted through this operation")
+        with self._blob_lock:
+            try:self.bucket.blob(name).delete()
+            except Exception as error:
+                if getattr(error,"code",None)!=404:raise
+            target.unlink(missing_ok=True)
 
     def sync_templates(self):
         template_root=(self.root/"templates").resolve()

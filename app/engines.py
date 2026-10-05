@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import time
+import threading
 import uuid
 from pathlib import Path
 from datetime import date
@@ -13,6 +14,9 @@ from decimal import Decimal
 from .models import Invoice
 
 ROOT=Path(__file__).resolve().parent
+# A recovery reader can coexist with its original process briefly. Keep heavy
+# local OCR within the deployment's memory budget; native and AI reads continue.
+_LOCAL_OCR_LOCK=threading.Lock()
 
 
 def capabilities():
@@ -47,8 +51,10 @@ def quality(i:Invoice | None):
 
 def local_read(engine,path,root,language="en"):
     output=root/"work"/(uuid.uuid4().hex+".json")
+    timeout=int(os.getenv("INV_ENGINE_TIMEOUT","360" if engine=="paddleocr" else "240"))
     cmd=[sys.executable,"-m","app.ocr_worker","--engine",engine,"--file",str(path),"--output",str(output),
-         "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language]
+         "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language,
+         "--budget-seconds",str(timeout)]
     # Workers receive runtime paths, not the application's API keys or provider tokens.
     allowed_env={"PATH","HOME","LANG","LC_ALL","LD_LIBRARY_PATH","SSL_CERT_FILE","SSL_CERT_DIR",
                  "REQUESTS_CA_BUNDLE","TMPDIR","TMP","TEMP","XDG_CACHE_HOME","HF_HOME",
@@ -56,7 +62,7 @@ def local_read(engine,path,root,language="en"):
     env={k:v for k,v in os.environ.items() if k in allowed_env}
     env["OMP_NUM_THREADS"]="2"
     try:
-        proc=subprocess.run(cmd,capture_output=True,text=True,timeout=int(os.getenv("INV_ENGINE_TIMEOUT","240")),env=env)
+        proc=subprocess.run(cmd,capture_output=True,text=True,timeout=timeout,env=env)
         if not output.exists():raise ValueError("Reader process failed before producing output")
         result=json.loads(output.read_text())
         if proc.returncode or result.get("error"):raise ValueError(result.get("hint","Reader failed"))
@@ -69,7 +75,7 @@ def local_read(engine,path,root,language="en"):
 def process(path,options,store,ai_reader,progress=lambda *args:None):
     trace=[];best=None;best_score=-1;text="";boxes=[];selected="none"
     document_type_hint=None;extraction_note=None
-    ai_attempted=False
+    ai_attempted=False;invoice2data_ocr=False
     def read_ai():
         nonlocal best,best_score,selected,ai_attempted
         ai_attempted=True
@@ -80,6 +86,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             internal_fields=("seller","site","buyer","location","origin","market","taxCode")
             ignored=[field for field in internal_fields if getattr(candidate,field) is not None]
             candidate=candidate.model_copy(update={field:None for field in internal_fields})
+            candidate=candidate.model_copy(update={"lines":[line.model_copy(update={"item_id":None}) for line in candidate.lines]})
             if ignored:meta={**meta,"unverified_internal_fields_ignored":ignored}
             score,missing=quality(candidate)
             has_fields=bool(candidate.lines or any(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines"))
@@ -94,6 +101,9 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             progress(options.provider,"AI reading finished",{"trace":list(trace),"characters":len(text)})
     installed={x["id"] for x in capabilities() if x["installed"]}
     chain=["invoice2data","paddleocr","docling"] if options.engine=="auto" else ([] if options.engine=="ai" else [options.engine])
+    if options.engine=="invoice2data" and path.suffix.lower() in (".png",".jpg",".jpeg",".tif",".tiff",".webp",".bmp"):
+        invoice2data_ocr=True;chain=["paddleocr"]
+        trace.append({"engine":"invoice2data","status":"needs_ocr","reason":"This image needs local OCR input. PaddleOCR will read it before invoice2data templates and structured parsing."})
     # Text/office attachments and the local Claude bridge need native/OCR text even
     # when AI is selected explicitly. AI still runs after this preparation step.
     if options.engine=="ai":
@@ -114,13 +124,27 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         if engine=="paddleocr" and path.suffix.lower() in (".docx",".xlsx",".txt",".csv",".json"):
             trace.append({"engine":engine,"status":"skipped","reason":"Digital office/text document; use native reading or Docling"});continue
         try:
-            result=local_read(engine,path,store.root,options.language)
+            if engine in ("paddleocr","docling"):
+                progress(engine,"Waiting for the local OCR reader")
+                with _LOCAL_OCR_LOCK:
+                    start=time.monotonic()
+                    progress(engine,"Reading document")
+                    result=local_read(engine,path,store.root,options.language)
+            else:
+                result=local_read(engine,path,store.root,options.language)
             candidate=Invoice.model_validate(result["invoice"]) if result.get("invoice") else None
             score,missing=quality(candidate)
             if len(result["text"])>len(text):text=result["text"];boxes=result.get("boxes",[])
             trace.append({"engine":engine,"method":result.get("extraction_method","template" if candidate else "text_only"),"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines") if candidate else 0,"line_items":len(candidate.lines) if candidate else 0,"text_characters":len(result["text"]),"table_count":len(result.get("tables",[])),"parser_error":result.get("parser_error"),"reason":"Required extraction fields present" if not missing else "; ".join(missing)})
-            if candidate is not None and score>best_score:best=candidate;best_score=score;selected=engine
+            if result.get("recovery"):
+                trace[-1]["recovery"]=result["recovery"]
+            if candidate is not None and score>best_score:
+                best=candidate;best_score=score
+                selected="invoice2data + PaddleOCR" if invoice2data_ocr and engine=="paddleocr" else engine
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
+            if options.engine=="invoice2data" and engine=="invoice2data" and path.suffix.lower()==".pdf" and len(result["text"].strip())<40 and not (candidate and candidate.lines):
+                invoice2data_ocr=True;chain.append("paddleocr")
+                trace.append({"engine":"invoice2data","status":"needs_ocr","reason":"This PDF has no usable text layer. PaddleOCR will provide local OCR input for invoice2data templates and structured parsing."})
             # Native text already exists: another OCR pass cannot supply an
             # unknown supplier's semantic mapping. Offer AI/manual entry promptly.
             if options.engine in ("auto","ai") and engine=="invoice2data" and len(text.strip())>=250:

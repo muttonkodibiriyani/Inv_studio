@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet
 
 from app.cloud_store import ADVISORY_LOCK_ID, PostgresStore
 from app.authentication import actor
+from app.deletion import delete_invoices
 
 
 class FakeCursor:
@@ -44,6 +45,7 @@ class MemoryDatabase:
         self.jobs={}
         self.exports={}
         self.batches={}
+        self.deleted_invoices={}
         self.audit=[]
         self.connections=[]
 
@@ -104,6 +106,14 @@ class MemoryConnection:
             return FakeCursor(("id","event","payload","at"),rows)
         if normalized.startswith("SELECT payload FROM exports"):
             return FakeCursor(("payload",),[(row[3],) for row in db.exports.values()])
+        if normalized.startswith("INSERT INTO deleted_invoices"):
+            db.deleted_invoices[params[0]]=params
+            return FakeCursor()
+        if normalized.startswith("SELECT payload FROM deleted_invoices"):
+            return FakeCursor(
+                ("payload",),
+                [(row[2],) for row in db.deleted_invoices.values() if row[1] is not None],
+            )
         if normalized.startswith("INSERT INTO exports (id,invoice_key,job_id,payload,workbook)"):
             db.exports[params[0]]=params
             return FakeCursor()
@@ -143,6 +153,9 @@ class FakeBlob:
         if self.name not in self.bucket.objects:
             raise FileNotFoundError(self.name)
         Path(filename).write_bytes(self.bucket.objects[self.name])
+
+    def delete(self):
+        self.bucket.objects.pop(self.name)
 
 
 class FakeBucket:
@@ -338,6 +351,12 @@ def test_gcs_upload_restore_and_startup_template_sync(tmp_path,cloud_env):
     assert stat.S_IMODE(upload.stat().st_mode) == 0o600
     assert storage.requested == [cloud_env["INV_STUDIO_BUCKET"]]
 
+    store.delete_upload(upload)
+    assert not upload.exists()
+    assert "uploads/invoice.pdf" not in bucket.objects
+    with pytest.raises(ValueError,match="Only invoice uploads"):
+        store.delete_upload(remote)
+
     cache=store.root/"work"/"temporary.json"
     cache.write_text("ephemeral")
     with pytest.raises(ValueError,match="Only uploads and supplier templates"):
@@ -407,6 +426,44 @@ def test_live_postgres_store_contract_when_test_database_is_configured(tmp_path,
         with store.connection() as connection:
             ledger=store.ledger(connection)
         assert ledger[0]["invoice_key"] == "S|B|N"
+        deleted={
+            "job_id":"deleted-job",
+            "invoice_key":"S|B|DELETED",
+            "allocations":[{"key":"PO|1","qty":"2"}],
+            "deleted":True,
+        }
+        with store.connection(True) as connection:
+            connection.execute(
+                """INSERT INTO deleted_invoices(job_id,invoice_key,payload)
+                   VALUES (?,?,?)""",
+                (deleted["job_id"],deleted["invoice_key"],json.dumps(deleted)),
+            )
+        with store.connection() as connection:
+            ledger=store.ledger(connection)
+        assert {entry["invoice_key"] for entry in ledger} == {"S|B|N","S|B|DELETED"}
+
+        delete_path=store.root/"uploads"/"delete-cloud.pdf"
+        delete_path.write_bytes(b"synthetic cloud invoice")
+        store.persist_blob(delete_path)
+        delete_job={
+            "id":"delete-cloud",
+            "filename":"delete-cloud.pdf",
+            "size":delete_path.stat().st_size,
+            "path":str(delete_path),
+            "status":"review",
+            "revision":3,
+        }
+        store.job(delete_job["id"],delete_job)
+        with store.connection(True) as connection:
+            deleted_result=delete_invoices(
+                store,
+                [{"id":delete_job["id"],"revision":delete_job["revision"]}],
+                connection,
+            )
+        assert deleted_result["deleted_ids"] == [delete_job["id"]]
+        assert store.job(delete_job["id"]) is None
+        assert not delete_path.exists()
+        assert "uploads/delete-cloud.pdf" not in store.bucket.objects
 
         with pytest.raises(RuntimeError,match="rollback"):
             with store.connection(True) as connection:

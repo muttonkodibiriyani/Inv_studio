@@ -17,22 +17,23 @@ As an **AP operator**, I want to choose several invoices and confirm the process
 
 As an **AP operator**, I want to extract headers and every item line from supported files, so I avoid retyping supplier documents.
 
-**Status:** Local paths measured; broad 95% quality and current hosted deployment remain pending.
+**Status:** Local and hosted paths measured on bounded cases; broad 95% quality remains unproven.
 
-- Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family. Paddle's conservative floor is 60/66 (90.91%) with descriptions unproven. Docling works on bounded native tables but failed the ten-page and scan cases recorded in validation.
+- Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family. Paddle's conservative floor is 60/66 (90.91%) with descriptions unproven. On a separate challenging two-page scan, the bounded adaptive path improved the whole local result from 90/99 (90.9%) to 96/99 (97.0%) while retaining 23/23 rows and 6/7 headers; exact line facts were 21/23 SKUs and 23/23 quantities, prices and printed net amounts. Both local passes took about 168 seconds and peaked at 2.31 GiB. Revision `00008` introduced a 360-second Paddle budget and 150-second eligibility ceiling; its hosted Paddle run completed the adaptive path in 242.98 seconds and returned the same 23 rows and 96/99 facts. Docling stays at 240 seconds. The alternate did not trigger on the three earlier scans, and early failure or any protected regression keeps the baseline. A separate hosted managed-AI check returned 23 rows and 97/99 facts in 16.18 seconds with correct printed buyer-name separation. Docling works on bounded native tables, but measured OCR geometry yielded only 10/23 lines on that challenging scan with poor source-position matches and its ten-page timeout remains unresolved.
 - A readable PDF with no matching supplier template keeps native text and skips expensive image OCR. Conservative layout rules require an invoice heading, reject purchase orders, extract only explicit labels/spatial rows and never infer internal business codes or header totals.
-- The job view names the active stage rather than presenting extraction as one opaque wait.
-- Unread or incomplete output records an explainable reader trace.
+- The job view names the active stage rather than presenting extraction as one opaque wait. A scanned invoice2data route names Paddle as its image-text input.
+- Unread or incomplete output records an explainable reader trace that separates engine failure from text-only output with zero structured items; field completeness is read coverage, not accuracy.
 - Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction.
 
 ## INV-03 · Use a chosen AI connection for exceptions
 
 As an **AP operator**, I want to select a provider/model and enable automatic fallback, so unfamiliar layouts can be proposed for review.
 
-**Status:** Adapter contracts and a narrow 15-document/570-line source check passed; representative accuracy and current hosted deployment remain pending.
+**Status:** Adapter contracts and bounded hosted managed-AI checks passed; representative accuracy and live subscription inference remain pending.
 
 - Managed Vertex uses the hosted workspace service identity and project billing; API/subscription options remain selectable. AI is called only after explicit selection/confirmed fallback and local extraction failure or incompleteness.
 - Provider output must pass the strict invoice schema; missing facts remain missing.
+- A saved API key is labelled separately from verified provider access. When no connected model is selected, the UI may offer an available connected model without replacing a user's still-connected selection.
 - Credentials never appear in browser storage, exported files or ordinary API errors.
 - Claude setup-token and move-only ChatGPT owner-transfer paths remain subject to live account eligibility and release validation; mocked adapters do not prove subscription inference.
 - The measured one-layout result cannot establish the expected 95% across suppliers, scans, languages and lengths. Frozen held-out gold still governs acceptance.
@@ -41,12 +42,12 @@ As an **AP operator**, I want to select a provider/model and enable automatic fa
 
 As an **data steward**, I want to profile the whole item and PO/GRN files and approve explicit mappings, so the validator uses evidence with known meaning.
 
-**Status:** The private source profile contains 412,139 rows; hosted import is paused/cancelling and live lookup availability is unconfirmed.
+**Status:** Atomic cutover completed with 412,139 live evidence rows—114,940 item and 297,199 PO/GRN—and a sanitized archive receipt beginning `d06678`; authenticated API and References UI lookup QA passed.
 
 - Preserve original bytes, hashes and row/column provenance; inspect all populated cells.
 - Separate unique matches, duplicates, ambiguous joins and missing fields.
-- Identifier and product-name searches show source/conflict context and require explicit confirmation; confirmed lookup evidence is not approved matching data.
-- Unknown seller/buyer/route, receipt acceptance and invoiced baseline block approval; never default them silently.
+- Identifier and fuzzy product-name searches show source/conflict context, price/quantity/unit ranking clues and require explicit human confirmation; confirmed lookup evidence is not approved matching data.
+- Unknown seller, printed buyer name versus internal buyer/company code, route, receipt acceptance and invoiced baseline block approval; never default them silently.
 
 ## INV-05 · Match the exact supplier route and items
 
@@ -79,6 +80,7 @@ As an **AP reviewer**, I want to compare the source with editable fields and rec
 - Rules changing during extraction prevent stale approval and require a new processing plan.
 - A manual draft created from an active job cannot alter the job revision, extracted invoice or review status.
 - Printed line net/tax amounts survive edits without changing printed unit price; there is no automatic repricing.
+- Printed buyer name remains separate from the internal buyer/company code; a visible name cannot become an internal code without approved reference evidence.
 
 ## INV-08 · Download combined review or approved workbooks
 
@@ -111,7 +113,7 @@ As a **workspace owner**, I want to sign in to a Firebase frontend backed by dur
 - Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.
 - Database and document evidence survive a replacement application instance.
 - Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff.
-- Access hotfix `00005-zdk` passed login, 31 retained jobs and sign-out; the complete current feature bundle still needs hosted verification.
+- Final revision `inv-studio-api-00009-vxw` has 100% traffic; Paddle, managed AI, authenticated API/browser lookup, deletion/model controls and cancel-dialog behavior passed. The allowlist is owner-only, the owner account remained email-verified, unauthenticated API calls are denied and the smoke identity was deleted.
 
 ## INV-11 · Qualify suppliers for a new store or market
 
@@ -137,7 +139,7 @@ As an **item-data steward**, I want to turn varied supplier files into approved 
 
 As an **AP operator**, I want to edit every target workbook field and download a draft while OCR is still running, so urgent manual work is not blocked by a slow reader.
 
-**Status:** Implemented and locally browser/workbook verified; hosted release validation pending.
+**Status:** Implemented and hosted; job and ledger non-mutation checks passed.
 
 - Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction, leading-zero-safe identifiers and Decimal arithmetic.
 - Download requires an explicit unvalidated acknowledgement and the filename, workbook properties and cell comments say `DRAFT_UNVALIDATED` and no receipt reservation.
@@ -147,9 +149,9 @@ As an **AP operator**, I want to edit every target workbook field and download a
 
 As a **data steward**, I want to search actual item and PO sources by identifier or product name, so I can find evidence without loading unapproved rows into canonical matching.
 
-**Status:** The 412,139-row private source profile is known, but hosted import is paused/cancelling and live lookup reports zero rows.
+**Status:** Atomic cutover completed with 412,139 live source-evidence rows and exact item/PO counts; authenticated API and References UI lookup QA passed, and lookup still cannot approve canonical matching.
 
-- Results retain source row and conflict/duplicate context, with filters and bounded pagination.
+- Results retain source row and conflict/duplicate context, with filters, bounded pagination and visible name/price/quantity/unit matching clues.
 - The operator explicitly confirms a selected result before it can populate the manual workspace.
 - Summary, search and confirmation state clearly that source evidence is not approved for matching, receipt allocation or export readiness.
 
@@ -157,8 +159,19 @@ As a **data steward**, I want to search actual item and PO sources by identifier
 
 As a **workspace owner**, I want to connect the restricted Claude CLI or move my ChatGPT registration into my authenticated hosted workspace, so the provider can use my authorized account without sharing a raw secret through the browser state.
 
-**Status:** Connection and transfer controls are implemented in source; live subscription inference, release validation and hosted deployment pending.
+**Status:** Hosted model controls passed managed-Vertex autoload/retry and visible bad-key rejection; live Claude/ChatGPT subscription inference remains unverified.
 
 - Claude setup tokens are encrypted, omitted from state, removable, and supplied only to the restricted server CLI with tools disabled.
 - ChatGPT starts local OAuth under the application's own registration; successful export constructs a one-time bundle, deletes local encrypted credentials, disconnects and clears the active local account.
 - Only an authenticated cloud owner can import and verify the bundle. Export is denied in cloud mode, import is denied locally, and no test result implies provider eligibility or live inference quality.
+
+## INV-16 · Permanently remove invoice data with explicit retention
+
+As a **workspace owner**, I want to delete selected invoices with a clear retention receipt, so live evidence is removed without breaking duplicate or receipt controls.
+
+**Status:** Implemented and hosted deletion verification passed.
+
+- Deletion requires explicit permanent confirmation and current job revisions; active jobs and partial exported batches are rejected atomically.
+- Live job payloads, source objects, detailed invoice audit, generated exports and batch workbooks are removed.
+- Approved invoices retain only the invoice key and PO-line quantity allocations needed for duplicate/receipt controls, plus a minimal deletion audit without invoice content.
+- The response states that provider backups, logs, object versions and soft-deleted copies follow provider retention and are outside this live-store action.

@@ -242,8 +242,10 @@ def _record(raw, configured, role_cache=None):
     return identifier, kind, source_hash, sheet, row_number, encoded, _terms(raw, fields)
 
 
-def _prefix_upper(value):
-    return value[:-1] + chr(ord(value[-1]) + 1)
+def _like_prefix(value):
+    """Build a literal SQL LIKE prefix for both SQLite and PostgreSQL."""
+    escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return escaped + "%"
 
 
 def _cursor_encode(signature, score, identifier):
@@ -354,8 +356,11 @@ class ReferenceLookup:
         match_sql = ["t.term=?", "t.term=?"]
         match_params = [identifier_term, name_term]
         for term in token_terms:
-            match_sql.append("(t.term>=? AND t.term<?)")
-            match_params.extend((term, _prefix_upper(term)))
+            # PostgreSQL locale collations do not guarantee that ``t:word`` is
+            # less than the synthetic upper bound ``t;``. LIKE with an explicit
+            # escape keeps prefix matching correct in PostgreSQL and SQLite.
+            match_sql.append("t.term LIKE ? ESCAPE '\\'")
+            match_params.append(_like_prefix(term))
         constraints = []
         constraint_params = []
         for role, value in filters.items():
@@ -368,9 +373,9 @@ class ReferenceLookup:
                            JOIN lookup_terms po_filter ON po_filter.kind='po'
                                 AND po_filter.row_id=po_key.row_id AND po_filter.term=?
                            WHERE item_key.kind='item' AND item_key.row_id=t.row_id
-                                AND item_key.term>=? AND item_key.term<?)"""
+                                AND item_key.term LIKE ? ESCAPE '\\')"""
                     )
-                    constraint_params.extend((f"f:po:{value}", "x:", "x;"))
+                    constraint_params.extend((f"f:po:{value}", _like_prefix("x:")))
                 else:
                     constraints.append(
                         "EXISTS (SELECT 1 FROM lookup_terms ft WHERE ft.kind=t.kind "

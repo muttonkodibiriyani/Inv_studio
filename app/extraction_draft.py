@@ -35,7 +35,7 @@ def extraction_batch_workbook(entries):
             row=details.max_row+1
             details.append([transaction,None,None,line.price,line.qty,None])
             # A printed supplier SKU is not a proven internal target item ID.
-            text_cell(details.cell(row,2),None)
+            text_cell(details.cell(row,2),line.item_id)
             text_cell(details.cell(row,3),line.gtin)
             text_cell(details.cell(row,6),invoice.taxCode)
             details.cell(row,3).number_format='@'
@@ -45,7 +45,8 @@ def extraction_batch_workbook(entries):
                 value=getattr(line,field,None)
                 if value is not None:notes.append(f'{label}: {value}')
             if line.evidence:notes.append('Evidence: '+line.evidence)
-            details.cell(row,2).comment=Comment('\n'.join(notes)+'\nInternal item mapping requires confirmation.','Invoice Studio')
+            notes.append('Internal item was supplied during review; business validation is still required.' if line.item_id else 'Internal item mapping requires confirmation.')
+            details.cell(row,2).comment=Comment('\n'.join(notes),'Invoice Studio')
     output=io.BytesIO();book.save(output);return output.getvalue()
 
 

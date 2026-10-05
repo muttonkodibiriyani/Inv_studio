@@ -24,6 +24,52 @@ def test_readable_unknown_document_does_not_repeat_expensive_ocr(monkeypatch,tmp
     assert any(len(x)==3 and x[2]['characters']>250 for x in events)
 
 
+def test_invoice2data_scan_uses_named_local_ocr_input_without_ai(monkeypatch,tmp_path):
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    opts.engine='invoice2data'
+    def read(engine,*args):
+        calls.append(engine)
+        if engine=='invoice2data':return {'text':'\n','boxes':[],'invoice':None}
+        return {'text':'Scanned source words','boxes':[],
+                'recovery':{'attempted':True,'selected_pass':'higher_resolution'},
+                'invoice':{'number':'SYN-SCAN','lines':[{'description':'Printed product','qty':'2','price':'5'}]}}
+    monkeypatch.setattr(engines,'local_read',read)
+    def no_ai(*args):raise AssertionError('No AI is enabled')
+    result=engines.process(tmp_path/'scan.pdf',opts,store,no_ai)
+    assert calls==['invoice2data','paddleocr']
+    assert result['selected_engine']=='invoice2data + PaddleOCR'
+    assert len(result['invoice']['lines'])==1
+    assert any(t['status']=='needs_ocr' for t in result['trace'])
+    assert next(t for t in result['trace'] if t['engine']=='paddleocr')['recovery']['selected_pass']=='higher_resolution'
+    calls.clear()
+    result=engines.process(tmp_path/'scan.png',opts,store,no_ai)
+    assert calls==['paddleocr']
+    assert result['selected_engine']=='invoice2data + PaddleOCR'
+
+
+def test_bulk_heavy_local_readers_share_one_memory_slot(monkeypatch,tmp_path):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    _,opts,store=setup(monkeypatch,tmp_path,'')
+    opts.engine='paddleocr'
+    active=0;peak=0;counter=threading.Lock();waiting=[]
+    def read(*args):
+        nonlocal active,peak
+        with counter:active+=1;peak=max(peak,active)
+        time.sleep(0.03)
+        with counter:active-=1
+        return {'text':'Synthetic words','boxes':[],'invoice':{'number':'SYN-SLOT','lines':[]}}
+    monkeypatch.setattr(engines,'local_read',read)
+    def run(index):
+        return engines.process(tmp_path/f'{index}.pdf',opts,store,lambda *args:None,
+                               lambda *args:waiting.append(args[1]))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results=list(pool.map(run,range(2)))
+    assert peak==1 and len(results)==2
+    assert waiting.count('Waiting for the local OCR reader')==2
+
+
 def test_purchase_order_hint_does_not_invent_invoice(monkeypatch,tmp_path):
     calls,opts,store=setup(monkeypatch,tmp_path,'Purchase Order\nStore Purchase Order # :\n'+'PO product quantity price evidence '*20)
     result=engines.process(tmp_path/'order.pdf',opts,store,lambda *args:None)
@@ -97,9 +143,12 @@ def test_ai_customer_number_does_not_become_internal_buyer(monkeypatch,tmp_path)
     from app.models import Invoice
     _,opts,store=setup(monkeypatch,tmp_path,'')
     opts.engine='ai';opts.model='vision'
-    source=Invoice(number='SYN-1',buyer='VENDOR-CUSTOMER-1',site='INVENTED-SITE')
+    source=Invoice(number='SYN-1',buyer_name='Example Buyer LLC',buyer='VENDOR-CUSTOMER-1',site='INVENTED-SITE',lines=[{'item_id':'INVENTED-ITEM','sku':'VISIBLE-SKU'}])
     result=engines.process(tmp_path/'scan.pdf',opts,store,lambda *args:(source,{}))
     assert result['invoice']['buyer'] is None
     assert result['invoice']['site'] is None
     assert result['invoice']['number']=='SYN-1'
+    assert result['invoice']['buyer_name']=='Example Buyer LLC'
+    assert result['invoice']['lines'][0]['item_id'] is None
+    assert result['invoice']['lines'][0]['sku']=='VISIBLE-SKU'
     assert set(result['trace'][0]['usage']['unverified_internal_fields_ignored'])=={'buyer','site'}

@@ -70,6 +70,22 @@ def issue_codes(result, line=None):
     }
 
 
+def test_confirmed_internal_item_still_requires_exact_approved_identity_and_scope(refs):
+    invoice = prepared_invoice(refs)
+    invoice.lines[0].item_id = "345000101"
+    assert validate(invoice, refs, Policy(), reviewed=True)["ready"]
+    invoice.lines[0].item_id = "345000102"
+    conflict = validate(invoice, refs, Policy(), reviewed=True)
+    assert not conflict["ready"] and "ITEM_CONFLICT" in issue_codes(conflict, 1)
+    invoice.lines[0].item_id = "UNAPPROVED-CANDIDATE"
+    missing = validate(invoice, refs, Policy(), reviewed=True)
+    assert not missing["ready"] and "ITEM" in issue_codes(missing, 1)
+    invoice.lines[0].item_id = "345000101"
+    invoice.lines[0].sku = None
+    invoice.lines[0].gtin = None
+    assert validate(invoice, refs, Policy(), reviewed=True)["ready"]
+
+
 def test_exact_reference_enrichment_and_validation(refs):
     invoice, provenance = enrich(Invoice.model_validate(sample("invoice.json")), refs)
 
