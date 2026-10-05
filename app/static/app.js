@@ -63,17 +63,41 @@ function rulesCell(cell, name, line) {
 // Which reader produced a field and where readers disagreed (TRAIN's job.readers / evidence.*.review).
 // Both are keyed by invoice field names; line cells map from the target column. Absent keys show nothing.
 const READER_LINE_FIELDS = { Item: "sku", UPC: "gtin", "Unit Cost": "price", Quantity: "qty" };
+const READER_HEADER_FIELDS = { site: "supplier_name" };
+const AI_READER_LABELS = {
+  fallback: "Fallback", gap_fill: "Gap fill", cross_check: "Cross-check", skipped: "Not needed", off: "Off",
+  unavailable: "Not connected", failed: "Failed", selected: "Selected reader",
+};
 
 function readerNotes(job, scope, column, line) {
-  const key = scope === "header" ? column : READER_LINE_FIELDS[column];
+  const key = scope === "header" ? READER_HEADER_FIELDS[column] || column : READER_LINE_FIELDS[column];
   const readers = scope === "header" ? job?.readers?.header : job?.readers?.lines?.[line - 1];
   const evidence = scope === "header" ? job?.evidence?.header : job?.evidence?.lines?.[line - 1];
   const notes = [];
   const reader = readers?.[key];
   if (typeof reader === "string" && reader) notes.push(make("span", `reader-badge reader-${reader}`, reader));
   const review = evidence?.[key]?.review;
-  if (review?.reason) notes.push(make("small", "rules-flagged", `Readers disagree: ${review.reason}`));
+  if (review?.reason) {
+    const other = review.other_value === null || review.other_value === undefined ? "" : ` · other read: ${review.other_value}`;
+    const page = review.other_page ? ` (page ${review.other_page})` : "";
+    const note = make("small", "rules-flagged", `Readers disagree: ${review.reason}${other}${page}`);
+    if (review.other_quote) note.title = review.other_quote;
+    notes.push(note);
+  }
   return notes;
+}
+
+// Why the AI ran on this invoice (engines first, then the AI per field) and how many calls it made.
+function renderAiReader(job) {
+  const line = $("#rules-ai-reader");
+  const ai = job?.readers?.ai;
+  line.hidden = !ai?.status;
+  if (!ai?.status) return line.replaceChildren();
+  const calls = Number(ai.calls) || 0;
+  line.textContent = `AI reader: ${AI_READER_LABELS[ai.status] || ai.status} · ${calls} call${calls === 1 ? "" : "s"}`
+    + (ai.reason ? ` — ${ai.reason}` : "");
+  line.title = (ai.notes || []).join("\n");
+  line.classList.toggle("ai-used", ["fallback", "gap_fill", "cross_check", "selected"].includes(ai.status));
 }
 
 const TARGET_GROUPS = [
@@ -227,6 +251,7 @@ function renderRulesResult(job) {
     + (rate.owner_review ? " — below 95%: this invoice goes to owner review." : "");
   itemRate.title = rate.definition || "";
   itemRate.classList.toggle("owner-review", Boolean(rate.owner_review));
+  renderAiReader(job);
   const list = $("#rules-fields");
   list.replaceChildren();
   Object.entries(rules.fields || {}).forEach(([key, field]) => {

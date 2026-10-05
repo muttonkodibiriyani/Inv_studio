@@ -285,8 +285,11 @@ def test_engine_ai_fallback_selects_complete_candidate_and_keeps_local_on_failur
         runtime,
         lambda *args: (engines.Invoice.model_validate(complete), {"tokens": 2}),
     )
-    assert result["selected_engine"] == "openai / test-model"
+    # The AI fills the field the local read left empty; the local read stays the selected one.
+    assert result["selected_engine"] == "invoice2data"
     assert result["invoice"]["tax"] == "40.0"
+    assert result["readers"]["header"]["tax"] == "ai"
+    assert result["readers"]["ai"]["status"] == "gap_fill"
 
     def failed_reader(*args):
         raise ValueError("invalid provider schema")

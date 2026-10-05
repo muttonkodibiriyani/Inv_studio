@@ -891,3 +891,6 @@ dialog:has(.fine-rules-dialog) { width: min(1180px, calc(100vw - 28px)); }
 .accuracy-tables { display: grid; gap: 16px; }
 .accuracy-table { min-width: 480px; font-size: 11px; }
 .accuracy-table caption { margin-bottom: 6px; font-weight: 800; text-align: left; }
+.rules-ai-reader { margin: 0 0 8px; color: var(--muted); font-size: 11px; }
+.rules-ai-reader.ai-used { color: #52605d; font-weight: 700; }
+.reader-badge.reader-ai { color: var(--warning); background: var(--warning-bg); }

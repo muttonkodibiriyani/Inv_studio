@@ -193,7 +193,7 @@ def test_invoice_heading_prevents_purchase_order_hint(monkeypatch,tmp_path):
     assert result['document_type_hint'] is None
 
 
-def test_scan_uses_selected_vision_before_heavy_ocr(monkeypatch,tmp_path):
+def test_scan_runs_the_local_ocr_readers_before_the_ai(monkeypatch,tmp_path):
     from app.models import Invoice
     calls,opts,store=setup(monkeypatch,tmp_path,'')
     opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
@@ -201,19 +201,22 @@ def test_scan_uses_selected_vision_before_heavy_ocr(monkeypatch,tmp_path):
         calls.append('vertex')
         return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5'}]),{}
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
-    assert calls==['invoice2data','vertex']
+    assert calls==['invoice2data','paddleocr','docling','vertex']
     assert len(result['invoice']['lines'])==1
     assert result['selected_engine']=='vertex / gemini-test'
+    assert result['readers']['ai']=={'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1}
+    assert result['readers']['header']['number']=='ai' and result['readers']['lines'][0]['qty']=='ai'
 
 
-def test_failed_vision_falls_back_once_to_local_readers(monkeypatch,tmp_path):
+def test_failed_vision_after_the_local_readers_keeps_their_result(monkeypatch,tmp_path):
     calls,opts,store=setup(monkeypatch,tmp_path,'')
     opts.ai_fallback=True;opts.model='vision'
     def ai(*args):
         calls.append('ai');raise ValueError('Unavailable')
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
-    assert calls==['invoice2data','ai','paddleocr','docling']
+    assert calls==['invoice2data','paddleocr','docling','ai']
     assert not result['invoice']['lines']
+    assert result['readers']['ai']=={'status':'failed','reason':'Unavailable','calls':1}
 
 
 def test_empty_ai_response_is_not_reported_as_extracted(monkeypatch,tmp_path):
@@ -299,7 +302,7 @@ def ai_on(monkeypatch,tmp_path,native,ai_invoice,engine='paddleocr'):
 
 # The paddleocr choice checks the PDF text first; auto (the default) reads it through invoice2data.
 ENGINES=[('paddleocr',['invoice2data','paddleocr','ai'],'native PDF text'),
-         ('auto',['invoice2data','ai'],'invoice2data')]
+         ('auto',['invoice2data','paddleocr','docling','ai'],'invoice2data')]
 
 
 def invented_code_ai_read(number='AI-1'):
@@ -319,11 +322,16 @@ def test_ai_on_completeness_tie_keeps_the_native_read(monkeypatch,tmp_path,engin
 
 
 @pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
-def test_ai_on_strictly_more_complete_ai_read_is_kept(monkeypatch,tmp_path,engine,calls_expected,native_selected):
+def test_ai_on_a_more_complete_ai_read_fills_gaps_and_flags_disagreements(monkeypatch,tmp_path,engine,calls_expected,
+                                                                          native_selected):
     native=identityless_native_invoice();native['lines'][1]['tax_amount']=None
     result,calls=ai_on(monkeypatch,tmp_path,native,{**complete_native_invoice('AI-1'),'date':'2026-01-15'},engine)
     assert calls==calls_expected
-    assert result['selected_engine']=='openai / stub-model' and result['invoice']['number']=='AI-1'
+    # Per field, never the whole read: the local number stays and the AI's differing one is a review flag.
+    assert result['selected_engine']==native_selected and result['invoice']['number']=='NATIVE-1'
+    assert result['evidence']['header']['number']['review']['other_value']=='AI-1'
+    assert result['invoice']['lines'][1]['gtin']=='0123456789012' and result['readers']['lines'][1]['gtin']=='ai'
+    assert result['readers']['header']['number']!='ai' and result['readers']['ai']['status']=='gap_fill'
 
 
 @pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
@@ -341,7 +349,10 @@ def test_ai_on_identityless_line_with_every_amount_checking_skips_ocr_and_ai(mon
 def test_auto_identity_gap_that_fails_a_check_still_reaches_the_ai(monkeypatch,tmp_path):
     native=identityless_native_invoice();native['net']='15.01'
     result,calls=ai_on(monkeypatch,tmp_path,native,invented_code_ai_read(),'auto')
-    assert calls==['invoice2data','ai'] and result['extraction_note'] is None
+    assert calls==['invoice2data','paddleocr','docling','ai'] and result['extraction_note'] is None
+    # An identity gap the gate did not clear is a gap fill: the AI's code is marked as the AI's, for review.
+    assert result['readers']['ai']['status']=='gap_fill' and result['invoice']['net']=='15.01'
+    assert result['invoice']['lines'][1]['sku']=='INVENTED-9' and result['readers']['lines'][1]['sku']=='ai'
     assert 'line 2 item identity' in result['trace'][0]['reason']
 
 
