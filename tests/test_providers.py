@@ -595,3 +595,9 @@ def test_local_reader_does_not_inherit_cloud_database_or_vault_credentials(tmp_p
         return SimpleNamespace(returncode=0)
     monkeypatch.setattr(engines.subprocess,"run",reader)
     assert engines.local_read("invoice2data",tmp_path/"invoice.pdf",tmp_path)["text"]=="synthetic"
+
+
+def test_prompt_asks_for_the_printed_description_only():
+    assert "description is the product name exactly as printed" in provider_module.PROMPT
+    assert "a barcode belongs in gtin" in provider_module.PROMPT
+    assert "sku is null and a code that is part of the name text stays in the description" in provider_module.PROMPT
