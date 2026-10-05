@@ -525,6 +525,8 @@ class Run:
         self.filename = filename
         self.exceptions = []
         self.lineage = []
+        # R-006: cited supplier-code candidates offered for the reviewer's pick; never a filled value.
+        self.site_candidates = []
 
     def exception(self, kind, description, rule, line=None, evidence=None, proposed=None, owner="Accounts payable"):
         # 03_Mandatory_Checklist: the owner's Failure Status is shown; the engine rule id stays in Rule ID.
@@ -701,6 +703,79 @@ def supplier_family(run, candidates):
     return codes
 
 
+_DELIVER_TO = re.compile(r"(?i)\bdeliver(?:y)?\s*(?:to|address)\b\s*:?")
+_PRINTED_ID = r"(?<![\d.,/-]){}(?![\d.,/-])"
+
+
+def deliver_to_location(invoice, scan, config):
+    """R-006: the receiving store printed on the invoice, as an exact LOCATION id of the owner's LOCATIONS sheet.
+
+    Only a whole number printed after a 'Deliver To' label on the same line, or the reader's location field when
+    that id is printed in the text, counts. Store names are never matched (LOCATIONS has no name column).
+    Returns (location id, where it is printed, None) or (None, None, reason).
+    """
+    found = {}
+    for page, value in scan["pages"].items():
+        for line in value.splitlines():
+            for label in _DELIVER_TO.finditer(line):
+                for number in re.findall(_PRINTED_ID.format(r"\d{3,8}"), line[label.end():]):
+                    found.setdefault(number, f"page {page}, after 'Deliver To'")
+    printed = text(invoice.location)
+    if printed and printed not in found:
+        page = next((p for p, value in scan["pages"].items()
+                     if re.search(_PRINTED_ID.format(re.escape(printed)), value)), None)
+        if page is not None:
+            found[printed] = f"page {page}, reader's printed location"
+    known = {location: where for location, where in found.items() if location in config.location_master}
+    if len(known) == 1:
+        location, where = next(iter(known.items()))
+        return location, where, None
+    if known:
+        return None, None, f"{len(known)} different LOCATIONS ids are printed as Deliver-To"
+    if found:
+        return None, None, "the printed Deliver-To number is not a LOCATION id in the LOCATIONS sheet"
+    return None, None, "the Deliver-To store is not printed as a LOCATION id (LOCATIONS has no store names)"
+
+
+def _site_entity(run, site):
+    """Entity/currency suffix of a supplier site name: the characters after the 6-character EBS code."""
+    return re.sub(r"\s+", "", text((run.config.supplier_sites.get(site) or {}).get("site_name"))).upper()[6:]
+
+
+def code_by_market(run, families, deliver_to):
+    """R-006 'resolve with market/entity' (decision 34): when the printed supplier has several Active supplier
+    codes, keep the one code with Active sites serving the printed Deliver-To location's ENTITY AND CURENCY.
+    Returns {code: serving sites} or None, with the reason as an R-006 exception; never a guess."""
+    location, where, reason = deliver_to or (None, None, "no Deliver-To was read")
+    entity = text((run.config.location_master.get(location) or {}).get("entity_currency")).upper() if location else ""
+    if location and not entity:
+        reason = f"LOCATION {location} has no ENTITY AND CURENCY in the LOCATIONS sheet"
+    serving = {code: [s for s in sites if _site_entity(run, s) == entity] for code, sites in families.items()} \
+        if entity else {}
+    serving = {code: sites for code, sites in serving.items() if sites}
+    if entity and len(serving) == 1:
+        code, sites = next(iter(serving.items()))
+        run.trace("Supplier Code", code, "R-006", f"SUPPLIER SITES code whose Active sites serve the printed "
+                  f"Deliver-To LOCATION {location} ({where}) entity {entity}; {len(families)} codes share the "
+                  "printed supplier name", reference=", ".join([f"LOCATIONS {location}|{run.config.version}"] +
+                                                              [f"{s}|{run.config.version}" for s in sites]))
+        return {code: sites}
+    if entity:
+        reason = f"{len(serving)} of the {len(families)} supplier codes have Active sites serving the Deliver-To " \
+                 f"LOCATION {location} entity {entity}"
+    remaining = serving if len(serving) > 1 else families
+    run.site_candidates = [
+        {"supplier_code": code, "rule": "R-006", "reason": reason,
+         "location": location or "", "location_reference": f"LOCATIONS {location}|{run.config.version}" if entity else "",
+         "sites": [{"supplier_site": s, "site_name": text((run.config.supplier_sites.get(s) or {}).get("site_name")),
+                    "entity": _site_entity(run, s), "reference": f"{s}|{run.config.version}"} for s in sorted(sites)]}
+        for code, sites in sorted(remaining.items())]
+    run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES; "
+                  "market/entity does not settle it: " + reason, "R-006",
+                  evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+    return None
+
+
 def _site_names(source, site, rows):
     """The site's Item Master SUPPLIER_NAMEs and only the rows of that site (cited as its lineage)."""
     rows = [r for r in rows if text(r.get("SUPPLIER")) == site]
@@ -711,7 +786,7 @@ def _site_names(source, site, rows):
     return names, rows
 
 
-def resolve_supplier(run, source, matches, candidates):
+def resolve_supplier(run, source, matches, candidates, deliver_to=None):
     """SUP-001 / SUP-003, R-006 / ALG-002 / ALG-005: supplier site from the Item Master item-supplier relation.
 
     Returns (site, SUPPLIER_NAME, family). When several Active sites of one supplier family remain, the
@@ -723,12 +798,17 @@ def resolve_supplier(run, source, matches, candidates):
         by_name.extend(source.items_by_supplier_name(candidate["name"]))
     name_sites = {text(r.get("SUPPLIER")) for r in by_name if text(r.get("SUPPLIER"))}
     families = supplier_family(run, candidates)
-    family_sites = set()
+    family_sites, market_ref = set(), ""
     if len(families) == 1:
         family_sites = next(iter(families.values()))
     elif len(families) > 1:
-        run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES",
-                      "SUP-001", evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+        settled = code_by_market(run, families, deliver_to)
+        if settled:
+            family_sites = set(next(iter(settled.values())))
+            market_ref = f"LOCATIONS {deliver_to[0]}|{run.config.version}"
+        else:
+            run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES",
+                          "SUP-001", evidence=f"{len(families)} supplier codes", owner="Supplier operations")
     name_sites |= family_sites
     item_sites = None
     for m in matches:
@@ -748,7 +828,8 @@ def resolve_supplier(run, source, matches, candidates):
         name = next(iter(names)) if len(names) == 1 else None
         bridged = site in family_sites
         run.trace("Supplier Site", site, "SUP-003", "Item Master SUPPLIER" + (" via SUPPLIER SITES" if bridged else ""),
-                  reference=", ".join(x for x in (_refs(site_rows), f"{site}|{version}" if bridged else "") if x))
+                  reference=", ".join(x for x in (_refs(site_rows), f"{site}|{version}" if bridged else "",
+                                                  market_ref if bridged else "") if x))
         if name is None:
             run.exception("Supplier Exception", "Supplier site has no single SUPPLIER_NAME in the Item Master",
                           "R-006", evidence=", ".join(sorted(names)), owner="Supplier operations")
@@ -1290,10 +1371,11 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     # constrains every line by that supplier (ALG-018 / R-015).
     probe = Run(invoice, config, filename)
     probe_matches = [match_line(probe, n, line, source, first_names or None) for n, line in enumerate(invoice.lines, 1)]
-    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates)
+    deliver_to = deliver_to_location(invoice, scan, config)
+    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates, deliver_to)
     sites = {probe_site} if probe_site else (set(probe_family) if probe_family else (first_names or None))
     matches = [match_line(run, n, line, source, sites) for n, line in enumerate(invoice.lines, 1)]
-    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates)
+    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates, deliver_to)
     if supplier_site:
         # Re-check items under the resolved supplier where the first pass was unconstrained.
         for m in matches:
@@ -1457,6 +1539,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         "po": {"order": po["order"], "source": po["source"], "status": po["status"], "value_source": value_source},
         "ebs_supplier_code": key or "/".join(sorted(keys)), "entity_hint": hint, "config_version": config.version,
         "item_resolution": resolution, "po_candidates": po["candidates"],
+        "supplier_site_candidates": [] if supplier_site else run.site_candidates,
     }
 
 

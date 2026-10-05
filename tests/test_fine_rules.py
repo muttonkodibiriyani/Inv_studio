@@ -785,6 +785,58 @@ def test_SUP_001_bridge_and_site_chosen_by_order_ebs_code_and_location_entity():
     assert review["header"]["Supplier Site"] == "" and "Supplier Site Exception" in types(review, "SUP-003")
 
 
+def test_R_006_two_supplier_codes_resolved_by_the_printed_deliver_to_location_entity():
+    # One printed supplier name, two Active codes; the Item Master relates the items to a site of each code.
+    items = ITEMS + [item(p, b, v, site="92006", name="DEF002RB2SAR", ref=r)
+                     for p, b, v, r in (("345000001", "ULT_0012345678905", "100001", 7),
+                                        ("345000002", "ULT_0098765432109", "100002", 8))]
+    sites = [{"supplier_site": s, "currency": c, "status": "Active", "supplier_code": code,
+              "supplier_name": "ABC Trading LLC", "site_name": n}
+             for s, c, code, n in (("22001", "KWD", "1", "ABC001RA1KWD"), ("92006", "SAR", "2", "DEF002RB2SAR"))]
+    master = {"38091": {"type": fr.STORE, "market": "Kuwait", "entity_currency": "RA1KWD"},
+              "38092": {"type": fr.STORE, "market": "KSA", "entity_currency": "RB2SAR"}}
+    config = {**CONFIG, "supplier_sites": sites, "location_master": master}
+    no_po = invoice(po=None)
+
+    picked = run(no_po, items=items, config=config, text_value="Bill To: Ulta Buyer Co   Deliver To: Store 38091")
+    header = picked["header"]
+    assert (header["Supplier Site"], header["Order No"], header["Location"]) == ("22001", "13000001", "38091")
+    code = next(x for x in picked["lineage"] if x["target"] == "Supplier Code")
+    assert code["rule"] == "R-006" and code["value"] == "1"
+    assert "LOCATIONS 38091|test-1" in code["reference"] and "22001|test-1" in code["reference"]
+    site = [x for x in picked["lineage"] if x["target"] == "Supplier Site"][0]
+    assert "LOCATIONS 38091|test-1" in site["reference"]
+    assert "SUP-001" not in {e["Rule ID"] for e in picked["exceptions"]} and picked["supplier_site_candidates"] == []
+
+    other = run(no_po, items=items, config=config, text_value="DELIVERY ADDRESS: 38092")
+    assert other["header"]["Supplier Site"] == "92006" and other["header"]["Order No"] == ""
+
+    def reason(result):
+        assert result["header"]["Supplier Site"] == "" and result["header"]["Order No"] == ""
+        assert "Supplier Exception" in types(result, "SUP-001")
+        return " ".join(e["Description"] for e in result["exceptions"] if e["Rule ID"] == "R-006")
+
+    assert "not printed as a LOCATION id" in reason(run(no_po, items=items, config=config,
+                                                        text_value="Deliver To: Store Name, City\nP.O. Box 38091"))
+    assert "not a LOCATION id" in reason(run(no_po, items=items, config=config, text_value="Deliver To: 99999"))
+    assert "2 different LOCATIONS ids" in reason(run(no_po, items=items, config=config,
+                                                     text_value="Deliver To: 38091 or 38092"))
+    both = config | {"supplier_sites": sites + [{**sites[1], "supplier_site": "92007", "site_name": "DEF002RA1KWD"}]}
+    tied = run(no_po, items=items, config=both, text_value="Deliver To: Store 38091")
+    assert "2 of the 2 supplier codes" in reason(tied)
+    # The codes left are offered as cited candidates for the reviewer's pick; the field itself stays empty.
+    offered = tied["supplier_site_candidates"]
+    assert [(c["supplier_code"], [s["supplier_site"] for s in c["sites"]]) for c in offered] == [
+        ("1", ["22001"]), ("2", ["92007"])]
+    assert offered[1]["sites"][0]["reference"] == "92007|test-1" and offered[0]["location_reference"] == \
+        "LOCATIONS 38091|test-1"
+    unprinted = run(no_po, items=items, config=config, text_value="Deliver To: Store Name")
+    assert [c["supplier_code"] for c in unprinted["supplier_site_candidates"]] == ["1", "2"]
+    no_entity = config | {"location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"}}}
+    assert "no ENTITY AND CURENCY" in reason(run(no_po, items=items, config=no_entity,
+                                                 text_value="Deliver To: Store 38091"))
+
+
 def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     traced = run(text_value="Net 70.000\fTax 0\nTotal 70")
     refs = {x["target"]: x["reference"] for x in traced["lineage"]}
