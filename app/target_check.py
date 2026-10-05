@@ -581,13 +581,15 @@ def check_view(view, sources, transaction=1, upc="empty", entries=None, attribut
         "version": 1, "checked_at": (now or datetime.now(timezone.utc)).isoformat(), "transaction": transaction,
         "upc": upc, "counts": total, "metric": metric, "cells": cells, "checks": checks,
         "holds": bool(total[NEEDS_CHECKING] or failed),
-        "summary": summary_line(total),
+        "summary": summary_line(total, failed),
     }
 
 
-def summary_line(c):
+def summary_line(c, failed=()):
+    # Cells are scored over the rows read; missing lines cost no cells, so a partial read says so here.
     return (f"Target sheet: {c[VERIFIED]} verified · {c[OWNER_RULE_EMPTY]} empty by owner rule · "
-            f"{c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking")
+            f"{c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking"
+            + (" · lines do not sum to net" if "lines_to_net" in failed else ""))
 
 
 def issues(result):

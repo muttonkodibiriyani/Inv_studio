@@ -198,11 +198,12 @@ def check(result, name):
 def test_arithmetic_at_currency_decimals():
     r = tc.check_view(view(), sources())
     assert check(r, "lines_to_net")["status"] == "pass" and check(r, "lines_to_net")["decimals"] == 3
-    assert check(r, "net_plus_tax_gross")["status"] == "pass"
+    assert check(r, "net_plus_tax_gross")["status"] == "pass" and "lines do not sum" not in r["summary"]
     assert check(r, "tax_breakdown_to_header")["status"] == "pass"
     off = view(lines=[line(1, cost="2.101")])
     r = tc.check_view(off, sources())
     assert check(r, "lines_to_net")["status"] == "fail" and r["holds"]
+    assert r["summary"].endswith(" · lines do not sum to net")  # missing lines cost no cells; say so
     assert any(i["rule"] == "TARGET-LINES_TO_NET" for i in tc.issues(r))
     wrong_tax = view(fields={"tax": field("0.600", ev("Invoice printed total", "page 1", "0.600", "printed"))})
     r = tc.check_view(wrong_tax, sources(text=TEXT + " 0.600"))
