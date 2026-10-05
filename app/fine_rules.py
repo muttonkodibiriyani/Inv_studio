@@ -67,7 +67,9 @@ NON_BLOCKING = {"Data Quality", "Entity Hint", "Description Check", "Totals Audi
 ITEM_LINE_THRESHOLD = Decimal("0.95")
 ITEM_LINE_DEFINITION = ("lines resolved to exactly one Item Master ITEM_PARENT whose quantity agrees with the "
                         "accepted PO/GRN, divided by all invoice lines")
-# Owner form 01a10c4f: pre-tax value tolerance per currency, compared at two decimals.
+# Owner form 01a10c4f: pre-tax value tolerance per currency, compared at two decimals. The owner sheets name the
+# check (02_Supplier_POGRN_Target POG-007, 03_Mandatory_Checklist C-16) but not the amounts, so a non-zero
+# variance inside the tolerance is still raised for the owner to verify, never passed silently.
 VALUE_TOLERANCE_BY_CURRENCY = {"KWD": Decimal("1"), "AED": Decimal("2")}
 VALUE_DECIMALS = 2
 
@@ -240,19 +242,19 @@ def scan_pages(text_value="", boxes=(), page_count=None):
             page = int(box.get("page", 1))
         except (TypeError, ValueError):
             continue
-        top = 0.0
+        top = left = 0.0
         position = box.get("box")
         if isinstance(position, (list, tuple)) and len(position) == 4:
             try:
-                top = float(position[1])
+                top, left = float(position[1]), float(position[0])
             except (TypeError, ValueError):
-                top = 0.0
-        pages[page].append((top, value))
+                top = left = 0.0
+        pages[page].append((top, value, left))
     page_text = {}
     if pages:
         for page, words in pages.items():
             rows, last = [], None
-            for top, value in sorted(words, key=lambda x: x[0]):
+            for top, value, _ in sorted(words, key=lambda x: x[0]):
                 if last is not None and abs(top - last) <= 3 and rows:
                     rows[-1] += " " + value
                 else:
@@ -267,7 +269,8 @@ def scan_pages(text_value="", boxes=(), page_count=None):
     unreadable = [p for p in range(1, total + 1) if p not in readable]
     return {"page_count": total, "pages": {p: page_text.get(p, "") for p in range(1, total + 1)},
             "readable_pages": readable, "unreadable_pages": unreadable,
-            "characters": {p: len(page_text.get(p, "")) for p in range(1, total + 1)}}
+            "characters": {p: len(page_text.get(p, "")) for p in range(1, total + 1)},
+            "words": {p: [(t, x, v) for t, v, x in words] for p, words in pages.items()}}
 
 
 _LEGAL_SUFFIX = re.compile(
@@ -278,17 +281,93 @@ _SUPPLIER_LABEL = re.compile(
 _BUYER_LABEL = re.compile(r"(?i)\b(?:bill\s+to|ship\s+to|sold\s+to|buyer|customer|deliver\s+to|consignee)\b")
 
 
-def supplier_candidates(scan, printed_name=None, buyer_name=None, owner_buyer=None):
-    """ALG-002: every supplier-name candidate across all pages, with page and region."""
-    found = []
-    printed_buyer, owner_key = fold(buyer_name) if buyer_name else "", name_key(owner_buyer)
+# Company-type words only (owner rule BUYER-NAME: the entity is the configured name without them).
+_COMPANY_TYPES = {"co", "company", "llc", "l", "c", "wll", "w", "ltd", "limited", "inc", "plc", "spc", "corp",
+                  "corporation", "fzco", "fze", "fzllc", "fz", "est", "establishment", "gmbh", "sa", "bv"}
+_PARTY_BUYER = (("issued", "to"), ("bill", "to"), ("billed", "to"), ("sold", "to"), ("invoice", "to"),
+                ("buyer",), ("customer",))
+_PARTY_SELLER = (("issued", "by"), ("bill", "from"), ("sold", "by"), ("seller",), ("supplier",), ("vendor",))
 
-    def is_buyer(value):
-        return bool(printed_buyer and printed_buyer in fold(value) or owner_key and owner_key in name_key(value))
+
+def _tokens(value):
+    return re.findall(r"[a-z0-9]+", fold(value))
+
+
+def entity_tokens(value):
+    """The configured name without its company-type words, as normalised whole words."""
+    return [w for w in _tokens(value) if w not in _COMPANY_TYPES]
+
+
+def _has_words(tokens, words):
+    n = len(words)
+    return bool(words) and any(tokens[i:i + n] == list(words) for i in range(len(tokens) - n + 1))
+
+
+def _label_at(row, labels):
+    """x position and index after the first party label found in a row of (x, word)."""
+    words = [w for _, w in row]
+    for label in labels:
+        for i in range(len(words) - len(label) + 1):
+            if tuple(_tokens(" ".join(words[i:i + len(label)]))) == label:
+                return row[i][0], i + len(label)
+    return None
+
+
+def buyer_party(scan, depth=5):
+    """Buyer side of the party row (Issued To / Bill To ...): (page, [row text]) from word positions.
+
+    With a seller label on the same row the column boundary is midway between the two labels; without one,
+    the buyer side starts at its label. Text without word positions gives no side (never guessed)."""
+    for page in sorted(scan.get("words") or {}):
+        rows = []
+        for top, x, value in sorted(scan["words"][page]):
+            if rows and abs(top - rows[-1][0]) <= 3:
+                rows[-1][1].append((x, value))
+            else:
+                rows.append((top, [(x, value)]))
+        rows = [(top, sorted(words)) for top, words in rows]
+        for n, (top, row) in enumerate(rows):
+            buyer = _label_at(row, _PARTY_BUYER)
+            if not buyer:
+                continue
+            seller = _label_at(row, _PARTY_SELLER)
+            boundary = (seller[0] + buyer[0]) / 2 if seller and seller[0] < buyer[0] else buyer[0]
+            side = [" ".join(w for _, w in row[buyer[1]:] if _ >= boundary)]
+            for _, below in rows[n + 1:n + 1 + depth]:
+                if _label_at(below, _PARTY_BUYER + _PARTY_SELLER):
+                    break
+                side.append(" ".join(w for x, w in below if x >= boundary))
+            side = [" ".join(r.split()).strip(" :|-,") for r in side]
+            return page, [r for r in side if r]
+    return None, []
+
+
+def _without_buyer_side(value, buyer_rows):
+    """Remove buyer-side party text from a supplier value: a whole buyer row, or the start of one that a reader
+    joined onto the seller name across the party-row columns (left column first, so it trails the value)."""
+    for row in buyer_rows:
+        value = value.replace(row, "")
+        words, row_words = value.split(), [fold(w) for w in row.split()]
+        for k in range(min(len(words), len(row_words)), 0, -1):
+            if [fold(w) for w in words[-k:]] == row_words[:k]:
+                value = " ".join(words[:-k])
+                break
+    return value.strip(" :|-,")
+
+
+def supplier_candidates(scan, printed_name=None, buyer_name=None, buyer_rows=()):
+    """ALG-002: every supplier-name candidate across all pages, with page and region.
+
+    Buyer-side party text is removed by position, never by name, since group companies sell to each other.
+    A reader buyer that is only company-type words (a reader miss) excludes nothing."""
+    found = []
+    printed_buyer = fold(buyer_name) if buyer_name and entity_tokens(buyer_name) else ""
+    buyer_rows = [r for r in buyer_rows if entity_tokens(r)]
 
     def add(value, page, line_no, lines, how):
         value = " ".join(text(value).split()).strip(" :|-,")
-        if len(value) < 2 or is_buyer(value):
+        value = _without_buyer_side(value, buyer_rows)
+        if len(value) < 2 or (printed_buyer and printed_buyer in fold(value)):
             return
         position = (line_no + 0.5) / max(1, len(lines))
         region = "top" if position < 1 / 3 else "bottom" if position > 2 / 3 else "body"
@@ -300,8 +379,10 @@ def supplier_candidates(scan, printed_name=None, buyer_name=None, owner_buyer=No
                 if fold(c["name"]) == key:
                     c.setdefault("also_on", []).append({"page": page, "line": line_no + 1, "region": region})
 
-    if printed_name:
-        found.append({"name": text(printed_name), "page": None, "line": None, "region": "extracted",
+    # The reader's supplier field loses any buyer-side text it took across the party row.
+    printed_name = _without_buyer_side(" ".join(text(printed_name).split()), buyer_rows) if printed_name else ""
+    if len(printed_name) >= 2:
+        found.append({"name": printed_name, "page": None, "line": None, "region": "extracted",
                       "method": "extracted supplier field"})
     for page, page_value in scan["pages"].items():
         lines = [x for x in page_value.splitlines() if x.strip()]
@@ -838,6 +919,11 @@ def _validate_accepted(run, group):
         run.exception("Value Mismatch", f"Order {order}: invoice value before tax does not agree with aggregated "
                       "TOTAL COST within tolerance; please verify", "POG-007", evidence=group["Exception Reason"],
                       owner="Buyer")
+    elif group["Value Variance"]:
+        run.exception("Value Mismatch", f"Order {order}: invoice value before tax differs from aggregated TOTAL COST "
+                      f"by {group['Value Variance']}, inside the owner form 01a10c4f tolerance that the owner sheets "
+                      "do not state; please verify", "POG-007", evidence=f"Value variance {group['Value Variance']}",
+                      owner="Buyer")
 
 
 MALFORMED_REASON = "Source row malformed in extract"
@@ -1068,54 +1154,32 @@ def _printed_page(scan, amount):
     return None
 
 
-def _find_printed(scan, value):
-    """First page and printed quote of ``value``, ignoring case, spacing and punctuation."""
-    key = name_key(value)
-    if not key:
-        return None, None
-    for page, page_value in scan["pages"].items():
-        positions, flat = [], []
-        for i, ch in enumerate(page_value):
-            for folded in name_key(ch):
-                positions.append(i)
-                flat.append(folded)
-        at = "".join(flat).find(key)
-        if at >= 0:
-            quote = page_value[positions[at]:positions[at + len(key) - 1] + 1]
-            return page, " ".join(quote.split())
-    return None, None
+def _different_company(name, owner):
+    """A buyer names a different company only when it has a name beyond company-type words and that name does
+    not contain the owner's entity. Company-type fragments (a reader miss such as "Co. L.L.C") are not one."""
+    words = entity_tokens(name)
+    return bool(words) and not _has_words(words, entity_tokens(owner))
 
 
-_LEGAL_WORDS = {"co", "company", "llc", "wll", "l", "c", "w", "ltd", "limited", "est", "establishment", "trading",
-                "the", "and", "group", "fzco", "fze", "fzllc", "inc", "plc", "spc"}
-
-
-def _distinctive(value):
-    return [w for w in re.findall(r"[a-z0-9]+", fold(value)) if w not in _LEGAL_WORDS]
-
-
-def _different_company(printed, owner):
-    """A printed buyer names a different company only when it has a distinctive name and the owner's distinctive
-    name is not in it. Legal-form fragments (a reader miss such as "Co. L.L.C") are not a different company."""
-    words = _distinctive(printed)
-    return bool(words) and name_key(" ".join(_distinctive(owner))) not in "".join(words)
-
-
-def resolve_buyer(run, scan):
-    """Owner rule BUYER-NAME: Buyer Name is always the configured owner entity. Printed quote and page are the
-    evidence when the text carries it; otherwise the owner rule is. A different printed buyer is a review flag."""
+def resolve_buyer(run, scan, page, rows):
+    """Owner rule BUYER-NAME: Buyer Name is always the configured owner entity. Matched by the entity (the name
+    without company-type words, whole words) on the buyer side of the party row; the printed buyer line and
+    page are the evidence, else the owner rule is. A buyer side naming another company is a review flag."""
     owner = run.config.buyer_name
     if not owner:
         return ""
-    page, quote = _find_printed(scan, owner)
-    if page is not None:
-        run.trace("Buyer Name", owner, BUYER_RULE, "Printed on invoice", original=quote, reference=f"page {page}",
-                  evidence_kind=EVIDENCE_PRINTED)
+    entity = entity_tokens(owner)
+    quote = next((r for r in rows if _has_words(_tokens(r), entity)), None)
+    if quote:
+        run.trace("Buyer Name", owner, BUYER_RULE, "Printed buyer line (party row, buyer side)", original=quote,
+                  reference=f"page {page}", evidence_kind=EVIDENCE_PRINTED)
     else:
         run.trace("Buyer Name", owner, BUYER_RULE, BUYER_RULE_EVIDENCE, reference=BUYER_RULE_EVIDENCE,
                   confidence="Owner rule", evidence_kind=EVIDENCE_OWNER_RULE)
-    if _different_company(run.invoice.buyer_name, owner):
-        run.exception("Buyer Review", "printed buyer differs from owner entity", BUYER_RULE, owner="Accounts payable")
+    named = next((r for r in rows if entity_tokens(r)), None) if rows else run.invoice.buyer_name
+    if not quote and named and _different_company(named, owner):
+        run.exception("Buyer Review", "printed buyer differs from owner entity", BUYER_RULE,
+                      evidence=f"page {page}" if rows else "reader buyer field", owner="Accounts payable")
     return owner
 
 
@@ -1212,7 +1276,8 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         run.trace("Document Date", document_date, "ALG-004", "Invoice Document Date", original=dates["raw"])
 
     # Supplier discovery over the whole document, then items, then supplier linkage.
-    candidates = supplier_candidates(scan, invoice.supplier_name, invoice.buyer_name, config.buyer_name)
+    buyer_page, buyer_rows = buyer_party(scan)
+    candidates = supplier_candidates(scan, invoice.supplier_name, invoice.buyer_name, buyer_rows)
     first_names = {r_site for c in candidates for r_site in
                    (text(r.get("SUPPLIER")) for r in source.items_by_supplier_name(c["name"])) if r_site}
     # A probe pass finds the supplier from unambiguous lines; the recorded pass then
@@ -1349,7 +1414,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
                       owner="Tax reviewer")
 
     gross = trace_totals(run, scan)
-    buyer = resolve_buyer(run, scan)
+    buyer = resolve_buyer(run, scan, buyer_page, buyer_rows)
     resolution = item_resolution(run, matches, group)
 
     header = {

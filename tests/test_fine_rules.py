@@ -274,7 +274,11 @@ def test_R_022_value_mismatch_beyond_tolerance_is_never_auto_approved():
 
 def test_POG_007_owner_tolerance_is_one_kwd_or_two_aed_at_two_decimals():
     within = run(rows=both("13000001", "38091", c2="40.9990000001"))
-    assert within["pogrn_validation"][0]["Value Result"] == "Pass" and within["status"] == "Approved"
+    assert within["pogrn_validation"][0]["Value Result"] == "Pass" and within["header"]["Order No"] == "13000001"
+    # The amounts come from the owner form, not the owner sheets: a difference inside them is still verified.
+    assert within["status"] == "Review" and "Value Mismatch" in types(within, "POG-007")
+    assert "01a10c4f" in next(e["Description"] for e in within["exceptions"] if e["Rule ID"] == "POG-007")
+    assert run(rows=both("13000001", "38091", c2="40.004"))["status"] == "Approved"
     aed = both("13000001", "38091", c2="41.99", currency="AED")
     assert run(invoice(currency="AED"), rows=aed)["pogrn_validation"][0]["Value Result"] == "Pass"
     assert run(rows=both("13000001", "38091", c2="41.01"))["pogrn_validation"][0]["Value Result"] == "Fail"
@@ -672,31 +676,70 @@ def test_shifted_pogrn_rows_are_never_lookup_keys_or_evidence_and_flag_the_invoi
     assert "Malformed Source Row" not in types(run(rows=POGRN + [elsewhere]))
 
 
-def test_buyer_name_is_the_configured_owner_entity_with_printed_or_owner_rule_evidence():
-    owner = {**CONFIG, "buyer_name": "Synthetic Owner Retail Co"}
-    printed = run(invoice(buyer_name=None), config=owner, text_value="Bill to: SYNTHETIC OWNER-RETAIL Co.\nTotal 70")
-    assert printed["header"]["Buyer Name"] == "Synthetic Owner Retail Co" and printed["status"] == "Approved"
-    trace = next(x for x in printed["lineage"] if x["target"] == "Buyer Name")
-    assert trace["original"] == "SYNTHETIC OWNER-RETAIL Co" and trace["reference"] == "page 1"
+def party_boxes(seller, buyer, page=1, labels=("Issued By:", "Issued To:")):
+    """Synthetic two-column party row: labels at x 140 / 410, names below from x 30 / 306."""
+    boxes = []
+
+    def put(phrase, x, top):
+        for word in phrase.split():
+            boxes.append({"text": word, "page": page, "box": [x, top, x + 6 * len(word), top + 8]})
+            x += 6 * len(word) + 4
+    put(labels[0], 140, 95)
+    put(labels[1], 410, 95)
+    put(seller, 30, 108)
+    put(buyer, 306, 108)
+    put("Total 70", 30, 400)
+    return boxes
+
+
+OWNER = {**CONFIG, "buyer_name": "Synthowner LLC"}
+
+
+def test_buyer_name_matches_the_entity_on_the_buyer_side_with_the_printed_line_as_evidence():
+    boxes = party_boxes("ABC Trading LLC", "SYNTHOWNER INTERNATIONAL CO. L.L.C")
+    result = run(invoice(buyer_name="CO. L.L.C"), config=OWNER, boxes=boxes)
+    assert result["header"]["Buyer Name"] == "Synthowner LLC" and "Buyer Review" not in types(result)
+    trace = next(x for x in result["lineage"] if x["target"] == "Buyer Name")
+    assert trace["original"] == "SYNTHOWNER INTERNATIONAL CO. L.L.C" and trace["reference"] == "page 1"
     assert trace["evidence_kind"] == fr.EVIDENCE_PRINTED
-    missed = run(invoice(buyer_name=None), config=owner)
+    assert result["status"] == "Approved", result["exceptions"]
+
+
+def test_buyer_name_without_printed_evidence_uses_the_owner_rule():
+    missed = run(invoice(buyer_name="CO. L.L.C"), config=OWNER)
     trace = next(x for x in missed["lineage"] if x["target"] == "Buyer Name")
-    assert missed["header"]["Buyer Name"] == "Synthetic Owner Retail Co"
+    assert missed["header"]["Buyer Name"] == "Synthowner LLC" and "Buyer Review" not in types(missed)
     assert trace["evidence_kind"] == fr.EVIDENCE_OWNER_RULE and trace["reference"] == fr.BUYER_RULE_EVIDENCE
-    other = run(invoice(buyer_name="Another Buyer Co"), config=owner)
-    assert other["header"]["Buyer Name"] == "Synthetic Owner Retail Co" and other["status"] == "Review"
-    assert any(e["Description"] == "printed buyer differs from owner entity" for e in other["exceptions"])
-    short = {**CONFIG, "buyer_name": "Synthowner LLC"}
-    for fragment in ("Co. L.L.C", "M.H.SynthOwner Company W.L.L.", "Synthowner Group Co. L.L.C"):
-        assert "Buyer Review" not in types(run(invoice(buyer_name=fragment), config=short)), fragment
-    assert "Buyer Review" in types(run(invoice(buyer_name="Othername Co. L.L.C"), config=short))
     assert run()["header"]["Buyer Name"] == ""
 
 
-def test_owner_buyer_is_never_a_supplier_candidate():
-    scan = fr.scan_pages("Synthetic Owner Retail Co. LLC\nABC Trading LLC")
-    names = [c["name"] for c in fr.supplier_candidates(scan, owner_buyer="Synthetic Owner Retail Co")]
-    assert names == ["ABC Trading LLC"]
+def test_buyer_review_only_for_a_buyer_side_company_without_the_entity():
+    other = run(invoice(buyer_name="CO. L.L.C"), config=OWNER, boxes=party_boxes("ABC Trading LLC", "Othername Co. L.L.C"))
+    assert other["header"]["Buyer Name"] == "Synthowner LLC" and other["status"] == "Review"
+    assert any(e["Description"] == "printed buyer differs from owner entity" for e in other["exceptions"])
+    # The entity on the seller side is not the buyer; a group company may sell to the owner.
+    seller_side = run(invoice(buyer_name=None), config=OWNER, boxes=party_boxes("Synthowner Beauty LLC", "Othername LLC"))
+    assert "Buyer Review" in types(seller_side)
+    assert "Buyer Review" in types(run(invoice(buyer_name="Othername Co. L.L.C"), config=OWNER))
+    # Whole words only: a longer word that merely contains the entity is not it.
+    assert "Buyer Review" in types(run(config=OWNER, boxes=party_boxes("ABC Trading LLC", "Synthownerx LLC")))
+
+
+def test_supplier_candidates_drop_the_buyer_side_by_position_never_by_name():
+    scan = fr.scan_pages(boxes=party_boxes("Synthowner Beauty LLC", "SYNTHOWNER INTERNATIONAL CO. L.L.C"))
+    page, rows = fr.buyer_party(scan)
+    assert page == 1 and rows == ["SYNTHOWNER INTERNATIONAL CO. L.L.C"]
+    names = [c["name"] for c in fr.supplier_candidates(scan, buyer_name="CO. L.L.C", buyer_rows=rows)]
+    assert names == ["Synthowner Beauty LLC"]
+    # A reader supplier field loses buyer-side text, whole or joined on across the columns; a seller-side group
+    # company is kept.
+    bled = fr.supplier_candidates(scan, printed_name="Synthsell Trading FZCO SYNTHOWNER", buyer_rows=rows)
+    assert bled[0]["name"] == "Synthsell Trading FZCO"
+    swapped = fr.supplier_candidates(scan, printed_name="SYNTHOWNER INTERNATIONAL CO. L.L.C", buyer_rows=rows)
+    assert [c["name"] for c in swapped] == ["Synthowner Beauty LLC"]
+    seller = fr.supplier_candidates(scan, printed_name="Synthowner Beauty LLC", buyer_rows=rows)
+    assert [c["method"] for c in seller][0] == "extracted supplier field"
+    assert fr.buyer_party(fr.scan_pages("Issued By: Issued To:\nA LLC B LLC")) == (None, [])
 
 
 def test_SUP_001_bridge_and_site_chosen_by_order_ebs_code_and_location_entity():
