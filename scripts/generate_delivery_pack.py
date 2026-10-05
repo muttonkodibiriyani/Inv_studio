@@ -20,10 +20,10 @@ def plain(s):
 
 doc=Document();section=doc.sections[0]
 section.top_margin=DI(.75);section.bottom_margin=DI(.7)
-style=doc.styles['Normal'];style.font.name='Aptos';style.font.size=DP(10)
+style=doc.styles['Normal'];style.font.name='Arial';style.font.size=DP(10)
 style.paragraph_format.space_after=DP(7)
 for name in ('Title','Heading 1','Heading 2','Heading 3'):
-    doc.styles[name].font.name='Aptos Display';doc.styles[name].font.color.rgb=DC.from_string('132C3B')
+    doc.styles[name].font.name='Arial';doc.styles[name].font.color.rgb=DC.from_string('132C3B')
 doc.add_paragraph('INV STUDIO',style='Subtitle')
 doc.add_heading('From supplier invoice\nto checked Excel',0)
 doc.add_paragraph('Solution design • operating model • verification record • build stories',style='Subtitle')
@@ -67,7 +67,7 @@ def box(slide,x,y,w,h,text,size=22,color=ink,bold=False,fill=None):
     if fill:shape.fill.solid();shape.fill.fore_color.rgb=RGBColor.from_string(fill);shape.line.fill.background()
     tf=shape.text_frame;tf.word_wrap=True;tf.margin_left=Inches(.12);tf.margin_right=Inches(.12)
     for i,line in enumerate(text.split('\n')):
-        p=tf.paragraphs[0] if i==0 else tf.add_paragraph();p.text=line;p.font.name='Aptos';p.font.size=Pt(size);p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(color);p.space_after=Pt(12)
+        p=tf.paragraphs[0] if i==0 else tf.add_paragraph();p.text=line;p.font.name='Arial';p.font.size=Pt(size);p.font.bold=bold;p.font.color.rgb=RGBColor.from_string(color);p.space_after=Pt(12)
     return shape
 
 def slide(title,kicker='INVOICE STUDIO / DECISION PACK'):
@@ -114,7 +114,7 @@ cards('Cross-market supply needs an explicit route',[
  ('Buying company','Printed buyer name is evidence, not an internal code. PO scope must identify the approved buyer.'),
  ('Route and currency','UAE → Kuwait with AED billing remains a distinct route. Currency equality does not prove approval.')])
 cards('Reference files are evidence, not assumptions',[
- ('Known source profile','Atomic cutover completed with 412,139 rows: 114,940 item and 297,199 PO/GRN. Authenticated API ranking/filter checks passed.'),
+ ('Known source profile','412,139 source rows are live: 114,940 items and 297,199 PO/GRN rows. Search and filter checks passed.'),
  ('Show conflicts','Keep provenance and duplicates. Name, price, quantity and unit clues rank candidates; a person confirms.'),
  ('Approve separately','Lookup never approves matching. Supplier/site, receipt, prior invoicing, route and tax meaning still need owners.')], 'Completed target examples and lookup hits are evidence; neither establishes canonical master-data approval.')
 cards('Cloud delivery is a controlled pilot',[
