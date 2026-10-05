@@ -1,0 +1,208 @@
+[
+  {
+    "id": "INV-01",
+    "title": "Select and confirm an invoice batch",
+    "role": "AP operator",
+    "want": "choose several invoices and confirm the processing rules",
+    "benefit": "I know which files, data and reader will be used",
+    "status": "Local and hosted processing gate verified",
+    "acceptance": [
+      "Cancel sends no invoice-processing request.",
+      "A confirmed plan is bound to filenames/sizes, engine/model, reference version and tolerances.",
+      "Changed rules require a fresh confirmation.",
+      "Each file becomes one invoice job; up to two run concurrently and the rest remain visibly queued."
+    ]
+  },
+  {
+    "id": "INV-02",
+    "title": "Read digital invoices and scans",
+    "role": "AP operator",
+    "want": "extract headers and every item line from supported files",
+    "benefit": "I avoid retyping supplier documents",
+    "status": "Local paths measured; broad 95% quality and current hosted deployment remain pending",
+    "acceptance": [
+      "Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family; Paddle has a conservative 90.91% floor with descriptions unproven; Docling retains documented long-file and scan failures.",
+      "A readable PDF with no matching template keeps native text; conservative rules require an invoice heading, reject purchase orders and never infer internal codes or totals.",
+      "The job view names the active extraction stage.",
+      "Unread or incomplete output records an explainable reader trace.",
+      "Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction."
+    ]
+  },
+  {
+    "id": "INV-03",
+    "title": "Use a chosen AI connection for exceptions",
+    "role": "AP operator",
+    "want": "select a provider/model and enable automatic fallback",
+    "benefit": "unfamiliar layouts can be proposed for review",
+    "status": "Adapter contracts and a narrow 15-document/570-line source check passed; representative accuracy and current hosted deployment remain pending",
+    "acceptance": [
+      "Managed Vertex uses the hosted service identity and project billing; every AI path still requires an explicitly confirmed plan.",
+      "Provider output must pass the strict invoice schema; missing facts remain missing.",
+      "Credentials never appear in browser storage, exported files or ordinary API errors.",
+      "Mocked Claude and ChatGPT adapters do not imply live subscription eligibility or inference.",
+      "The measured one-layout result cannot establish the expected 95% across suppliers, scans, languages and lengths; frozen held-out gold still governs acceptance."
+    ]
+  },
+  {
+    "id": "INV-04",
+    "title": "Map and approve business reference extracts",
+    "role": "data steward",
+    "want": "profile the whole item and PO/GRN files and approve explicit mappings",
+    "benefit": "the validator uses evidence with known meaning",
+    "status": "The private source profile contains 412,139 rows; hosted import is paused/cancelling and live lookup availability is unconfirmed",
+    "acceptance": [
+      "Preserve original bytes, hashes and row/column provenance; inspect all populated cells.",
+      "Separate unique matches, duplicates, ambiguous joins and missing fields.",
+      "Identifier and product-name searches show source/conflict context and require explicit confirmation without approving matching data.",
+      "Unknown seller/buyer/route, receipt acceptance and invoiced baseline block approval; never default them silently."
+    ]
+  },
+  {
+    "id": "INV-05",
+    "title": "Match the exact supplier route and items",
+    "role": "AP operator",
+    "want": "check supplier, site, company, PO, item identity and unit",
+    "benefit": "an invoice cannot borrow approval from another market or entity",
+    "status": "Canonical matching implemented and tested",
+    "acceptance": [
+      "Domestic and cross-border routes require their exact approval tuple.",
+      "Conflicting SKU and barcode identity is held.",
+      "Location type comes from an explicit reference field, not a numeric prefix."
+    ]
+  },
+  {
+    "id": "INV-06",
+    "title": "Protect receipt quantity and commercial controls",
+    "role": "finance owner",
+    "want": "check price, accepted receipt balance and tax with decimal rules",
+    "benefit": "we avoid incorrect or duplicate charges",
+    "status": "Implemented and tested",
+    "acceptance": [
+      "Accepted receipts minus returns, external baseline and this app allocations determine available quantity.",
+      "Repeated lines and multiple invoices consume quantity cumulatively.",
+      "Tolerance and currency rounding are explicit; no credit or mixed-tax allocation is invented."
+    ]
+  },
+  {
+    "id": "INV-07",
+    "title": "Review evidence and resolve exceptions",
+    "role": "AP reviewer",
+    "want": "compare the source with editable fields and record review",
+    "benefit": "every exported value has checked evidence",
+    "status": "Implemented and browser verified",
+    "acceptance": [
+      "Review confirmation cannot override validation holds.",
+      "Concurrent edits with stale revisions are rejected.",
+      "Rules changing during extraction prevent stale approval and require a new processing plan.",
+      "A manual draft created from an active job cannot alter the job revision, extracted invoice or review status.",
+      "Printed line net/tax amounts survive edits without changing printed unit price; there is no automatic repricing."
+    ]
+  },
+  {
+    "id": "INV-08",
+    "title": "Download combined review or approved workbooks",
+    "role": "AP operator",
+    "want": "download one combined workbook for saved processed invoices and a separate approved export",
+    "benefit": "review can move quickly without weakening approval controls",
+    "status": "Implemented and browser/workbook verified",
+    "acceptance": [
+      "Header/Tax_Breakdown/Details have exactly 13/3/6 columns and no helper formulas.",
+      "Invoice transaction IDs are 1..N and consistent across all three sheets.",
+      "EXTRACTION_REVIEW_ONLY accepts saved processed records, keeps unknown codes blank and changes no job, approval, ledger or allocation.",
+      "Export rechecks and reserves quantities atomically; repeat download does not duplicate an allocation."
+    ]
+  },
+  {
+    "id": "INV-09",
+    "title": "Recover and audit local operations",
+    "role": "service owner",
+    "want": "retain sources, rule versions, edits and exports",
+    "benefit": "a failed reader or restart can be explained and retried",
+    "status": "Instance-replacement persistence verified; database backup restoration remains a production gate",
+    "acceptance": [
+      "Restarted in-flight jobs visibly require retry; completed exports remain downloadable.",
+      "Export records include reference version, policy and allocations.",
+      "Recovery procedure preserves the database plus the corresponding encryption key.",
+      "Audit distinguishes text read, fields extracted and extraction failed; the legacy extracted event means only that a reader run finished."
+    ]
+  },
+  {
+    "id": "INV-10",
+    "title": "Run a restricted cloud workspace",
+    "role": "workspace owner",
+    "want": "sign in to a Firebase frontend backed by durable GCP services",
+    "benefit": "the team can use a hosted portal without losing evidence on restart",
+    "status": "Hosted synthetic workflow and instance-replacement persistence verified",
+    "acceptance": [
+      "Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.",
+      "Database and document evidence survive a replacement application instance.",
+      "Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff.",
+      "Access hotfix 00005-zdk passed login, 31 retained jobs and sign-out; the complete current feature bundle still needs hosted verification."
+    ]
+  },
+  {
+    "id": "INV-11",
+    "title": "Qualify suppliers for a new store or market",
+    "role": "procurement owner",
+    "want": "reuse approved coverage and start discovery only for gaps",
+    "benefit": "store openings do not repeat every supplier task",
+    "status": "Proposed next product increment",
+    "acceptance": [
+      "Same-market coverage reuses valid route facts with provenance/expiry.",
+      "New market or buying entity creates an explicit qualification case.",
+      "AI suggestions cannot approve a legal entity, route or commercial agreement."
+    ]
+  },
+  {
+    "id": "INV-12",
+    "title": "Normalize supplier items for buying and digital channels",
+    "role": "item-data steward",
+    "want": "turn varied supplier files into approved item identities and channel content",
+    "benefit": "purchasing and commerce teams can reuse a consistent catalog",
+    "status": "Proposed next product increment",
+    "acceptance": [
+      "Supplier codes, internal items, barcodes, packaging and units have explicit mappings.",
+      "Conflicting identities and unit conversions need steward approval.",
+      "Channel-specific text, attributes, images and translations are versioned separately from purchasing identity."
+    ]
+  },
+  {
+    "id": "INV-13",
+    "title": "Download an explicitly unvalidated manual draft",
+    "role": "AP operator",
+    "want": "edit every target workbook field and download a draft while OCR is still running",
+    "benefit": "urgent manual work is not blocked by a slow reader",
+    "status": "Implemented and locally browser/workbook verified; hosted release validation pending",
+    "acceptance": [
+      "Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction, leading-zero-safe identifiers and Decimal arithmetic.",
+      "Download requires an explicit unvalidated acknowledgement and visible DRAFT_UNVALIDATED/no-reservation disclosure.",
+      "Draft creation does not change the job, approve references, write the approved export ledger or reserve receipts."
+    ]
+  },
+  {
+    "id": "INV-14",
+    "title": "Search large source extracts without implying approval",
+    "role": "data steward",
+    "want": "search actual item and PO sources by identifier or product name",
+    "benefit": "I can find evidence without loading unapproved rows into canonical matching",
+    "status": "The 412,139-row private source profile is known, but hosted import is paused/cancelling and live lookup reports zero rows",
+    "acceptance": [
+      "Results retain source row and conflict/duplicate context with filters and bounded pagination.",
+      "The operator explicitly confirms a selected result before it can populate the manual workspace.",
+      "Lookup source evidence is never represented as approved matching, receipt allocation or export readiness."
+    ]
+  },
+  {
+    "id": "INV-15",
+    "title": "Move an owner subscription connection to the hosted workspace",
+    "role": "workspace owner",
+    "want": "connect the restricted Claude CLI or move my ChatGPT registration into my authenticated hosted workspace",
+    "benefit": "the provider can use my authorized account without exposing credentials through browser state",
+    "status": "Connection and transfer controls are implemented in source; live subscription inference, release validation and hosted deployment pending",
+    "acceptance": [
+      "Claude setup tokens are encrypted, omitted from state, removable and supplied only to the restricted server CLI with tools disabled.",
+      "ChatGPT local export creates a one-time bundle and then deletes local encrypted credentials, disconnects and clears the active account.",
+      "Only authenticated cloud owners can import; cloud export and local import are denied, and tests do not imply live provider eligibility."
+    ]
+  }
+]
