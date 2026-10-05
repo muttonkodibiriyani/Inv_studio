@@ -960,7 +960,8 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
     """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
     Owner form 01a10c4d order_link = strict_6: Order No is the printed order under the supplier's 6-character EBS
-    code, or the only order under that code. Items, quantity and value validate the linked order, never find one.
+    code, or (decision 16) the only order/location under that code whose quantity and value agree. Items never
+    find an order.
     Zero or several candidates leave it empty and flagged; never the closest.
     """
     invoice = run.invoice
@@ -1016,29 +1017,31 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         run.exception("POGRN Supplier Exception", "No POGRN rows for the supplier's EBS code", "SUP-002",
                       evidence="/".join(sorted(keys)), owner="Buyer")
         return outcome
-    # Owner form 01a10c4d order_link = strict_6: the candidates are the orders of the 6-character EBS code only;
-    # items never find an order. Exactly one order is linked; several are ambiguous (POG-001).
+    # Owner form 01a10c4d order_link = strict_6 with Dispatcher decision 16: the candidates are the
+    # (RMS_ORDER_NO, LOCATION) groups under the supplier's 6-character EBS code only. POG-001 selects the one whose
+    # quantity and pre-tax value agree (value within the owner's tolerance); none or several leave it empty.
     evaluated, _ = evaluate_pogrn(run, rows, *common)
-    outcome["validation"] = evaluated
-    orders = sorted({g["POGRN RMS Order No"] for g in evaluated})
-    outcome["candidates"] = len(orders)
-    if len(orders) > 1:
-        run.exception("Ambiguous PO", f"No printed PO and {len(orders)} POGRN orders under the supplier's "
-                      "6-character EBS code; owner review", "POG-001", evidence=", ".join(orders[:20]), owner="Buyer")
+    selected = [g for g in evaluated if g["_checks"]["qty"] and g["_checks"]["value"]]
+    outcome["validation"] = selected or evaluated
+    outcome["candidates"] = len(selected)
+    if not selected:
+        run.exception("Missing PO", f"No printed PO and none of the {len(evaluated)} order/location groups under the "
+                      "supplier's 6-character EBS code agrees on quantity and value (order not found)", "POG-001",
+                      evidence=POGRN_REPORT, owner="Buyer")
+        return outcome
+    if len(selected) > 1:
+        run.exception("Ambiguous PO", f"No printed PO and {len(selected)} order/location groups under the supplier's "
+                      "6-character EBS code agree on quantity and value; owner review", "POG-001",
+                      evidence=", ".join(f"{g['POGRN RMS Order No']}/{g['POGRN Location ID']}" for g in selected[:20]),
+                      owner="Buyer")
         outcome["status"] = "Ambiguous PO"
         return outcome
-    derived = orders[0]
-    identified = evaluated
-    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO (only order under the supplier's 6-character EBS "
-              "code, SUP-002)", reference=_refs([r for g in identified for r in g["_rows"]]),
-              confidence=DERIVED_FROM_POGRN)
+    group = selected[0]
+    derived = group["POGRN RMS Order No"]
+    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO: the only order/location under the supplier's "
+              "6-character EBS code whose quantity and value agree (form 01a10c4d, decision 16)",
+              reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN)
     outcome.update(order=derived, source=DERIVED_FROM_POGRN)
-    if len(identified) > 1:
-        run.exception("Location ID", "Derived order has several locations; no approved multi-location rule",
-                      "POG-002", evidence=f"{len(identified)} locations", owner="Buyer")
-        outcome["status"] = "Location ambiguous"
-        return outcome
-    group = identified[0]
     group.update({"Derived PO Number": derived, "PO Source": DERIVED_FROM_POGRN})
     _validate_accepted(run, group)
     outcome.update(group=group, status="Approved" if group["_passed"] else "Accepted, checks to verify")
