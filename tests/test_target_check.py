@@ -429,3 +429,46 @@ def test_missing_line_cells_count_only_under_their_status_in_accuracy():
     assert b["overall"] == a["overall"] and b["fields"] == a["fields"]
     assert b["by_status_before"]["missing_line"]["cells"] == 4
     assert b["by_status_before"]["empty_owner_rule"]["cells"] == a["by_status_before"]["empty_owner_rule"]["cells"] + 1
+
+
+# --------------------------------------------------------------------------- RF-3: printed invoice-level discount
+
+
+def discounted(text):
+    # Two read lines of 10.500 (21.000) against a Header net of 14.700 after a printed discount of 6.300.
+    v = view(lines=[line(1), line(2)],
+             fields={"net": field("14.700", ev("Invoice printed total", "page 1", "14.700", "printed"))})
+    return tc.check_view(v, sources(text=text))
+
+
+def test_lines_equal_net_after_the_printed_invoice_discount_warn_not_fail():
+    r = discounted("SYNTHETIC INVOICE\nTotal 21.000\nDiscount (6.300)\nNet Total 14.700")
+    k = lines_check(r)
+    assert (k["status"], k["detail"]) == (tc.WARNING, "Lines equal the Header net after the printed invoice discount")
+    assert "missing_lines" not in k and not missing(r)
+    assert not any(i["rule"] == "TARGET-LINES_TO_NET" for i in tc.issues(r))
+    assert "lines do not sum to net" not in r["summary"]
+    assert lines_check(discounted("Total 21.0\nLess: DISCOUNT -6.3\nNet 14.700"))["status"] == tc.WARNING
+
+
+def test_discount_match_needs_both_the_labelled_amount_and_the_printed_total():
+    assert lines_check(discounted("Total 21.000\nDiscount 5.000\nNet 14.700"))["status"] == tc.FAIL  # wrong amount
+    assert lines_check(discounted("Total 21.000\nRebate 6.300\nNet 14.700"))["status"] == tc.FAIL  # no label
+    assert lines_check(discounted("Total 21.000\nDiscount\n6.300\nNet 14.700"))["status"] == tc.FAIL  # other line
+    assert lines_check(discounted("Subtotal 20.000\nDiscount 6.300\nNet 14.700"))["status"] == tc.FAIL  # no total
+    # Lines below the net are never a discount.
+    v = view(fields={"net": field("16.800", ev("Invoice printed total", "page 1", "16.800", "printed"))})
+    assert lines_check(tc.check_view(v, sources(text="Total 10.500\nDiscount 6.300")))["status"] == tc.FAIL
+    assert tc.printed_discount("Discount 6.300", tc.Decimal("6.3")) and not tc.printed_discount("6.300", tc.Decimal("6.3"))
+    assert not tc.printed_discount("Discounted 6.300", tc.Decimal("6.3"))  # whole word only
+    assert lines_check(discounted("Total 21.000\nDiscounted price 6.300\nNet 14.700"))["status"] == tc.FAIL
+    assert lines_check(discounted("Total 121.0005\nDiscount 6.300\nNet 14.700"))["status"] == tc.FAIL  # by value
+
+
+def test_discount_precision_is_the_header_net_as_read_at_least_two_decimals():
+    # Net read with 1 decimal: P = 2, so a discount printed as 6.30 matches; lines total 21.00 is printed.
+    v = view(lines=[line(1), line(2)], fields={"net": field("14.7", ev("Invoice printed total", "page 1", "14.7",
+                                                                        "printed"))})
+    assert lines_check(tc.check_view(v, sources(text="Total 21.00\nDiscount 6.30")))["status"] == tc.WARNING
+    assert tc.after_discount("Total 21.00\nDiscount 6.30", [(tc.Decimal("1"), tc.Decimal("21.004"))],
+                             tc.Decimal("14.7"))  # 21.004 quantizes to 21.00 at P = 2

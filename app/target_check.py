@@ -394,6 +394,29 @@ def printed_line_count(text):
     return next(iter(values)) if len(values) == 1 else None
 
 
+NUMBER = re.compile(r"\d[\d,]*\.?\d*")
+DISCOUNT_LABEL = re.compile(r"(?i)\bdiscount\b")
+
+
+def _printed_amount(text, amount):
+    """A numeric token of the text equals the amount by value (commas stripped; sign and brackets ignored)."""
+    return any(_dec(m) == amount for m in NUMBER.findall(str(text or "")))
+
+
+def printed_discount(text, amount):
+    """The amount is printed on a text line with the whole word 'discount' (shared with fine_rules RF-2)."""
+    return any(_printed_amount(row, amount) for row in str(text or "").splitlines() if DISCOUNT_LABEL.search(row))
+
+
+def after_discount(text, pairs, net):
+    """RF-3, the match agreed with RULES: at P = the Header net's decimals as read (at least 2), the lines total
+    T = sum(qty x unit cost) is printed, and T - net > 0 is printed on a 'discount' line."""
+    places = max(_places(net) or 0, 2)
+    total = _q(sum((q * c for q, c in pairs), Decimal(0)), places)
+    discount = total - _q(net, places)
+    return discount > 0 and printed_discount(text, discount) and _printed_amount(text, total)
+
+
 def missing_lines(read, net, exact, text):
     """Item lines missing or merged when lines_to_net fails (MEASURE, T2(b)): printed - read when the invoice
     prints a line count (exact evidence, uncapped), else |residual| / mean read-line net, at most 2 x the read
@@ -428,9 +451,12 @@ def arithmetic(view, sources):
         step = max(Decimal(1).scaleb(c.as_tuple().exponent) for _, c in pairs)
         bound = sum((abs(q) for q, _ in pairs), Decimal(0)) * step / 2 + Decimal(1).scaleb(-places)
         rounded = not ok and abs(exact - _q(net, places)) <= bound
+        # An invoice-level discount printed in the totals: the lines carry the pre-discount prices (RF-3).
+        discounted = not ok and not rounded and after_discount(sources.text, pairs, net)
         status, detail = ((PASS, "Sum of quantity x unit cost equals the Header net") if ok else
                           (WARNING, "Sum of quantity x unit cost differs from the Header net within unit-cost "
                                     "rounding") if rounded else
+                          (WARNING, "Lines equal the Header net after the printed invoice discount") if discounted else
                           (FAIL, "Sum of quantity x unit cost differs from the Header net"))
         check = {"check": "lines_to_net", "status": status, "decimals": places, "detail": detail}
         if status == FAIL:
