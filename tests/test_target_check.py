@@ -79,10 +79,11 @@ def test_every_cell_gets_exactly_one_status_and_all_verified():
     # 13 Header + 3 Tax_Breakdown + 6 Details cells.
     assert r["counts"]["cells"] == 22
     m = r["metric"]
-    assert (m["cells"], m["verified"], m["empty_flagged"], m["needs_checking"], m["owner_entry"]) == (15, 14, 1, 0, 0)
+    assert (m["cells"], m["verified"], m["empty_owner_rule"], m["empty_flagged"], m["needs_checking"],
+            m["owner_entry"]) == (15, 14, 1, 0, 0, 0)
     assert sum(m["buckets"].values()) == 15
-    assert r["counts"]["empty_flagged"] == 5  # Ref No. 1-3, Comment, UPC (owner rule)
-    assert r["summary"] == "Target sheet: 17 verified · 5 empty (flagged) · 0 needs checking"
+    assert r["counts"]["empty_owner_rule"] == 5 and r["counts"]["empty_flagged"] == 0  # Ref No. 1-3, Comment, UPC
+    assert r["summary"] == "Target sheet: 17 verified · 5 empty by owner rule · 0 empty (flagged) · 0 needs checking"
     assert not r["holds"]
     assert all(k["status"] in (tc.PASS, tc.WARNING) for k in r["checks"]), r["checks"]
 
@@ -168,11 +169,12 @@ def test_reviewed_invoice_tax_code_is_checked_as_printed():
     assert status(tc.check_view(v, sources(text="no code here")), "Tax_Breakdown", "Tax Code") == ("mismatch", "")
 
 
-def test_upc_is_empty_by_owner_rule_and_filled_upc_is_a_violation():
+def test_upc_is_empty_by_owner_rule_and_barcode_mode_checks_the_printed_barcode():
     v = view(lines=[line(1, upc="1234567890123")])
-    assert status(tc.check_view(v, sources()), "Details", "UPC", 1) == ("empty_flagged", "")
-    r = tc.check_view(v, sources(), upc="barcode")
-    assert status(r, "Details", "UPC", 1) == ("owner_rule_violation", "")
+    assert status(tc.check_view(v, sources()), "Details", "UPC", 1) == ("empty_owner_rule", "")  # sheet as written
+    assert status(tc.check_view(v, sources(), upc="barcode"), "Details", "UPC", 1) == ("mismatch", "")  # not printed
+    r = tc.check_view(v, sources(text=TEXT + " barcode 1234567890123"), upc="barcode")
+    assert status(r, "Details", "UPC", 1) == ("verified", "")
 
 
 def test_owner_entry_needs_equal_stored_value_actor_and_time():

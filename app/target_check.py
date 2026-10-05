@@ -5,16 +5,18 @@ evidence was re-read at the source it points to (owner sheet row from the loaded
 printed text, the owner mapping config, or an attributed owner entry):
 
 - verified: filled, has evidence, and the source holds the value (owner entries carry sub 'owner_entry');
-- empty_flagged: empty, with the reason;
+- empty_owner_rule: empty because the owner said it stays empty (Details UPC in the default mode, Header Ref No. 1-3
+  and Comment; form 01a10c4d). Correct, but n/a: its own group, never added to verified (Dispatcher ruling);
+- empty_flagged: empty, with the reason: a real gap;
 - mismatch: the evidence does not hold the value;
 - over_cited: some cited rows hold the value, others do not;
 - no_evidence: filled with no evidence;
 - unverifiable: evidence not re-checkable (e.g. a printed source and no stored text);
 - data_gap: rests on a malformed owner extract row;
-- owner_rule_violation: a cell the owner's rules keep empty is filled;
 - owner_entry_unattributed: an owner entry without a matching stored entry, actor and time.
 
-The owner-facing line collapses them: verified · empty (flagged) · needs checking (every other bucket).
+A filled owner-rule cell is a template failure (mismatch). The owner-facing line collapses the buckets:
+verified · empty by owner rule · empty (flagged) · needs checking (every other bucket).
 The definitions mirror MEASURE's release metric (bench target_metric.check) so the in-app counts and the
 gate agree: the gate scores the sheet as written, i.e. the rules view the workbook is built from.
 Deterministic: no AI or cloud call; only the loaded owner tables, the stored text and the owner config are read.
@@ -30,10 +32,11 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 VERIFIED, EMPTY, MISMATCH = "verified", "empty_flagged", "mismatch"
 NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, OVER_CITED = "no_evidence", "unverifiable", "data_gap", "over_cited"
-RULE_VIOLATION, UNATTRIBUTED, OWNER_ENTRY = "owner_rule_violation", "owner_entry_unattributed", "owner_entry"
-STATUSES = (VERIFIED, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, RULE_VIOLATION, UNATTRIBUTED)
+OWNER_RULE_EMPTY, UNATTRIBUTED, OWNER_ENTRY = "empty_owner_rule", "owner_entry_unattributed", "owner_entry"
+STATUSES = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, UNATTRIBUTED)
 NEEDS_CHECKING = "needs_checking"
-GROUPS = (VERIFIED, EMPTY, NEEDS_CHECKING)
+# Empty by owner rule is correct but proves nothing from evidence: its own group, not added to verified (n/a).
+GROUPS = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, NEEDS_CHECKING)
 PASS, FAIL, SKIPPED, WARNING = "pass", "fail", "skipped", "warning"
 
 # The owner's target template (owner form 01a10c4d: 13 Header columns, Ref No. 1-3 and Comment empty).
@@ -246,7 +249,7 @@ def check_evidence(value, evidence, sources, location=None):
 
 
 def group(status):
-    return status if status in (VERIFIED, EMPTY) else NEEDS_CHECKING
+    return status if status in (VERIFIED, OWNER_RULE_EMPTY, EMPTY) else NEEDS_CHECKING
 
 
 def _cell(sheet, column, line, value, status, sub="", reason="", evidence=None, scope="metric"):
@@ -322,7 +325,7 @@ def sheet_cells(view, sources, transaction=1, upc="empty", entries=None, attribu
                                evidence={"kind": "structure", "source": "Transaction number of this invoice"},
                                scope="sheet"))
         elif column in OWNER_EMPTY:
-            cells.append(_cell("Header", column, None, None, EMPTY, reason=OWNER_EMPTY_REASON, scope="sheet"))
+            cells.append(_cell("Header", column, None, None, OWNER_RULE_EMPTY, reason=OWNER_EMPTY_REASON, scope="sheet"))
         else:
             key = HEADER_FIELDS[column]
             cells.append(_field_cell("Header", column, None, fields.get(key), sources, entries, attribution,
@@ -341,13 +344,11 @@ def sheet_cells(view, sources, transaction=1, upc="empty", entries=None, attribu
         for column in TEMPLATE["Details"][1:]:
             if column == "UPC" and upc == "empty":
                 # The workbook leaves UPC empty whatever the rules found (owner answer).
-                cells.append(_cell("Details", column, n, None, EMPTY, reason=UPC_EMPTY_REASON))
+                cells.append(_cell("Details", column, n, None, OWNER_RULE_EMPTY, reason=UPC_EMPTY_REASON))
                 continue
-            cell = _field_cell("Details", column, n, c.get(column), sources, entries, attribution, (n, column), view=view)
-            if column == "UPC" and cell["status"] != EMPTY:
-                cell.update(status=RULE_VIOLATION, group=NEEDS_CHECKING, sub="",
-                            reason="UPC is filled; the owner's rule keeps it empty")
-            cells.append(cell)
+            # A UPC mode scores UPC against its printed barcode evidence, like any other cell.
+            cells.append(_field_cell("Details", column, n, c.get(column), sources, entries, attribution, (n, column),
+                                     view=view))
     return cells
 
 
@@ -574,7 +575,8 @@ def check_view(view, sources, transaction=1, upc="empty", entries=None, attribut
 
 
 def summary_line(c):
-    return f"Target sheet: {c[VERIFIED]} verified · {c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking"
+    return (f"Target sheet: {c[VERIFIED]} verified · {c[OWNER_RULE_EMPTY]} empty by owner rule · "
+            f"{c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking")
 
 
 def issues(result):
