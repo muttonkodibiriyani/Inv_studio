@@ -497,6 +497,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .rules-fields dt { font-weight: 700; }
 .rules-fields dd { margin: 0; overflow-wrap: anywhere; }
 .rules-fields dd small, .rules-lines small { display: block; color: var(--muted); font-size: 10px; }
+.rules-entry { display: block; width: 100%; max-width: 220px; margin-top: 4px; padding: 4px 6px; font: inherit; font-size: 11px; border: 1px solid var(--danger); border-radius: 6px; }
 .rules-flagged { color: var(--danger); font-weight: 700; }
 .rules-item-rate { margin: 0 0 8px; font-size: 11px; }
 .rules-item-rate.owner-review { padding: 6px 9px; color: var(--danger); background: var(--danger-bg); border-radius: 7px; font-weight: 700; }

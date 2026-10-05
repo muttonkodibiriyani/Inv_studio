@@ -66,7 +66,7 @@ def test_value_without_evidence_stays_empty_and_is_flagged_never_guessed():
     # Not in the owner's target and in no owner sheet: not offered at all, so never filled.
     assert not {"seller", "buyer", "origin"} & set(view["fields"])
     blocking = {i["message"] for i in view["issues"] if i["blocking"]}
-    assert "Delivery location has no evidence and is left empty" in blocking
+    assert any(m.startswith("Delivery location has no evidence and is left empty") for m in blocking)
     assert rules_validation(view, reviewed=True)["ready"] is False
 
 
@@ -108,13 +108,17 @@ def test_banner_uses_rules_exceptions_verbatim():
     result = approved_result(status="Review", exceptions=[{
         "Exception Type": "Missing/Ambiguous PO", "Description": "d", "Owner": "Buyer", "Line No.": "",
         "Rule ID": "ALG-008", "Candidates / Evidence": "", "blocking": True}])
-    issues = rules_validation(rules_view(result), reviewed=True)["issues"]
+    issues = rules_validation(rules_view(result))["issues"]
     assert issues[0] == {"code": "Missing/Ambiguous PO", "message": "d", "owner": "Buyer", "line": None,
-                         "rule": "ALG-008", "evidence": "", "blocking": True, "check": "", "type": ""}
+                         "rule": "ALG-008", "evidence": "", "blocking": True, "check": "", "type": "", "level": "review"}
+    # The reviewer's confirm accepts it: still shown, no longer holding the invoice.
+    confirmed = rules_validation(rules_view(result), reviewed=True)
+    assert confirmed["issues"][0]["accepted"] is True and confirmed["issues"][0]["blocking"] is False
+    assert confirmed["ready"] is True and confirmed["accepted"] == [{"rule": "ALG-008", "code": "Missing/Ambiguous PO", "line": None}]
 
 
 def test_download_matches_the_owner_target_format():
-    content, evidence = rules_workbook([rules_view(approved_result())])
+    content, evidence = rules_workbook([rules_view(approved_result())], upc="barcode")
     wb = load_workbook(io.BytesIO(content))
     assert wb.sheetnames == ["Header", "Tax_Breakdown", "Details"]
     header = wb["Header"]
@@ -126,11 +130,11 @@ def test_download_matches_the_owner_target_format():
     tax = wb["Tax_Breakdown"]
     assert [c.value for c in tax[2]] == [1, "VAT0", 30] and tax.max_row == 2
     details = wb["Details"]
-    assert [c.value for c in details[2]] == [1, 345000001, "0012345678905", 10, 3, "VAT0"]
+    assert [c.value for c in details[2]] == [1, 345000001, "0012345678905", 10, 3, "VAT0"]  # upc="barcode"
     assert details["D2"].number_format == "General"
     assert evidence[1]["Header!C2"][0]["reference"] == "Item Master!2"
     assert evidence[1]["Details!B2"][0]["reference"] == "Item Master!2"
-    no_upc, _ = rules_workbook([rules_view(approved_result())], upc="empty")
+    no_upc, _ = rules_workbook([rules_view(approved_result())])
     assert load_workbook(io.BytesIO(no_upc))["Details"]["C2"].value is None
 
 
@@ -283,3 +287,66 @@ def test_failure_status_check_and_po_candidates_reach_the_view():
     issue=next(i for i in view["issues"] if i["rule"]=="POG-001")
     assert (issue["code"],issue["type"],issue["check"])==("Missing/Ambiguous PO","Ambiguous PO","C-12")
     assert view["po_candidates"]==3
+
+
+def test_rules_review_job_is_ready_after_the_owners_confirm_and_exports(production, monkeypatch):
+    app, client = production
+    import app.main as main
+    real = main.run_batch
+
+    def below_95(*args, **kwargs):
+        results = real(*args, **kwargs)
+        results[0]["status"] = "Review"
+        results[0]["exceptions"].append({"Exception Type": "Owner Validation", "Engine Type": "Owner Validation",
+                                         "Rule ID": "ITEM-LINE-95", "Check ID": "C-11", "Line No.": "",
+                                         "Description": "Item-line check 1/2 is below 95 %; owner validates", "blocking": True})
+        return results
+    monkeypatch.setattr("app.main.run_batch", below_95)
+    app.state.store.job("job-1", job())
+    shown = client.get("/api/jobs/job-1").json()
+    assert shown["rules"]["status"] == "Review" and shown["validation"]["ready"] is False
+    assert client.post("/api/jobs/job-1/export", headers=H, json={"revision": shown["revision"]}).status_code == 409
+    confirmed = client.post("/api/jobs/job-1/review", headers=H,
+                            json={"invoice": shown["invoice"], "revision": shown["revision"], "confirm": True}).json()
+    assert confirmed["status"] == "ready" and confirmed["validation"]["ready"] is True
+    assert confirmed["validation"]["accepted"] == [{"rule": "ITEM-LINE-95", "code": "Owner Validation", "line": None}]
+    exported = client.post("/api/jobs/job-1/export", headers=H, json={"revision": confirmed["revision"]})
+    assert exported.status_code == 200
+    receipt = [e for e in client.get("/api/jobs/job-1/audit").json() if e["event"] == "exported"][0]["payload"]
+    assert receipt["rules_status"] == "Review" and receipt["owner_accepted"][0]["rule"] == "ITEM-LINE-95"
+
+
+def test_reviewer_entry_fills_an_empty_required_cell_and_is_its_evidence(production):
+    app, client = production
+    app.state.store.job("job-1", job(text="no totals printed"))
+    shown = client.get("/api/jobs/job-1").json()
+    base = {"invoice": shown["invoice"], "revision": shown["revision"], "confirm": True}
+    assert client.post("/api/jobs/job-1/review", headers=H, json={**base, "entries": {"header": {"site": "abc"}}}).status_code == 400
+    assert client.post("/api/jobs/job-1/review", headers=H, json={**base, "entries": {"header": {"seller": "1"}}}).status_code == 400
+    confirmed = client.post("/api/jobs/job-1/review", headers=H,
+                            json={**base, "entries": {"header": {"net": "70.00", "tax": "0.00"}}}).json()
+    net = confirmed["rules"]["fields"]["net"]
+    assert net["value"] == "70.00" and net["evidence"][0]["kind"] == "owner_entry"
+    assert confirmed["validation"]["ready"] is True
+    exported = client.post("/api/jobs/job-1/export", headers=H, json={"revision": confirmed["revision"]}).json()
+    cells = client.get(f"/api/exports/{exported['id']}/evidence").json()["cells"]
+    assert cells["Header!H2"][0]["kind"] == "owner_entry"
+
+
+def test_a_confirm_is_asked_again_when_the_rules_issues_change(production):
+    app, client = production
+    app.state.store.job("job-1", job())
+    shown = client.get("/api/jobs/job-1").json()
+    confirmed = client.post("/api/jobs/job-1/review", headers=H,
+                            json={"invoice": shown["invoice"], "revision": shown["revision"], "confirm": True}).json()
+    assert confirmed["validation"]["ready"] is True
+    assert client.post("/api/fine-rules/config", json={}, headers=H).status_code == 200
+    again = client.get("/api/jobs/job-1").json()
+    assert again["reviewed"] is False and again["validation"]["ready"] is False
+
+
+def test_upc_defaults_to_empty_per_the_owner(production):
+    _, client = production
+    assert client.get("/api/target-export/config").json()["upc"] == "empty"
+    assert client.post("/api/target-export/config", json={"upc": "barcode"}, headers=H).status_code == 200
+    assert client.get("/api/target-export/config").json()["upc"] == "barcode"

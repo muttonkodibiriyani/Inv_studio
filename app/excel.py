@@ -66,15 +66,19 @@ def _id_cell(cell,value):
     else:text_cell(cell,value)
 
 
-def rules_workbook(views,upc="barcode"):
+def rules_workbook(views,upc="empty"):
     """Target template (Header / Tax_Breakdown / Details) from fine-rules views only.
+
+    UPC stays empty by default (owner answer: Details.Item = Item Master ITEM_PARENT is what populates);
+    "barcode" writes the invoice barcode as text.
 
     Every written cell comes from a view value that carries evidence; the
     returned map records that evidence per transaction and cell. Ref No./Comment stay truly empty.
     """
     if upc not in UPC_MODES:raise ValueError("UPC mode must be barcode or empty")
-    if not views or any(v["status"]!="Approved" for v in views):
-        raise ValueError("Only invoices the fine rules approved can be exported")
+    # Approved by the rules, or confirmed by a reviewer (owner_accepted lists the review issues they accepted).
+    if not views or any(v["status"]!="Approved" and "owner_accepted" not in v for v in views):
+        raise ValueError("Only invoices the fine rules approved or a reviewer confirmed can be exported")
     w=Workbook();w.remove(w.active);cells={}
     for name,cols in HEADERS.items():
         s=w.create_sheet(name);s.append(cols);s.freeze_panes="A2"

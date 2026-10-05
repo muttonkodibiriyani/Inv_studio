@@ -19,6 +19,15 @@ const baseURL = (process.env.BASE_URL || "http://127.0.0.1:8765").replace(/\/$/,
 const timeout = Number(process.env.BROWSER_TIMEOUT_MS || 120_000);
 const syntheticScan = readFileSync(resolve(repoRoot, "samples/invoice-scan.png"));
 
+async function waitFor(label, check, waitMs = timeout) {
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    if (await check()) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
+}
+
 const sheet = (reference) => [{ kind: "sheet", source: "Item Master", reference, original: "", rule: "V-001", confidence: "Exact" }];
 const printed = [{ kind: "printed", source: "Printed on invoice", reference: "page 1 box [0.1, 0.2, 0.3, 0.25]", original: "Net 100.00", rule: "", confidence: "Exact" }];
 const value = (v, evidence) => ({ value: v, evidence, flagged: false, reason: "" });
@@ -112,9 +121,14 @@ try {
     const pageErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.route("**/api/state", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) }));
+    let saved = null;
     await page.route("**/api/jobs/*", (route) => (route.request().method() === "GET"
       ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) })
       : route.fallback()));
+    await page.route("**/api/jobs/*/review", (route) => {
+      saved = route.request().postDataJSON();
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+    });
     await page.route("**/api/jobs/*/document", (route) => route.fulfill({ status: 200, contentType: "image/png", body: syntheticScan }));
 
     await page.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
@@ -142,6 +156,16 @@ try {
     assert.match(banner, /Missing\/Ambiguous PO \[C-12 · Ambiguous PO\]: 3 orders/);
     assert.match(banner, /Evidence Disagreement: number: .*\(warning\)/);
     assert.match(await page.locator("#provenance-list").textContent(), /owner sheet Supplier Sites!4/);
+
+    // Only empty required cells take a reviewer entry; UPC is optional and an evidenced value is not retyped.
+    assert.deepEqual(await page.locator(".rules-entry").evaluateAll((inputs) => inputs.map((i) => `${i.dataset.scope}:${i.dataset.line || ""}:${i.dataset.name}`)),
+      ["header::po", "line:2:Item"]);
+    await page.locator('.rules-entry[data-name="po"]').fill("70001");
+    await page.locator('.rules-entry[data-name="Item"]').fill("345000002");
+    await page.locator("#save-review").click();
+    await waitFor("the review save", async () => saved);
+    assert.deepEqual(saved.entries, { header: { po: "70001" }, lines: { 2: { Item: "345000002" } } });
+    assert.equal(saved.invoice.seller, job.invoice.seller ?? null, "rules-derived header values survive a save");
 
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     assert(overflow <= 1, `Page scrolls horizontally by ${overflow}px at ${viewport.width}px`);

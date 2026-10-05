@@ -33,7 +33,7 @@ from .fine_rules import RulesConfig, decide_feedback, feedback_entry, run_batch
 from .fine_rules_export import review_workbook, target_workbook
 from .fine_rules_source import LookupRulesSource
 from .product_candidates import ProductCandidates
-from .matching import enrich, key, rules_key, rules_validation, rules_view, validate
+from .matching import accepted_ids, enrich, key, owner_entries, rules_key, rules_validation, rules_view, validate
 from .models import Invoice, Policy, ProcessingOptions, StrictModel
 from .oauth import ChatGPTAuth
 from .providers import Providers
@@ -49,6 +49,8 @@ class Review(StrictModel):
     invoice: Invoice
     revision: int
     confirm: bool = False
+    # Reviewer-entered target values for cells the fine rules left empty: {"header": {...}, "lines": {"1": {...}}}.
+    entries: dict | None = None
 
 
 class Revision(StrictModel):
@@ -56,7 +58,7 @@ class Revision(StrictModel):
 
 
 class TargetExportConfig(StrictModel):
-    upc: str = Field(default="barcode",pattern="^(barcode|empty)$")
+    upc: str = Field(default="empty",pattern="^(barcode|empty)$")
 
 
 class FineRulesRequest(StrictModel):
@@ -266,12 +268,13 @@ def create_app(data_dir=None):
         # The stored result is stale once the mapping tables or the imported catalog change.
         sources=[r[0] for r in c.execute("SELECT payload FROM lookup_sources ORDER BY id")]
         return hashlib.sha256(json.dumps([store.get("fine_rules_config",{},c),sources],sort_keys=True,default=str).encode()).hexdigest()
-    def compute_rules(invoice,j):
+    def compute_rules(invoice,j,entries=None):
         """ONE fine-rules run for this invoice; review fields, banner and download all read its view."""
         with store.connection() as c:config=store.get("fine_rules_config",{},c);signature=rules_signature(c)
         entry={"invoice":invoice,"filename":j["filename"],"text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":j["id"]}
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
-        view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"))
+        view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),
+                        j.get("owner_entries") if entries is None else entries)
         view.update(signature=signature,computed_at=datetime.now(timezone.utc).isoformat())
         return view
     def fresh_rules(j):
@@ -288,8 +291,13 @@ def create_app(data_dir=None):
         with store.connection(True) as c:
             current=job_or_404(jid,c)
             if current["revision"]!=j["revision"]:return
-            view["revision"]=current["revision"];current["rules"]=view
+            view["revision"]=current["revision"]
+            # New review-level issues from changed tables were not seen by the reviewer: ask for a fresh confirm.
+            reset=bool(current.get("reviewed")) and accepted_ids(current.get("rules"))!=accepted_ids(view)
+            if reset:current["reviewed"]=False
+            current["rules"]=view
             evaluate(current,c);store.job(jid,current,c)
+            if reset:store.audit("review_reset",{"job_id":jid,"revision":current["revision"],"reason":"fine rules issues changed"},c)
             store.audit("fine_rules_applied",{"job_id":jid,"revision":current["revision"],"status":view["status"],
                         "item_lines":view["item_lines"],"approved":False},c)
 
@@ -500,22 +508,28 @@ def create_app(data_dir=None):
 
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
-        view=None
+        view=entries=None
         if not demo_references:
             j=job_or_404(jid);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
-            view=compute_rules(body.invoice,j)
+            if body.entries is not None:entries=owner_entries(body.entries)
+            else:
+                # Line entries are keyed by line number; they do not survive a change to the lines.
+                entries=owner_entries(j.get("owner_entries"))
+                if body.invoice.model_dump(mode="json")["lines"]!=j["invoice"].get("lines"):entries["lines"]={}
+            view=compute_rules(body.invoice,j,entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
             inv,provenance=enrich(body.invoice,references(c)) if demo_references else (body.invoice,[])
             before=j["invoice"]
             j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
-            if view is not None:j["rules"]={**view,"revision":j["revision"]}
+            if view is not None:j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries
             # Keep original derivation evidence, add new derivations and record edits separately.
             j["provenance"]+=provenance
             evaluate(j,c);store.job(jid,j,c)
-            store.audit("reviewed" if body.confirm else "edited",{"job_id":jid,"before":before,"after":j["invoice"],"revision":j["revision"],"reference_version":references(c).get("version")},c)
+            store.audit("reviewed" if body.confirm else "edited",{"job_id":jid,"before":before,"after":j["invoice"],"revision":j["revision"],"reference_version":references(c).get("version"),
+                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[])} if view is not None else {})},c)
         return public(j)
 
     @app.post("/api/jobs/{jid}/retry")
@@ -554,16 +568,18 @@ def create_app(data_dir=None):
                          "reference_version":references(c).get("version"),"policy":policy(c).model_dump(mode="json"),
                          "allocations":[m["allocation"] for m in j["validation"]["matches"]]}
             else:
-                content,evidence=rules_workbook([j["rules"]],target_upc(c))
+                accepted=j["validation"].get("accepted",[])
+                content,evidence=rules_workbook([{**j["rules"],"owner_accepted":accepted}],target_upc(c))
                 receipt={"id":eid,"job_id":jid,"invoice_key":rules_key(j["rules"]),"number":inv.number,"created_at":datetime.now(timezone.utc).isoformat(),
                          "source":"fine_rules","rules_signature":j["rules"]["signature"],"rules_revision":j["rules"]["revision"],
+                         "rules_status":j["rules"]["status"],"owner_accepted":accepted,"owner_entries":j.get("owner_entries") or {},
                          "allocations":[],"evidence":evidence.get(1,{})}
             c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(eid,key(inv),jid,json.dumps(receipt),content))
             j.update(status="exported",export_id=eid,revision=j["revision"]+1);store.job(jid,j,c);store.audit("exported",audit_receipt(receipt),c)
         learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
-    def target_upc(c=None):return store.get("target_export",{},c).get("upc","barcode")
+    def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
     def audit_receipt(receipt):
         # Cell evidence holds owner rows; the audit keeps its size, the receipt keeps the rows.
         return {**{k:v for k,v in receipt.items() if k!="evidence"},**({"evidence_cells":len(receipt["evidence"])} if "evidence" in receipt else {})}
@@ -625,7 +641,10 @@ def create_app(data_dir=None):
                          "invoice_key":key(inv) if demo_references else rules_key(j["rules"]),"number":inv.number,"created_at":datetime.now(timezone.utc).isoformat(),
                          "reference_version":references(c).get("version"),"policy":policy(c).model_dump(mode="json"),
                          "allocations":[m["allocation"] for m in result["matches"]] if demo_references else []}
-                ledger.append(receipt);entries.append((inv,result) if demo_references else j["rules"]);selected.append((j,receipt))
+                if not demo_references:
+                    receipt.update(rules_status=j["rules"]["status"],owner_accepted=result["accepted"],owner_entries=j.get("owner_entries") or {})
+                ledger.append(receipt);entries.append((inv,result) if demo_references else {**j["rules"],"owner_accepted":result["accepted"]})
+                selected.append((j,receipt))
             if demo_references:content=batch_workbook(entries)
             else:
                 content,evidence=rules_workbook(entries,target_upc(c))
