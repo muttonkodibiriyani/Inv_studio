@@ -117,13 +117,14 @@
               </div>
               <div id="batch-controls" class="batch-controls" hidden>
                 <div class="batch-selection">
-                  <div><button id="select-processed" class="link-button" type="button">Select processed</button><button id="select-ready" class="link-button" type="button">Select approved</button></div>
+                  <div><button id="select-processed" class="link-button" type="button">Select processed</button><button id="select-ready" class="link-button" type="button">Select approved</button><button id="select-all-finished" class="link-button" type="button">Select all finished</button></div>
                   <span id="selected-count">0 selected</span>
                   <small id="selected-detail">Select processed invoices for one review workbook.</small>
                 </div>
                 <div class="batch-actions">
                   <button id="batch-review" class="button button-secondary button-small" type="button" disabled>Download review workbook</button>
                   <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export approved</button>
+                  <button id="batch-delete" class="button button-quiet button-small danger-text" type="button" disabled>Delete selected…</button>
                 </div>
               </div>
               <div id="job-list" class="job-list" aria-live="polite"></div>
@@ -212,7 +213,7 @@
                     <div class="card-header compact fields-heading">
                       <div><p class="eyebrow">Structured result</p><h2 id="fields-title">Invoice details</h2></div>
                       <div id="completeness" class="completeness" aria-label="Extraction coverage, not accuracy or approval" title="Checks for required extracted fields and consistent totals. This is not a measured accuracy score or approval.">
-                        <span>Read coverage</span><strong>—</strong>
+                        <span>Field completeness</span><strong>—</strong>
                       </div>
                     </div>
                     <div id="processing-result" class="processing-result" aria-live="polite" hidden>
@@ -253,7 +254,7 @@
                         </div>
                         <div class="table-scroll">
                           <table class="line-table">
-                            <thead><tr><th scope="col">SKU / GTIN</th><th scope="col">Description</th><th scope="col">Qty</th><th scope="col">UOM</th><th scope="col">Unit price &amp; printed totals</th><th scope="col">Evidence</th><th scope="col">Actions</th></tr></thead>
+                            <thead><tr><th scope="col">Item / SKU / GTIN</th><th scope="col">Description</th><th scope="col">Qty</th><th scope="col">UOM</th><th scope="col">Unit price &amp; printed totals</th><th scope="col">Evidence</th><th scope="col">Actions</th></tr></thead>
                             <tbody id="line-items"></tbody>
                           </table>
                         </div>
@@ -320,7 +321,7 @@
               <div id="reference-source-summary" class="reference-source-summary" aria-live="polite"><span>Loading staged source summary…</span></div>
               <form id="reference-lookup-form" class="reference-lookup-form">
                 <label>Record type<select id="reference-lookup-kind"><option value="item">Item / product</option><option value="po">Purchase order / GRN</option></select></label>
-                <label>Search source evidence<input id="reference-lookup-query" minlength="2" maxlength="100" placeholder="Product name, SKU, barcode, supplier or PO" required></label>
+                <label>Search source evidence<input id="reference-lookup-query" minlength="2" maxlength="100" placeholder="Approximate product name, item code or barcode" required></label>
                 <button id="reference-lookup-submit" class="button button-secondary" type="submit">Search</button>
                 <details class="reference-lookup-filter-wrap">
                   <summary>Optional exact filters</summary>
@@ -562,6 +563,18 @@
         <div class="dialog-header"><div><p class="eyebrow">Extracted facts only</p><h2 id="extraction-draft-title">Download extracted Excel?</h2><p>This creates an unvalidated copy of the currently extracted fields and lines.</p></div><button class="icon-button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
         <div class="draft-warning" role="note"><strong>EXTRACTION · REVIEW ONLY</strong><span>Unknown internal or reference fields stay blank. This download does not approve the invoice, reserve receipts or write to the approved export ledger.</span></div>
         <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button id="confirm-extraction-draft" class="button button-primary" type="button">Download EXTRACTION_REVIEW_ONLY.xlsx</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="delete-invoices-dialog" aria-labelledby="delete-invoices-title">
+      <form method="dialog" class="dialog-shell small-dialog">
+        <h2 id="delete-invoices-title">Permanently delete selected invoices?</h2>
+        <p>This removes <strong id="delete-invoice-count"></strong>, their source documents and stored workbook copies from this workspace. This cannot be undone here.</p>
+        <ul id="delete-invoice-list" class="delete-invoice-list"></ul>
+        <p class="helper-text">For previously exported invoices, minimal receipt balances and duplicate-prevention records remain. Exported batches must be deleted together. Provider backups expire under their retention policy.</p>
+        <label class="candidate-confirm-label"><input id="delete-invoice-acknowledge" type="checkbox"><span>I checked this list and want to permanently delete these invoices, including any unsaved edits.</span></label>
+        <p id="delete-invoice-error" class="danger-text" role="alert" hidden></p>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Keep invoices</button><button id="confirm-delete-invoices" class="button button-danger" type="button" disabled>Delete permanently</button></div>
       </form>
     </dialog>
 

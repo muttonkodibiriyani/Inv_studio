@@ -67,9 +67,13 @@ def validate(i: Invoice, refs, policy: Policy, ledger=(), reviewed=False):
     for e in ledger:
         for a in e["allocations"]: used[a["key"]]+=D(a["qty"])
     for n,l in enumerate(i.lines,1):
-        candidates=[x for x in refs.get("items",[]) if str(x["site"])==i.site and ((l.gtin and str(x["gtin"])==l.gtin) or (not l.gtin and l.sku and str(x["sku"])==l.sku))]
+        candidates=[x for x in refs.get("items",[]) if str(x["site"])==i.site and (
+            (l.item_id and str(x["id"])==l.item_id) or
+            (not l.item_id and ((l.gtin and str(x["gtin"])==l.gtin) or (not l.gtin and l.sku and str(x["sku"])==l.sku))))]
         item=candidates[0] if len(candidates)==1 else None
-        if not item: fail("ITEM","No unique exact supplier SKU / barcode match","Item steward",n)
+        if not item: fail("ITEM","No unique exact approved item / supplier SKU / barcode match","Item steward",n)
+        if item and l.item_id and ((l.sku and str(item["sku"])!=l.sku) or (l.gtin and str(item["gtin"])!=l.gtin)):
+            fail("ITEM_CONFLICT","The confirmed internal item conflicts with the supplier SKU or barcode","Item steward",n)
         if item and l.gtin and l.sku and str(item["sku"])!=l.sku: fail("ITEM_CONFLICT","Barcode and supplier SKU identify different items","Item steward",n)
         if l.qty is None or l.qty<=0: fail("QTY","Quantity is missing or not positive",line=n)
         if l.price is None or l.price<0: fail("PRICE","Net unit price is missing or negative",line=n)

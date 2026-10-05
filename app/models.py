@@ -8,6 +8,7 @@ class StrictModel(BaseModel):
 
 
 class Line(StrictModel):
+    item_id: str | None = None
     sku: str | None = None
     gtin: str | None = None
     description: str | None = None
@@ -23,6 +24,7 @@ class Line(StrictModel):
 class Invoice(StrictModel):
     number: str | None = None
     supplier_name: str | None = None
+    buyer_name: str | None = None
     seller: str | None = None
     site: str | None = None
     buyer: str | None = None

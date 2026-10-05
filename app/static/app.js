@@ -12,9 +12,10 @@ const make = (tag, className, text) => {
 const HEADER_FIELDS = [
   ["number", "Invoice number", "text"],
   ["supplier_name", "Supplier name", "text"],
+  ["buyer_name", "Buyer name · Bill To", "text"],
   ["seller", "Seller entity", "text"],
   ["site", "Supplier site", "text"],
-  ["buyer", "Buyer", "text"],
+  ["buyer", "Buyer code · reference", "text"],
   ["po", "Purchase order", "text"],
   ["location", "Delivery location", "text"],
   ["date", "Invoice date", "date"],
@@ -69,6 +70,9 @@ const app = {
   referenceLookupTarget: null,
   managedVertexModel: "",
   managedVertexModelsLoaded: false,
+  providerModels: {},
+  providerVerified: {},
+  modelLoadTokens: {},
 };
 
 async function studioFetch(path, options = {}) {
@@ -93,7 +97,11 @@ async function responseError(response) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("json") ? await response.json() : await response.text();
   const detail = body && typeof body === "object" ? body.detail : body;
-  return new Error(detail || `Request failed (${response.status})`);
+  const message = typeof detail === "string" ? detail : detail?.message
+    || (Array.isArray(detail) ? detail.map((issue) => issue.msg || "Invalid value").join("; ") : "");
+  const error = new Error(message || `Request failed (${response.status})`);
+  error.detail = detail;
+  return error;
 }
 
 async function api(path, options = {}) {
@@ -217,7 +225,7 @@ function initializeManualDraft(job) {
   $("#manual-draft-lines").replaceChildren();
   (invoice.lines?.length ? invoice.lines : [{}]).forEach((line, index) => addManualDraftLine({
     "Transaction Number": 1,
-    Item: matches[index]?.item || line.sku || "",
+    Item: matches[index]?.item || line.item_id || "",
     UPC: matches[index]?.gtin || line.gtin || "",
     "Unit Cost": line.price ?? "",
     Quantity: line.qty ?? "",
@@ -396,6 +404,10 @@ function isBatchReviewable(job) {
   return ["review", "ready", "exported"].includes(job.status) && hasStructuredInvoiceData(job);
 }
 
+function isSelectableInvoice(job) {
+  return Boolean(job.id) && !["queued", "processing", "deleting"].includes(job.status);
+}
+
 function navigate(sectionName) {
   $$(".page-section").forEach((section) => {
     const active = section.id === `${sectionName}-section`;
@@ -413,6 +425,7 @@ function navigate(sectionName) {
   history.replaceState(null, "", `#${sectionName}`);
   $("#main-content").focus({ preventScroll: true });
   if (sectionName === "references") ensureReferenceLookup().catch((error) => notify(error.message, "error"));
+  if (sectionName === "engines" && app.state) loadProviderModels("settings");
 }
 
 async function loadState({ preserveSelection = true } = {}) {
@@ -453,8 +466,8 @@ function renderJobs() {
     const select = make("input", "job-select");
     select.type = "checkbox";
     select.checked = app.selectedForBatch.has(job.id);
-    select.disabled = !isBatchReviewable(job);
-    select.setAttribute("aria-label", `Select ${job.filename} for a combined workbook`);
+    select.disabled = !isSelectableInvoice(job);
+    select.setAttribute("aria-label", `Select ${job.filename} for download or deletion`);
     select.addEventListener("change", () => {
       if (select.checked) app.selectedForBatch.add(job.id);
       else app.selectedForBatch.delete(job.id);
@@ -484,16 +497,19 @@ function renderJobs() {
 
 function updateBatchControls() {
   const jobs = app.state?.jobs || [];
-  const valid = [...app.selectedForBatch].filter((id) => isBatchReviewable(jobs.find((job) => job.id === id) || {}));
+  const valid = [...app.selectedForBatch].filter((id) => isSelectableInvoice(jobs.find((job) => job.id === id) || {}));
   if (valid.length !== app.selectedForBatch.size) app.selectedForBatch = new Set(valid);
   const selectedJobs = valid.map((id) => jobs.find((job) => job.id === id)).filter(Boolean);
   const approvedSelected = selectedJobs.filter(isBatchReady).length;
+  const reviewableSelected = selectedJobs.filter(isBatchReviewable).length;
   $("#selected-count").textContent = `${valid.length} selected`;
   $("#selected-detail").textContent = valid.length
-    ? `${approvedSelected} approved for validated export. Review workbooks remain unvalidated.`
-    : "Select processed invoices for one review workbook.";
-  $("#batch-review").disabled = valid.length === 0;
+    ? `${reviewableSelected} have extracted data; ${approvedSelected} approved. Delete removes only the selected invoices.`
+    : "Select invoices to download together or delete.";
+  $("#batch-review").disabled = valid.length === 0 || reviewableSelected !== valid.length;
   $("#batch-export").disabled = valid.length === 0 || approvedSelected !== valid.length || app.reviewDirty;
+  $("#batch-delete").disabled = valid.length === 0;
+  $("#select-all-finished").disabled = !jobs.some(isSelectableInvoice);
   const processed = jobs.filter(isBatchReviewable);
   const allProcessedSelected = processed.length > 0 && processed.every((job) => app.selectedForBatch.has(job.id));
   $("#select-processed").textContent = allProcessedSelected ? "Clear selection" : `Select processed${processed.length ? ` (${processed.length})` : ""}`;
@@ -535,6 +551,7 @@ async function selectJob(id) {
 }
 
 function clearSelectedJob() {
+  app.selectionToken += 1;
   app.selectedJobId = null;
   app.currentJob = null;
   app.reviewDirty = false;
@@ -544,6 +561,8 @@ function clearSelectedJob() {
   app.documentUrl = null;
   app.documentJobId = null;
   app.documentToken += 1;
+  $("#document-frame").removeAttribute("src");
+  $("#document-image").removeAttribute("src");
 }
 
 function plannedProcessingStages(job) {
@@ -773,7 +792,10 @@ function printedLineAmounts(line) {
 function addLine(line = {}, disabled = false) {
   const row = make("tr");
   const identity = make("td");
-  identity.append(lineInput("sku", line.sku, "Supplier SKU"), lineInput("gtin", line.gtin, "GTIN or barcode"));
+  identity.append(lineInput("item_id", line.item_id, "Internal item · confirmed reference"), lineInput("sku", line.sku, "Supplier SKU"), lineInput("gtin", line.gtin, "GTIN or barcode"));
+  identity.querySelector('[name="item_id"]').placeholder = "Internal item · reference";
+  identity.querySelector('[name="sku"]').placeholder = "Supplier SKU";
+  identity.querySelector('[name="gtin"]').placeholder = "Barcode / GTIN";
   const description = make("td");
   description.append(lineInput("description", line.description, "Description"));
   const find = make("button", "line-lookup", "Find item by description");
@@ -844,7 +866,9 @@ function renderTrace(job) {
       const methodNames = {
         template: "Supplier template",
         layout: "Layout conversion",
-        docling_table: "Docling table conversion",
+        docling_table: "Table and word geometry conversion",
+        docling_table_higher_resolution: "Table conversion after a higher-resolution read",
+        layout_higher_resolution: "Layout conversion after a higher-resolution read",
         text_only: "Text only",
       };
       const method = entry.method ? ` · ${methodNames[entry.method] || humanize(entry.method)}` : "";
@@ -859,13 +883,18 @@ function renderTrace(job) {
       if (Number.isFinite(lineItems)) evidence.push(`${lineItems.toLocaleString()} item${lineItems === 1 ? "" : "s"}`);
       else if (entry.status === "text_only" || entry.method === "text_only") evidence.push("0 items");
       const evidenceText = evidence.length ? ` · ${evidence.join(" · ")}` : "";
-      const completeness = entry.completeness === undefined ? "" : ` · ${Math.round(Number(entry.completeness) * 100)}% read coverage`;
+      const completeness = entry.completeness === undefined ? "" : ` · ${Math.round(Number(entry.completeness) * 100)}% field completeness`;
       const reason = entry.reason ? ` — ${entry.reason}` : "";
-      traceList.append(make("li", "", `${engine}${model}: ${status}${method}${timing}${evidenceText}${completeness}${reason}`));
+      const recovery = entry.recovery?.attempted
+        ? entry.recovery.selected_pass === "higher_resolution" ? " · Recovery read retained after consistency checks" : " · Original read retained; recovery did not safely improve it"
+        : "";
+      traceList.append(make("li", "", `${engine}${model}: ${status}${method}${timing}${evidenceText}${completeness}${recovery}${reason}`));
     }
   });
   const chosen = trace.findLast?.((entry) => entry && typeof entry === "object" && entry.status === "extracted") || trace.find((entry) => entry && typeof entry === "object" && entry.status === "extracted");
-  $("#trace-summary").textContent = chosen ? `Chosen: ${humanize(chosen.engine)}${chosen.model ? ` · ${chosen.model}` : ""}` : "How this result was produced";
+  $("#trace-summary").textContent = job.selected_engine && job.selected_engine !== "none"
+    ? `Chosen: ${humanize(job.selected_engine)}`
+    : chosen ? `Fields returned by ${humanize(chosen.engine)}${chosen.model ? ` · ${chosen.model}` : ""}` : "How this result was produced";
 
   const provenance = $("#provenance-list");
   provenance.replaceChildren();
@@ -902,7 +931,7 @@ function collectInvoice() {
       return raw === "" ? null : raw;
     };
     const page = value("page");
-    return { sku: value("sku"), gtin: value("gtin"), description: value("description"), qty: value("qty"), uom: value("uom"), price: value("price"), net_amount: value("net_amount"), tax_amount: value("tax_amount"), evidence: value("evidence"), page: page === null ? null : Number(page) };
+    return { item_id: value("item_id"), sku: value("sku"), gtin: value("gtin"), description: value("description"), qty: value("qty"), uom: value("uom"), price: value("price"), net_amount: value("net_amount"), tax_amount: value("tax_amount"), evidence: value("evidence"), page: page === null ? null : Number(page) };
   });
   return invoice;
 }
@@ -972,6 +1001,42 @@ function openBatchReview() {
   }
   $("#batch-review-count").textContent = `${jobs.length} invoice${jobs.length === 1 ? "" : "s"}`;
   $("#batch-review-dialog").showModal();
+}
+
+function openDeleteInvoices() {
+  const jobs = [...app.selectedForBatch].map((id) => app.state.jobs.find((job) => job.id === id)).filter(isSelectableInvoice);
+  if (!jobs.length) return;
+  app.pendingDelete = jobs.map((job) => ({ id: job.id, revision: job.revision }));
+  $("#delete-invoice-count").textContent = `${jobs.length} invoice${jobs.length === 1 ? "" : "s"}`;
+  $("#delete-invoice-list").replaceChildren(...jobs.map((job) => make("li", "", job.filename)));
+  $("#delete-invoice-acknowledge").checked = false;
+  $("#confirm-delete-invoices").disabled = true;
+  $("#delete-invoice-error").hidden = true;
+  $("#delete-invoices-dialog").showModal();
+}
+
+async function deleteInvoices() {
+  if (!$("#delete-invoice-acknowledge").checked || !app.pendingDelete?.length) return;
+  const button = $("#confirm-delete-invoices");
+  button.disabled = true;
+  button.textContent = "Deleting…";
+  try {
+    const result = await api("/api/jobs/delete", { method: "POST", body: { jobs: app.pendingDelete, confirm_permanent: true } });
+    const ids = new Set(result.deleted_ids);
+    app.state.jobs = app.state.jobs.filter((job) => !ids.has(job.id));
+    ids.forEach((id) => app.selectedForBatch.delete(id));
+    if (ids.has(app.selectedJobId)) clearSelectedJob();
+    app.pendingDelete = null;
+    $("#delete-invoices-dialog").close();
+    renderJobs();
+    notify(`${result.count} invoice${result.count === 1 ? "" : "s"} permanently removed from this workspace.`, "success", 7000);
+  } catch (error) {
+    $("#delete-invoice-error").textContent = error.message;
+    $("#delete-invoice-error").hidden = false;
+  } finally {
+    button.textContent = "Delete permanently";
+    button.disabled = !$("#delete-invoice-acknowledge").checked;
+  }
 }
 
 async function downloadBatchReview() {
@@ -1169,6 +1234,73 @@ function applyManagedVertexModel(prefix) {
   $(`#${prefix}-model`).value = app.managedVertexModel;
 }
 
+function setupModelPicker(prefix) {
+  const input = $(`#${prefix}-model`);
+  const select = make("select", "model-choices");
+  select.id = `${prefix}-model-choices`;
+  select.setAttribute("aria-label", `${prefix === "retry" ? "Reprocess" : humanize(prefix)} available models`);
+  select.append(new Option("Models load when you choose a connected provider", ""));
+  input.before(select);
+  input.placeholder = "Model ID · optional manual entry";
+  const status = make("small", "model-load-status");
+  status.id = `${prefix}-model-status`;
+  status.setAttribute("role", "status");
+  input.after(status);
+  select.addEventListener("change", () => {
+    if (select.value) input.value = select.value;
+    if (prefix === "upload") updateUploadReadiness();
+  });
+}
+
+async function loadProviderModels(prefix, { providerChanged = false, force = false } = {}) {
+  const provider = $(`#${prefix}-provider`).value;
+  const input = $(`#${prefix}-model`);
+  const select = $(`#${prefix}-model-choices`);
+  const status = $(`#${prefix}-model-status`);
+  const token = (app.modelLoadTokens[prefix] || 0) + 1;
+  app.modelLoadTokens[prefix] = token;
+  if (providerChanged) input.value = "";
+  select.replaceChildren(new Option("Loading models…", ""));
+  select.disabled = true;
+  if (!app.state?.connections?.[provider]) {
+    select.replaceChildren(new Option("Connect this provider first", ""));
+    status.textContent = `${humanize(provider)} is not connected. Open Engines & AI to connect it.`;
+    if (prefix === "upload") updateUploadReadiness();
+    return;
+  }
+  status.textContent = `Loading models from ${humanize(provider)}…`;
+  try {
+    let cached = app.providerModels[provider];
+    if (force || !cached || Date.now() - cached.at > 300000) {
+      cached = { at: Date.now(), promise: api(`/api/connections/${encodeURIComponent(provider)}/models`) };
+      app.providerModels[provider] = cached;
+    }
+    const result = await cached.promise;
+    if (app.modelLoadTokens[prefix] !== token || $(`#${prefix}-provider`).value !== provider) return;
+    const models = result.models || [];
+    app.providerVerified[provider] = true;
+    renderConnections();
+    select.replaceChildren(new Option(models.length ? "Choose a model" : "No models returned", ""));
+    models.forEach((model) => select.add(new Option(model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id, model.id)));
+    if (!input.value && models.length) {
+      const saved = app.state.settings?.provider === provider ? app.state.settings.model : "";
+      input.value = models.find((model) => model.id === saved)?.id || models[0].id;
+    }
+    select.value = models.some((model) => model.id === input.value) ? input.value : "";
+    select.disabled = !models.length;
+    status.textContent = models.length ? `${models.length} models available. Check the model before confirming processing.` : "The provider returned no model choices. Check account access or enter a supported model ID.";
+  } catch (error) {
+    delete app.providerModels[provider];
+    app.providerVerified[provider] = false;
+    renderConnections();
+    if (app.modelLoadTokens[prefix] !== token) return;
+    select.replaceChildren(new Option("Models could not be loaded", ""));
+    status.textContent = error.message;
+  } finally {
+    if (prefix === "upload") updateUploadReadiness();
+  }
+}
+
 function updateUploadReadiness() {
   const needsAI = $("#upload-ai-fallback").checked || $("#upload-engine").value === "ai";
   const provider = $("#upload-provider").value;
@@ -1180,7 +1312,7 @@ function updateUploadReadiness() {
     prompt.textContent = !connection ? `${humanize(provider)} is not connected. Local extraction can still run; if it cannot finish, the invoice will wait for a connection or manual review.` : "No model is selected. Local extraction can still run; choose a model to make AI fallback available.";
     prompt.hidden = false;
   } else prompt.hidden = true;
-  $("#start-upload").disabled = !app.uploadFiles.length;
+  $("#start-upload").disabled = !app.uploadFiles.length || ($("#upload-engine").value === "ai" && !providerReady(provider, model));
 }
 
 function openUpload() {
@@ -1193,6 +1325,7 @@ function openUpload() {
   $("#upload-progress").hidden = true;
   updateUploadReadiness();
   $("#upload-dialog").showModal();
+  loadProviderModels("upload");
 }
 
 function processingOptions(prefix = "upload") {
@@ -1403,7 +1536,12 @@ function beginLineReferenceLookup(mode, row) {
     notify("Enter a product description, item code or barcode before searching.", "error");
     return;
   }
-  app.referenceLookupTarget = { mode, row };
+  app.referenceLookupTarget = { mode, row, context: {
+    price: value(isDraft ? "Unit Cost" : "price"), qty: value(isDraft ? "Quantity" : "qty"),
+    uom: isDraft ? "" : value("uom"),
+    currency: $('#header-fields [name="currency"]')?.value.trim() || app.currentJob?.invoice?.currency || "",
+    invoice_po: $('#header-fields [name="po"]')?.value.trim() || app.currentJob?.invoice?.po || "",
+  } };
   if (isDraft) $("#manual-draft-dialog").close();
   navigate("references");
   $("#reference-lookup-kind").value = "item";
@@ -1443,6 +1581,7 @@ function candidateSelect(record, field, labelText, sourceColumn = "") {
 }
 
 function applyReferenceCandidate(action) {
+  if (!$(".candidate-confirm", action)?.checked) return;
   const target = app.referenceLookupTarget;
   if (!target?.row?.isConnected) {
     notify("That invoice line is no longer available. Open it and search again.", "error");
@@ -1451,11 +1590,15 @@ function applyReferenceCandidate(action) {
   }
   const selected = Object.fromEntries($$("select[data-candidate-field]", action).map((select) => [select.dataset.candidateField, select.value]));
   if (!selected.sku && !selected.internal_item && !selected.gtin && !selected.uom) return;
-  const names = target.mode === "draft" ? { internal_item: "Item", gtin: "UPC" } : { sku: "sku", gtin: "gtin", uom: "uom" };
+  const names = target.mode === "draft" ? { internal_item: "Item", gtin: "UPC" } : { internal_item: "item_id", sku: "sku", gtin: "gtin", uom: "uom", description: "description" };
   Object.entries(names).forEach(([field, inputName]) => {
     if (selected[field]) $(`[name="${inputName}"]`, target.row).value = selected[field];
   });
   const mode = target.mode;
+  const evidence = $('[name="evidence"]', target.row);
+  if (mode === "review" && evidence && action.dataset.sourceReference) {
+    evidence.value = `${evidence.value}\nHuman-confirmed reference: ${action.dataset.sourceReference}`.trim();
+  }
   if (mode === "review") markReviewDirty();
   app.referenceLookupTarget = null;
   navigate("workspace");
@@ -1466,6 +1609,7 @@ function applyReferenceCandidate(action) {
 function referenceCandidateAction(record) {
   if (!app.referenceLookupTarget || record.kind !== "item" || !record.candidate_fields) return null;
   const action = make("div", "reference-candidate-action");
+  action.dataset.sourceReference = `${record.source_hash} / ${record.source_sheet} / row ${record.source_row}`;
   const contextValues = [
     ["description", "Description"], ["pack", "Pack"], ["supplier", "Supplier"], ["site", "Site"], ["po", "PO"],
   ].flatMap(([field, label]) => {
@@ -1473,17 +1617,24 @@ function referenceCandidateAction(record) {
     return values.length ? [`${label}: ${values.join(" / ")}`] : [];
   });
   if (contextValues.length) action.append(make("p", "reference-candidate-context", contextValues.join(" · ")));
-  if (app.referenceLookupTarget.mode === "draft") action.append(candidateSelect(record, "internal_item", "Internal item", "ITEM_PARENT"));
-  else action.append(candidateSelect(record, "sku", "Supplier SKU"));
+  action.append(candidateSelect(record, "internal_item", "Internal item", "ITEM_PARENT"));
+  if (app.referenceLookupTarget.mode !== "draft") action.append(candidateSelect(record, "sku", "Supplier SKU"));
   action.append(candidateSelect(record, "gtin", "Barcode / GTIN"));
-  if (app.referenceLookupTarget.mode === "review") action.append(candidateSelect(record, "uom", "Unit of measure"));
+  if (app.referenceLookupTarget.mode === "review") {
+    action.append(candidateSelect(record, "uom", "Unit of measure"));
+    action.append(candidateSelect(record, "description", "Master product name", record.data?.ITEM_DESC ? "ITEM_DESC" : ""));
+  }
+  const confirmation = make("label", "candidate-confirm-label");
+  const confirmed = make("input", "candidate-confirm"); confirmed.type = "checkbox";
+  confirmation.append(confirmed, make("span", "", "I confirm this is the correct product and pack. Keep the invoice price and quantity unchanged."));
+  action.append(confirmation);
   const buttons = make("div", "reference-candidate-buttons");
   const use = make("button", "button button-secondary", "Use selected item");
   use.type = "button";
   const findPO = make("button", "button button-quiet", "Find PO/GRN rows");
   findPO.type = "button";
   const update = () => {
-    use.disabled = !$("select[data-candidate-field]:not(:disabled)", action) || !$$('select[data-candidate-field]', action).some((select) => select.value);
+    use.disabled = !confirmed.checked || !$("select[data-candidate-field]:not(:disabled)", action) || !$$('select[data-candidate-field]', action).some((select) => select.value);
     findPO.disabled = !$('[data-candidate-field="gtin"]', action)?.value;
   };
   action.addEventListener("change", update);
@@ -1521,6 +1672,14 @@ function renderReferenceRecord(record) {
   details.append(summary);
 
   const body = make("div", "reference-result-body");
+  if (match.name_similarity !== undefined) body.append(make("p", "reference-candidate-context", `Product-name similarity: ${Math.round(match.name_similarity * 100)}%. This is a search clue, not an approval or accuracy measurement.`));
+  for (const clue of match.clues || []) {
+    const facts = [`PO ${clue.po || "—"}, source row ${clue.source_row}`, `Price ${clue.unit_price ?? "—"} ${clue.currency || ""}`, `Ordered ${clue.ordered_qty ?? "—"}; received ${clue.received_qty ?? "—"}`];
+    if (clue.price_similarity !== undefined) facts.push(`Price similarity ${Math.round(clue.price_similarity * 100)}%`);
+    if (clue.quantity_similarity !== undefined) facts.push(`Raw quantity similarity ${Math.round(clue.quantity_similarity * 100)}%`);
+    body.append(make("p", "reference-candidate-context", facts.join(" · ")));
+    if (clue.price_note || clue.quantity_note) body.append(make("p", "reference-candidate-context", [clue.price_note, clue.quantity_note].filter(Boolean).join(". ")));
+  }
   const candidateAction = referenceCandidateAction(record);
   if (candidateAction) body.append(candidateAction);
   const flags = Array.isArray(record.flags) ? record.flags : [];
@@ -1591,7 +1750,8 @@ async function searchReferenceLookup({ append = false } = {}) {
     const params = new URLSearchParams({ kind, q: query, limit: "25" });
     Object.entries(filters).forEach(([name, value]) => { if (value) params.set(name, value); });
     if (append && app.referenceLookupCursor) params.set("cursor", app.referenceLookupCursor);
-    const response = await api(`/api/reference-lookup/search?${params}`);
+    if (kind === "item") Object.entries(app.referenceLookupTarget?.context || {}).forEach(([name, value]) => { if (value) params.set(name, value); });
+    const response = await api(`/api/reference-lookup/${kind === "item" ? "products" : "search"}?${params}`);
     const results = $("#reference-lookup-results");
     if (!append) results.replaceChildren();
     const records = Array.isArray(response.records) ? response.records : [];
@@ -1639,9 +1799,9 @@ function renderEngines() {
   const list = $("#engine-list");
   list.replaceChildren();
   const engineHelp = {
-    invoice2data: "Reads native PDF or text and applies a configured supplier template when one matches.",
+    invoice2data: "Reads native PDF/text and supplier templates. Scanned PDFs and images use PaddleOCR locally as its input reader; the trace shows both components.",
     paddleocr: "Uses PaddleOCR for scanned text, then layout rules convert recognized labels and rows into invoice fields.",
-    docling: "Uses Docling document structure and tables, then converts recognized table cells into invoice fields.",
+    docling: "Converts Docling layout and table cells into invoice fields, with RapidOCR / Paddle for scanned pages. Difficult scans may still need the direct PaddleOCR reader or permitted AI fallback.",
   };
   const localQualityTarget = "Quality target: at least 90% source-correct available fields, 95% expected and 100% ideal. This target is not a measured result; test each reader separately, including line recall.";
   (app.state?.engines || []).forEach((engine) => {
@@ -1664,8 +1824,10 @@ function renderConnections() {
   Object.entries(connections).forEach(([provider, connected]) => {
     const badge = $(`[data-connection-state="${provider}"]`);
     if (!badge) return;
-    badge.textContent = connected ? "Connected" : "Not connected";
-    badge.classList.toggle("connected", connected);
+    const apiProvider = ["openai", "anthropic"].includes(provider);
+    badge.textContent = !connected ? "Not connected" : !apiProvider ? "Connected"
+      : app.providerVerified[provider] === true ? "Verified" : app.providerVerified[provider] === false ? "Check connection" : "Key saved";
+    badge.classList.toggle("connected", connected && (!apiProvider || app.providerVerified[provider] === true));
   });
   const account = $("#chatgpt-account");
   account.replaceChildren(new Option("No connected accounts", ""));
@@ -1738,18 +1900,12 @@ async function saveProviderSettings(event) {
 }
 
 async function fetchModels() {
-  const provider = $("#settings-provider").value;
   const button = $("#fetch-models");
   button.disabled = true;
   button.textContent = "Loading…";
   try {
-    const result = await api(`/api/connections/${encodeURIComponent(provider)}/models`);
-    const list = $("#model-list");
-    list.replaceChildren(new Option("Select a model", ""));
-    (result.models || []).forEach((model) => list.add(new Option(model.name || model.id, model.id)));
-    list.hidden = false;
-    notify(result.models?.length ? "Available models loaded." : "The connection returned no model choices.", result.models?.length ? "success" : "error");
-  } catch (error) { notify(error.message, "error", 7000); }
+    await loadProviderModels("settings", { force: true });
+  }
   finally { button.disabled = false; button.textContent = "Load available models"; }
 }
 
@@ -1760,7 +1916,10 @@ async function saveApiKey(form) {
   input.value = "";
   try {
     await api(`/api/connections/${provider}`, { method: "POST", body: { api_key: apiKey } });
+    delete app.providerModels[provider];
+    delete app.providerVerified[provider];
     await loadState();
+    if ($("#settings-provider").value === provider) loadProviderModels("settings", { force: true });
     notify(`${provider === "openai" ? "OpenAI" : "Anthropic"} API connection saved on the server.`);
   } catch (error) { notify(error.message, "error", 7000); }
 }
@@ -1768,6 +1927,8 @@ async function saveApiKey(form) {
 async function removeApiConnection(provider) {
   try {
     await api(`/api/connections/${provider}`, { method: "DELETE" });
+    delete app.providerModels[provider];
+    delete app.providerVerified[provider];
     await loadState();
     notify(`${provider === "openai" ? "OpenAI" : "Anthropic"} API connection removed.`);
   } catch (error) { notify(error.message, "error"); }
@@ -1870,6 +2031,11 @@ async function loadAudit() {
 async function submitRetry(event) {
   event.preventDefault();
   if (!app.currentJob) return;
+  const options = processingOptions("retry");
+  if (options.engine === "ai" && !providerReady(options.provider, options.model)) {
+    $("#retry-model-status").textContent = "Connect this provider and select a model before running AI extraction.";
+    return;
+  }
   try {
     await requestPreflight({
       kind: "retry",
@@ -1889,6 +2055,7 @@ async function runRetry(preflightToken, options) {
 }
 
 function bindEvents() {
+  ["settings", "upload", "retry"].forEach(setupModelPicker);
   $$('[data-nav]').forEach((control) => control.addEventListener("click", (event) => { event.preventDefault(); navigate(control.dataset.nav); }));
   $$('[data-open-upload]').forEach((button) => button.addEventListener("click", openUpload));
   $("#job-search").addEventListener("input", renderJobs);
@@ -1901,6 +2068,17 @@ function bindEvents() {
   $("#batch-review").addEventListener("click", openBatchReview);
   $("#confirm-batch-review").addEventListener("click", downloadBatchReview);
   $("#batch-export").addEventListener("click", exportBatch);
+  $("#batch-delete").addEventListener("click", openDeleteInvoices);
+  $("#confirm-delete-invoices").addEventListener("click", deleteInvoices);
+  $("#delete-invoice-acknowledge").addEventListener("change", () => {
+    $("#confirm-delete-invoices").disabled = !$("#delete-invoice-acknowledge").checked;
+  });
+  $("#select-all-finished").addEventListener("click", () => {
+    const finished = app.state.jobs.filter(isSelectableInvoice);
+    const all = finished.length && finished.every((job) => app.selectedForBatch.has(job.id));
+    app.selectedForBatch = all ? new Set() : new Set(finished.map((job) => job.id));
+    renderJobs();
+  });
   $("#select-processed").addEventListener("click", () => {
     const processed = app.state.jobs.filter(isBatchReviewable);
     const all = processed.length && app.selectedForBatch.size === processed.length
@@ -1923,7 +2101,7 @@ function bindEvents() {
   ["dragleave", "drop"].forEach((name) => dropZone.addEventListener(name, (event) => { event.preventDefault(); dropZone.classList.remove("dragover"); }));
   dropZone.addEventListener("drop", (event) => queueFiles(event.dataTransfer.files));
   ["#upload-ai-fallback", "#upload-engine", "#upload-provider", "#upload-model"].forEach((selector) => $(selector).addEventListener("input", updateUploadReadiness));
-  $("#upload-provider").addEventListener("change", () => { applyManagedVertexModel("upload"); updateUploadReadiness(); });
+  $("#upload-provider").addEventListener("change", () => loadProviderModels("upload", { providerChanged: true }));
   $("#upload-form").addEventListener("submit", beginUploadPreflight);
 
   $("#retry-job").addEventListener("click", () => {
@@ -1935,6 +2113,7 @@ function bindEvents() {
     $("#retry-provider").value = options.provider || "openai";
     $("#retry-model").value = options.model || "";
     $("#retry-dialog").showModal();
+    loadProviderModels("retry");
   });
   $("#retry-form").addEventListener("submit", submitRetry);
   $("#preflight-form").addEventListener("submit", confirmPreflight);
@@ -1978,8 +2157,8 @@ function bindEvents() {
   });
   $("#policy-form").addEventListener("submit", savePolicy);
   $("#provider-settings-form").addEventListener("submit", saveProviderSettings);
-  $("#settings-provider").addEventListener("change", () => applyManagedVertexModel("settings"));
-  $("#retry-provider").addEventListener("change", () => applyManagedVertexModel("retry"));
+  $("#settings-provider").addEventListener("change", () => loadProviderModels("settings", { providerChanged: true }));
+  $("#retry-provider").addEventListener("change", () => loadProviderModels("retry", { providerChanged: true }));
   $("#fetch-models").addEventListener("click", fetchModels);
   $("#model-list").addEventListener("change", (event) => { if (event.target.value) $("#settings-model").value = event.target.value; });
   $$(".api-key-form").forEach((form) => {

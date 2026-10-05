@@ -306,13 +306,16 @@ try {
   const firstReviewLine = page.locator("#line-items tr").first();
   const lookupDescription = await firstReviewLine.locator('[name="description"]').inputValue();
   const originalLineIdentity = {
+    item_id: await firstReviewLine.locator('[name="item_id"]').inputValue(),
     sku: await firstReviewLine.locator('[name="sku"]').inputValue(),
     gtin: await firstReviewLine.locator('[name="gtin"]').inputValue(),
     uom: await firstReviewLine.locator('[name="uom"]').inputValue(),
+    price: await firstReviewLine.locator('[name="price"]').inputValue(),
+    qty: await firstReviewLine.locator('[name="qty"]').inputValue(),
   };
   const currentInvoicePO = await page.locator('#header-fields [name="po"]').inputValue();
   assert(lookupDescription.length >= 2, "Demo line has no description for item lookup");
-  const lookupRoute = /\/api\/reference-lookup\/search\?/;
+  const lookupRoute = /\/api\/reference-lookup\/(search|products)\?/;
   const lookupRequests = [];
   await page.route(lookupRoute, async (route) => {
     const requestURL = new URL(route.request().url());
@@ -363,12 +366,19 @@ try {
   assert.equal(await candidate.locator('[data-candidate-field="sku"]').inputValue(), "ITEM-LOOKUP");
   assert.equal(await candidate.locator('[data-candidate-field="gtin"]').inputValue(), "", "Ambiguous GTIN was chosen automatically");
   await candidate.locator('[data-candidate-field="gtin"]').selectOption("629000000002");
+  assert(await candidate.getByRole("button", { name: "Use selected item" }).isDisabled(), "Candidate applied without human confirmation");
+  await candidate.locator('.candidate-confirm').check();
   await candidate.getByRole("button", { name: "Use selected item" }).click();
   await page.locator("#workspace-section:not([hidden])").waitFor({ state: "visible", timeout });
   assert.equal(await firstReviewLine.locator('[name="sku"]').inputValue(), "ITEM-LOOKUP");
+  assert.equal(await firstReviewLine.locator('[name="item_id"]').inputValue(), "INTERNAL-100");
   assert.equal(await firstReviewLine.locator('[name="gtin"]').inputValue(), "629000000002");
   assert.equal(await firstReviewLine.locator('[name="uom"]').inputValue(), "EA");
+  assert.equal(await firstReviewLine.locator('[name="price"]').inputValue(), originalLineIdentity.price);
+  assert.equal(await firstReviewLine.locator('[name="qty"]').inputValue(), originalLineIdentity.qty);
+  assert((await firstReviewLine.locator('[name="evidence"]').inputValue()).includes("Human-confirmed reference:"));
   await firstReviewLine.locator('[name="sku"]').fill(originalLineIdentity.sku);
+  await firstReviewLine.locator('[name="item_id"]').fill(originalLineIdentity.item_id);
   await firstReviewLine.locator('[name="gtin"]').fill(originalLineIdentity.gtin);
   await firstReviewLine.locator('[name="uom"]').fill(originalLineIdentity.uom);
 
@@ -405,6 +415,7 @@ try {
   assert.equal(await draftCandidate.locator('[data-candidate-field="internal_item"]').inputValue(), "INTERNAL-100");
   assert.equal(await draftCandidate.locator('[data-candidate-field="sku"]').count(), 0, "Draft offered supplier SKU as the internal Item value");
   await draftCandidate.locator('[data-candidate-field="gtin"]').selectOption("629000000002");
+  await draftCandidate.locator('.candidate-confirm').check();
   await draftCandidate.getByRole("button", { name: "Use selected item" }).click();
   await draftDialog.waitFor({ state: "visible", timeout });
   assert.equal(await draftDialog.locator('#manual-draft-lines tr').first().locator('[name="Item"]').inputValue(), "INTERNAL-100");
@@ -828,8 +839,12 @@ print(json.dumps({
     provenance: [],
   }));
   const traceEvidence = await page.locator("#trace-list li").allTextContents();
-  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s · 1,222 text characters · 0 fields · 0 items · 0% read coverage/);
-  assert.match(traceEvidence[1], /Docling: Extracted · Docling table conversion · 7\.25 s · 31,717 text characters · 6 fields · 5 items · 80% read coverage/);
+  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s · 1,222 text characters · 0 fields · 0 items · 0% field completeness/);
+  assert.match(traceEvidence[1], /Docling: Extracted · Table and word geometry conversion · 7\.25 s · 31,717 text characters · 6 fields · 5 items · 80% field completeness/);
+  await page.evaluate(() => renderTrace({selected_engine: "paddleocr", trace: [
+    {engine: "paddleocr", status: "extracted"}, {engine: "docling", status: "extracted"},
+  ]}));
+  assert.equal(await page.locator("#trace-summary").textContent(), "Chosen: PaddleOCR", "Trace must name the retained reader, not simply the last attempt");
 
   // Exercise a real password input event with a unique marker, then prove that
   // neither browser storage area contains the credential value.

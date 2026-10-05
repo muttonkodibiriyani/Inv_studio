@@ -23,6 +23,15 @@ def test_review_copy_preserves_printed_values_and_leaves_unknown_codes_blank():
     assert 'EXTRACTION_REVIEW_ONLY' in book['Header']['M2'].value
 
 
+def test_confirmed_internal_item_is_written_without_substituting_supplier_sku():
+    invoice=Invoice(number='SYN-REF',lines=[{'item_id':'00042','sku':'VENDOR-9','qty':'2','price':'5'}])
+    book=load_workbook(io.BytesIO(extraction_workbook(invoice,'synthetic.pdf',3)))
+    assert book['Details']['B2'].value=='00042'
+    assert book['Details']['B2'].data_type=='s'
+    assert 'VENDOR-9' in book['Details']['B2'].comment.text
+    assert 'business validation is still required' in book['Details']['B2'].comment.text
+
+
 def test_review_copy_download_requires_ack_and_never_approves_or_changes_job(tmp_path,monkeypatch):
     monkeypatch.setenv('INV_STUDIO_DATA',str(tmp_path/'module-default'))
     from app.main import create_app

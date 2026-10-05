@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "build:auth": "esbuild app/static/firebase-auth-entry.js --bundle --minify --platform=browser --format=iife --target=es2020 --outfile=app/static/firebase-auth.bundle.js",
-    "test:browser": "node tests/browser.mjs"
+    "test:browser": "node tests/browser.mjs && node tests/provider_controls.browser.mjs"
   },
   "dependencies": {
     "@firebase/app": "^0.16.2",

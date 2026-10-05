@@ -1,10 +1,14 @@
 """Isolated OCR process. No API credentials are passed to this worker."""
 import argparse
+import gc
 import json
 import math
+import multiprocessing
 import os
 import tempfile
+import time
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
@@ -17,6 +21,11 @@ PADDLE_RECOGNITION_MODELS = {
     "de": "latin_PP-OCRv5_mobile_rec",
 }
 PADDLE_MAX_SIDE = 1600
+PADDLE_RECOVERY_MAX_SIDE = 2400
+PADDLE_RECOVERY_RENDER_SCALE = 3
+PADDLE_RECOVERY_MAX_PAGES = 2
+PADDLE_RECOVERY_BASELINE_LIMIT_SECONDS = 100
+PADDLE_WORKER_BUDGET_SECONDS = 240
 
 
 def paddle_model_config(language):
@@ -85,11 +94,14 @@ def spatial_text(boxes):
     return "\n".join(output)
 
 
-def paddle_reader(language):
+def paddle_reader(language, max_side=None):
     # Cached official model names skip mutable defaults and network discovery.
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
     from paddleocr import PaddleOCR
-    return PaddleOCR(**paddle_model_config(language),use_doc_orientation_classify=False,
+    config=paddle_model_config(language)
+    if max_side is not None:
+        config["text_det_limit_side_len"]=max_side
+    return PaddleOCR(**config,use_doc_orientation_classify=False,
                      use_doc_unwarping=False,use_textline_orientation=False,
                      text_recognition_batch_size=16,device="cpu",enable_mkldnn=False,cpu_threads=2)
 
@@ -108,7 +120,7 @@ def template_extract(text, templates):
     result=extract_data("ocr-text", templates=templates, input_module=TextReader, ai_fallback=False)
     if not result: return None
     fields={"invoice_number":"number","amount":"net"}
-    allowed={"number","supplier_name","seller","site","buyer","po","location","date","currency","origin","market","taxCode","net","tax","lines"}
+    allowed={"number","supplier_name","buyer_name","seller","site","buyer","po","location","date","currency","origin","market","taxCode","net","tax","lines"}
     out={fields.get(k,k):v for k,v in result.items() if fields.get(k,k) in allowed}
     if isinstance(out.get("date"),(date,datetime)):out["date"]=out["date"].strftime("%Y-%m-%d")
     from .models import Line
@@ -125,15 +137,15 @@ def structured_extract(text, boxes, templates, tables=None):
     parsed = template_extract(text, templates) if text else None
     if parsed is not None:
         return parsed, "template"
-    if tables:
+    if tables or boxes:
         from .docling_extract import extract_invoice_from_tables
-        candidate=extract_invoice_from_tables(text,tables,boxes=boxes)
+        candidate=extract_invoice_from_tables(text,tables or [],boxes=boxes)
         if candidate is not None:
             # Complement table rows only with explicit header facts from this
             # same reader's text/geometry. Never borrow a different engine's rows.
             from .layout_extract import extract_invoice
             header=extract_invoice(text,boxes) or {}
-            fields=("number","po","date","currency","net","tax","supplier_name")
+            fields=("number","po","date","currency","net","tax","supplier_name","buyer_name")
             compatible=all(candidate.get(key) in (None,"") or header.get(key) in (None,"")
                            or str(candidate[key])==str(header[key]) for key in ("number","po"))
             if compatible:
@@ -182,18 +194,18 @@ def digital(path, with_tables=False):
     return ("\n".join(pages),boxes,tables) if with_tables else ("\n".join(pages),boxes)
 
 
-def paddle(path,language):
+def paddle(path,language,*,render_scale=2,max_side=None):
     import pypdfium2 as pdfium
     import numpy as np
     from PIL import Image, ImageOps, ImageSequence
-    reader=paddle_reader(language)
+    reader=paddle_reader(language,max_side=max_side)
     boxes=[];line_boxes=[]
     with tempfile.TemporaryDirectory() as temp:
         pages=[]
         if path.suffix.lower()==".pdf":
             doc=pdfium.PdfDocument(path)
             for n,page in enumerate(doc):
-                image=page.render(scale=2).to_pil().convert("RGB")
+                image=page.render(scale=render_scale).to_pil().convert("RGB")
                 target=Path(temp)/f"{n}.png";image.save(target);pages.append(target)
             doc.close()
         else:
@@ -205,7 +217,8 @@ def paddle(path,language):
         for n,file in enumerate(pages,1):
             with Image.open(file) as original:
                 image=ImageOps.exif_transpose(original).convert("RGB")
-                image.thumbnail((2600,2600)); size=list(image.size)
+                image_limit=3600 if render_scale>2 else 2600
+                image.thumbnail((image_limit,image_limit)); size=list(image.size)
                 for result in reader.predict(np.array(image),return_word_box=True):
                     res=result.json
                     if isinstance(res,str):res=json.loads(res)
@@ -227,31 +240,249 @@ def paddle(path,language):
                         boxes.append(line_box)
     # Keep real text-line strings for templates; word geometry serves tables
     # without adding artificial spaces inside header labels or numeric fields.
-    return spatial_text(line_boxes),boxes
+    text=spatial_text(line_boxes)
+    # The optional recovery pass runs in a fresh child. Release the baseline
+    # reader before spawning it so both model graphs are not resident together.
+    del reader
+    gc.collect()
+    return text,boxes
+
+
+def _visible_decimal(value):
+    try:
+        parsed=Decimal(str(value).strip().replace(",",""))
+    except (InvalidOperation,ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def _same_visible_value(field,left,right):
+    if left in (None,"") or right in (None,""):
+        return left in (None,"") and right in (None,"")
+    if field in {"net","tax"}:
+        left_decimal=_visible_decimal(left);right_decimal=_visible_decimal(right)
+        return left_decimal is not None and left_decimal==right_decimal
+    if field in {"number","po"}:
+        normal=lambda value:"".join(char for char in str(value).casefold() if char.isalnum())
+    else:
+        normal=lambda value:" ".join(str(value).casefold().split())
+    return normal(left)==normal(right)
+
+
+def _missing_quantity_price(candidate):
+    return sum(
+        value in (None,"")
+        for line in (candidate or {}).get("lines",[])
+        for value in (line.get("qty"),line.get("price"))
+    )
+
+
+def _line_reconciliation(candidate):
+    result=[]
+    for line in (candidate or {}).get("lines",[]):
+        qty=_visible_decimal(line.get("qty"));price=_visible_decimal(line.get("price"))
+        printed=_visible_decimal(line.get("net_amount"))
+        result.append(None if None in (qty,price,printed) else qty*price==printed)
+    return result
+
+
+def paddle_recovery_criteria(baseline,alternate):
+    baseline_lines=(baseline or {}).get("lines",[])
+    alternate_lines=(alternate or {}).get("lines",[])
+    preserved_headers=all(
+        baseline.get(field) in (None,"")
+        or _same_visible_value(field,baseline.get(field),alternate.get(field))
+        for field in ("number","date","currency","po")
+    )
+    totals_equal=all(
+        _same_visible_value(field,baseline.get(field),alternate.get(field))
+        for field in ("net","tax")
+    )
+    baseline_reconciliation=_line_reconciliation(baseline)
+    alternate_reconciliation=_line_reconciliation(alternate)
+    reconciliation_no_worse=(
+        alternate_reconciliation.count(True)>=baseline_reconciliation.count(True)
+        and alternate_reconciliation.count(False)<=baseline_reconciliation.count(False)
+    )
+    criteria={
+        "row_count_not_lower":len(alternate_lines)>=len(baseline_lines),
+        "preserved_headers":preserved_headers,
+        "totals_equal":totals_equal,
+        "missing_qty_price_strictly_lower":(
+            _missing_quantity_price(alternate)<_missing_quantity_price(baseline)
+        ),
+        "line_net_reconciliation_no_worse":reconciliation_no_worse,
+    }
+    return criteria,all(criteria.values())
+
+
+def _pdf_page_count(path):
+    if path.suffix.lower()!=".pdf":return None
+    import pypdfium2 as pdfium
+    document=pdfium.PdfDocument(path)
+    try:return len(document)
+    finally:document.close()
+
+
+def _paddle_recovery_child(path,language,output):
+    """Run the optional expensive pass outside the baseline worker process."""
+    started=time.monotonic()
+    try:
+        text,boxes=paddle(
+            Path(path),language,render_scale=PADDLE_RECOVERY_RENDER_SCALE,
+            max_side=PADDLE_RECOVERY_MAX_SIDE,
+        )
+        payload={"status":"completed","seconds":time.monotonic()-started,
+                 "text":text,"boxes":boxes}
+    except Exception as error:
+        payload={"status":"failed","seconds":time.monotonic()-started,
+                 "error":type(error).__name__}
+    target=Path(output)
+    target.write_text(json.dumps(payload),encoding="utf-8")
+    target.chmod(0o600)
+
+
+def _run_paddle_recovery_pass(path,language,timeout):
+    """Return one optional OCR pass while enforcing a hard child deadline."""
+    with tempfile.TemporaryDirectory() as temp:
+        output=Path(temp)/"recovery.json"
+        context=multiprocessing.get_context("spawn")
+        process=context.Process(
+            target=_paddle_recovery_child,
+            args=(str(path),language,str(output)),
+            daemon=True,
+        )
+        started=time.monotonic();process.start();process.join(timeout)
+        elapsed=time.monotonic()-started
+        if process.is_alive():
+            process.terminate();process.join(5)
+            if process.is_alive():process.kill();process.join(2)
+            return {"status":"timed_out","seconds":elapsed}
+        if process.exitcode!=0 or not output.exists():
+            return {"status":"failed","seconds":elapsed}
+        try:return json.loads(output.read_text(encoding="utf-8"))
+        except (OSError,json.JSONDecodeError):
+            return {"status":"failed","seconds":elapsed}
+
+
+def maybe_recover_paddle(
+    path,language,templates,baseline_text,baseline_boxes,baseline_candidate,
+    baseline_method,baseline_seconds,worker_elapsed,
+):
+    """Try one higher-resolution pass and retain it only on strict improvement."""
+    missing=_missing_quantity_price(baseline_candidate)
+    lines=(baseline_candidate or {}).get("lines",[])
+    page_count=_pdf_page_count(path)
+    estimated_alternate=max(15.0,baseline_seconds*1.35)
+    remaining=max(0.0,PADDLE_WORKER_BUDGET_SECONDS-worker_elapsed)
+    eligibility={
+        "has_lines":bool(lines),
+        "missing_qty_or_price":missing>0,
+        "pdf_at_most_two_pages":page_count is not None and page_count<=PADDLE_RECOVERY_MAX_PAGES,
+        "baseline_within_time_limit":baseline_seconds<=PADDLE_RECOVERY_BASELINE_LIMIT_SECONDS,
+        "estimated_time_available":remaining>=estimated_alternate+20.0,
+    }
+    metadata={
+        "attempted":False,
+        "selected_pass":"baseline",
+        "baseline_seconds":round(baseline_seconds,3),
+        "alternate_seconds":None,
+        "eligibility":eligibility,
+        "criteria":None,
+    }
+    if not all(eligibility.values()):
+        return baseline_text,baseline_boxes,baseline_candidate,baseline_method,metadata
+
+    metadata["attempted"]=True
+    alternate=_run_paddle_recovery_pass(path,language,max(1.0,remaining-20.0))
+    metadata["alternate_status"]=alternate.get("status","failed")
+    metadata["alternate_seconds"]=round(float(alternate.get("seconds",0)),3)
+    if alternate.get("status")!="completed":
+        return baseline_text,baseline_boxes,baseline_candidate,baseline_method,metadata
+    alternate_text=alternate["text"];alternate_boxes=alternate["boxes"]
+    try:
+        alternate_candidate,alternate_method=structured_extract(
+            alternate_text,alternate_boxes,templates,[]
+        )
+    except Exception as parse_error:
+        metadata["criteria"]={"alternate_parse_succeeded":False}
+        metadata["alternate_parse_error"]=type(parse_error).__name__
+        return baseline_text,baseline_boxes,baseline_candidate,baseline_method,metadata
+    if alternate_candidate is None:
+        metadata["criteria"]={"alternate_parse_succeeded":False}
+        return baseline_text,baseline_boxes,baseline_candidate,baseline_method,metadata
+    criteria,accepted=paddle_recovery_criteria(baseline_candidate,alternate_candidate)
+    metadata["criteria"]={"alternate_parse_succeeded":True,**criteria}
+    if not accepted:
+        return baseline_text,baseline_boxes,baseline_candidate,baseline_method,metadata
+    metadata["selected_pass"]="higher_resolution"
+    return (
+        alternate_text,alternate_boxes,alternate_candidate,
+        f"{alternate_method}_higher_resolution",metadata,
+    )
 
 
 def docling(path,language="en"):
+    from types import SimpleNamespace
+
     from docling.document_converter import DocumentConverter, PdfFormatOption, ImageFormatOption
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+    from docling.datamodel.pipeline_options import (
+        OcrMode,
+        PdfPipelineOptions,
+        RapidOcrOptions,
+        TableFormerMode,
+    )
     from .docling_extract import document_payload
-    cache=Path.home()/".cache"/"inv-studio"/"rapidocr"
-    cache.mkdir(parents=True,exist_ok=True)
-    # Native PDFs already expose their text to Docling. Running OCR over that
-    # text duplicates words and makes table structure less reliable.
-    has_native_text=False
+    # Fully scanned documents need a full-page render for small invoice table
+    # text. Mixed PDFs still need OCR, but only where native PDF cells do not
+    # already cover a layout region. This avoids both the old all-or-nothing
+    # mixed-PDF decision and duplicate OCR on native pages.
+    native_pages=[]
     if path.suffix.lower()==".pdf":
         import pdfplumber
         with pdfplumber.open(path) as pdf:
-            has_native_text=any(len((page.extract_text() or "").strip())>=20 for page in pdf.pages)
-    options=PdfPipelineOptions(do_ocr=not has_native_text,do_table_structure=True,generate_parsed_pages=True)
-    options.ocr_options=RapidOcrOptions(backend="torch",lang=["ch" if language=="ch" else "iso:"+language],
-        rapidocr_params={"Global.model_root_dir":cache})
+            native_pages=[len((page.extract_text() or "").strip())>=20 for page in pdf.pages]
+    has_native_text=any(native_pages)
+    needs_ocr=path.suffix.lower()!=".pdf" or not native_pages or not all(native_pages)
+    ocr_mode=OcrMode.PDF_AWARE_LAYOUT_REGIONS if has_native_text else OcrMode.FULL_PAGE
+    options=PdfPipelineOptions(do_ocr=needs_ocr,do_table_structure=True,generate_parsed_pages=True)
+    options.table_structure_options.mode=TableFormerMode.ACCURATE
+    options.table_structure_options.do_cell_matching=True
+    # Paddle gives RapidOCR access to its current PP-OCRv6 English models in
+    # Docling 2.133. The former torch backend was limited to PP-OCRv4 here.
+    options.ocr_options=RapidOcrOptions(
+        backend="paddle",lang=["ch" if language=="ch" else "iso:"+language],
+        mode=ocr_mode,scale=3.0,model_size="small",
+    )
     converter=DocumentConverter(format_options={InputFormat.PDF:PdfFormatOption(pipeline_options=options),
         InputFormat.IMAGE:ImageFormatOption(pipeline_options=options)})
     result=converter.convert(path)
     doc=result.document
-    return document_payload(doc,result.pages)
+    # RapidOCR stores its measured detections in textline_cells. Docling's
+    # assembled document can merge many of those cells into a small number of
+    # text blocks, while document_payload intentionally reads word_cells for
+    # fine geometry. Present a non-mutating page view containing both native
+    # words and OCR cells so table extraction retains the reader's real boxes.
+    payload_pages=[]
+    for page in result.pages:
+        parsed=getattr(page,"parsed_page",None)
+        if parsed is None:
+            payload_pages.append(page)
+            continue
+        words=list(getattr(parsed,"word_cells",[]) or [])
+        seen={id(cell) for cell in words}
+        words.extend(cell for cell in (getattr(parsed,"textline_cells",[]) or [])
+                     if getattr(cell,"from_ocr",False) and id(cell) not in seen)
+        payload_pages.append(SimpleNamespace(
+            parsed_page=SimpleNamespace(word_cells=words),
+            size=getattr(page,"size",None),
+        ))
+    text,boxes,tables=document_payload(doc,payload_pages)
+    for box in boxes:
+        if box.get("from_ocr"):
+            box["geometry"]="ocr_cell"
+    return text,boxes,tables
 
 
 def main():
@@ -260,23 +491,35 @@ def main():
     p.add_argument("--templates",type=Path,action="append",default=[]);p.add_argument("--language",default="en")
     args=p.parse_args()
     try:
-        tables=[];parser_error=None
+        worker_started=time.monotonic();tables=[];parser_error=None;recovery=None
         if args.engine=="invoice2data":
             if args.file.suffix.lower()==".pdf":text,boxes,tables=digital(args.file,with_tables=True)
             else:text,boxes=digital(args.file)
-        elif args.engine=="paddleocr":text,boxes=paddle(args.file,args.language)
+        elif args.engine=="paddleocr":
+            baseline_started=time.monotonic()
+            text,boxes=paddle(args.file,args.language)
+            baseline_seconds=time.monotonic()-baseline_started
         else:text,boxes,tables=docling(args.file,args.language)
+        templates=templates_from(args.templates)
         if args.file.suffix.lower()==".json":
             from .models import Invoice
             parsed=Invoice.model_validate_json(text).model_dump(mode="json")
             extraction_method="template"
         else:
             try:
-                parsed,extraction_method=structured_extract(text,boxes,templates_from(args.templates),tables)
+                parsed,extraction_method=structured_extract(text,boxes,templates,tables)
             except Exception as parse_error:
                 parsed=None;extraction_method="text_only";parser_error=type(parse_error).__name__
-        args.output.write_text(json.dumps({"text":text[:150000],"boxes":boxes[:10000],
-            "invoice":parsed,"extraction_method":extraction_method,"tables":tables,"parser_error":parser_error},default=str))
+        if args.engine=="paddleocr" and parser_error is None:
+            text,boxes,parsed,extraction_method,recovery=maybe_recover_paddle(
+                args.file,args.language,templates,text,boxes,parsed,extraction_method,
+                baseline_seconds,time.monotonic()-worker_started,
+            )
+        payload={"text":text[:150000],"boxes":boxes[:10000],
+            "invoice":parsed,"extraction_method":extraction_method,"tables":tables,
+            "parser_error":parser_error}
+        if recovery is not None:payload["recovery"]=recovery
+        args.output.write_text(json.dumps(payload,default=str))
     except Exception as e:
         # No document or credential content in a user-facing error.
         args.output.write_text(json.dumps({"error":type(e).__name__,"hint":"Engine could not read this document. Check its installation, model cache and input format."}))

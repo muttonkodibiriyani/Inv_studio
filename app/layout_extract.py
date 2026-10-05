@@ -53,19 +53,20 @@ class _Word:
 
 @dataclass(frozen=True)
 class _Columns:
-    item: float
+    item: float | None
     description: float
-    uom: float
+    uom: float | None
     qty: float
     price: float
     price_right: float
+    serial: float | None = None
     net_bounds: tuple[float, float] | None = None
     tax_bounds: tuple[float, float] | None = None
 
 
 @dataclass
 class _DraftLine:
-    sku: str
+    sku: str | None
     description: str | None
     uom: str | None
     qty: Decimal
@@ -98,6 +99,7 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
         return None
 
     lines = [line.strip() for line in searchable.splitlines() if line.strip()]
+    source_lines = [line.strip() for line in source_text.splitlines() if line.strip()]
     number = _unique_identifier(
         lines,
         (
@@ -107,14 +109,24 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
             ),
         ),
     )
-    if number is None:
+    labeled_number = _spatial_joined_identifier(
+        rows, {"tax invoice number", "tax invoice no", "invoice number", "invoice no"}
+    )
+    if labeled_number is not None:
+        number = labeled_number
+    elif number is None:
         number = _spatial_invoice_number(rows)
+    compact_header = _spatial_compact_header(rows)
+    if number is None:
+        number = compact_header.get("number")
     supplier_name = _unique_text(
         lines,
         (
             re.compile(r"(?i)\b(?:supplier(?:\s+name)?|seller\s+name)\s*:\s*(.{1,160})$"),
         ),
     )
+    supplier_name = _spatial_party_name(rows, {"supplier", "supplier name"}) or supplier_name
+    buyer_name = _spatial_buyer_name(rows) or _extract_buyer_name(lines)
     po = _unique_identifier(
         lines,
         (
@@ -134,10 +146,14 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
     if po is None:
         po = _spatial_labeled_identifier(rows, {"lpo no", "lpo number", "po no", "po number"})
     invoice_date = _extract_date(lines)
+    if po is None:
+        po = compact_header.get("po")
+    if invoice_date is None:
+        invoice_date = compact_header.get("date")
+    if invoice_date is None:
+        invoice_date = _spatial_labeled_date(rows)
     currency = _extract_currency(lines)
-    net = _extract_money(
-        lines,
-        (
+    net_patterns = (
             re.compile(
                 r"(?i)(?:^|\s)net\s+amount\s*:?\s*(?:[A-Z]{3}\s*)?"
                 r"([0-9][0-9,]*(?:\.[0-9]+)?)\b"
@@ -146,17 +162,27 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
                 r"(?i)^\s*sub\s*total\s*:?\s*(?:[A-Z]{3}\s*)?"
                 r"([0-9][0-9,]*(?:\.[0-9]+)?)\b"
             ),
-        ),
-    )
-    tax = _extract_money(
-        lines,
-        (
+        )
+    net = _extract_money(source_lines, net_patterns)
+    if net is None:
+        net = _extract_money(lines, net_patterns)
+    tax_patterns = (
             re.compile(
                 r"(?i)(?:^|\s)(?:tax\s+amount|vat\s+(?:amount|amt\.?))\s*:?\s*"
                 r"(?:[A-Z]{3}\s*)?([0-9][0-9,]*(?:\.[0-9]+)?)\b"
             ),
-        ),
-    )
+            re.compile(
+                r"(?i)^\s*tax\s*\(\s*[0-9]+(?:\.[0-9]+)?\s*%\s*\)\s*:?[ \t]*"
+                r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*$"
+            ),
+            re.compile(
+                r"(?i)^\s*(?:vat|tax)\s*[-:]?\s*[0-9]+(?:\.[0-9]+)?\s*%?\s*"
+                r"(?:[A-Z]{3}\s*)?([0-9][0-9,]*(?:\.[0-9]+)?)\s*$"
+            ),
+        )
+    tax = _extract_money(source_lines, tax_patterns)
+    if tax is None:
+        tax = _extract_money(lines, tax_patterns)
     spatial_net, spatial_tax = _extract_spatial_totals(words)
     if net is None:
         net = spatial_net
@@ -167,6 +193,7 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
     invoice = Invoice(
         number=number,
         supplier_name=supplier_name,
+        buyer_name=buyer_name,
         # These are internal/canonical fields and must come from reference review.
         seller=None,
         site=None,
@@ -186,6 +213,7 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
         (
             invoice.number,
             invoice.supplier_name,
+            invoice.buyer_name,
             invoice.po,
             invoice.date,
             invoice.currency,
@@ -307,7 +335,7 @@ def _spatial_invoice_number(rows: list[tuple[int, list[_Word]]]) -> str | None:
     """Read one prominent identifier printed beside an invoice heading."""
 
     values: list[str] = []
-    for _, row in rows:
+    for row_index, (page, row) in enumerate(rows):
         if not re.search(r"(?i)\b(?:tax|commercial|sales|debit|credit)\s*invoice\b", _row_text(row)):
             continue
         heading_words = [word for word in row if "invoice" in _normal(word.text) or _normal(word.text) == "tax"]
@@ -322,8 +350,50 @@ def _spatial_invoice_number(rows: list[tuple[int, list[_Word]]]) -> str | None:
             if len(candidate) < 4 or not any(char.isdigit() for char in candidate):
                 continue
             candidates.append(candidate)
+        if not candidates and row_index:
+            previous_page, previous = rows[row_index - 1]
+            gap = _row_y(row) - _row_y(previous)
+            heading_height = max(word.height for word in heading_words)
+            if previous_page == page and 0 < gap <= max(100.0, heading_height * 6.0):
+                for word in previous:
+                    candidate = word.text.strip().replace(" ", "")
+                    if word.x0 <= heading_right or not _SAFE_IDENTIFIER.fullmatch(candidate):
+                        continue
+                    if len(candidate) < 4 or not any(char.isdigit() for char in candidate):
+                        continue
+                    candidates.append(candidate)
         if len(set(candidates)) == 1:
             values.extend(candidates)
+    return _only_distinct(values)
+
+
+def _spatial_labeled_date(rows: list[tuple[int, list[_Word]]]) -> str | None:
+    values: list[str] = []
+    labels = {"date", "document date", "invoice date"}
+    for _, row in rows:
+        for start in range(len(row)):
+            for width in (2, 1):
+                end = start + width
+                if end > len(row):
+                    continue
+                phrase = " ".join(_normal(word.text) for word in row[start:end])
+                if phrase not in labels:
+                    continue
+                if phrase == "date" and start and _normal(row[start - 1].text) in {
+                    "due", "run", "report",
+                }:
+                    continue
+                label_right = max(word.x1 for word in row[start:end])
+                for candidate_word in row[end:]:
+                    if candidate_word.x0 < label_right:
+                        continue
+                    if candidate_word.x0 - label_right > row[0].page_width * 0.25:
+                        break
+                    parsed = _parse_date(candidate_word.text)
+                    if parsed is not None:
+                        values.append(parsed)
+                    break
+                break
     return _only_distinct(values)
 
 
@@ -358,6 +428,236 @@ def _spatial_labeled_identifier(
     return _only_distinct(values)
 
 
+def _spatial_joined_identifier(
+    rows: list[tuple[int, list[_Word]]], labels: set[str]
+) -> str | None:
+    """Join adjacent OCR tokens after one explicit identifier label.
+
+    OCR commonly returns ``ABC-`` and ``01`` as separate words. Only tokens
+    touching the label's value run are joined, and the result must still be a
+    short safe identifier containing a digit.
+    """
+
+    values: list[str] = []
+    for _, row in rows:
+        for start in range(len(row)):
+            for width in (3, 2):
+                end = start + width
+                if end > len(row):
+                    continue
+                label_words = row[start:end]
+                if " ".join(_normal(word.text) for word in label_words) not in labels:
+                    continue
+                label_right = max(word.x1 for word in label_words)
+                label_height = max(word.height for word in label_words)
+                pieces: list[str] = []
+                previous_right = label_right
+                for word in row[end:]:
+                    if word.x0 < label_right:
+                        continue
+                    token = word.text.strip().replace(" ", "")
+                    if token in {":", "#", "-"} and not pieces:
+                        previous_right = word.x1
+                        continue
+                    if word.x0 - previous_right > max(12.0, label_height * 1.5):
+                        break
+                    if not re.fullmatch(r"[A-Za-z0-9./_-]+", token):
+                        break
+                    pieces.append(token)
+                    previous_right = word.x1
+                candidate = "".join(pieces)
+                if (
+                    candidate
+                    and len(candidate) <= 80
+                    and _SAFE_IDENTIFIER.fullmatch(candidate)
+                    and any(character.isdigit() for character in candidate)
+                ):
+                    values.append(candidate)
+                break
+    return _only_distinct(values)
+
+
+def _spatial_party_name(
+    rows: list[tuple[int, list[_Word]]], labels: set[str]
+) -> str | None:
+    """Read a party name beside or immediately below an explicit label."""
+
+    values: list[str] = []
+    for row_index, (page, row) in enumerate(rows):
+        for start in range(len(row)):
+            for width in (2, 1):
+                end = start + width
+                if end > len(row):
+                    continue
+                label_words = row[start:end]
+                if " ".join(_normal(word.text) for word in label_words) not in labels:
+                    continue
+                label_right = max(word.x1 for word in label_words)
+                same_row = [
+                    word for word in row[end:]
+                    if word.x0 >= label_right
+                    and word.x0 - min(item.x0 for item in label_words)
+                    <= row[0].page_width * 0.4
+                ]
+                candidate = _clean_party_name(_join_words(same_row))
+                if candidate is None:
+                    label_left = min(word.x0 for word in label_words)
+                    label_y = _row_y(row)
+                    label_height = max(word.height for word in label_words)
+                    for next_page, next_row in rows[row_index + 1 :]:
+                        if next_page != page:
+                            continue
+                        gap = _row_y(next_row) - label_y
+                        if gap <= 0:
+                            continue
+                        if gap > max(50.0, label_height * 4.0):
+                            break
+                        nearby = [
+                            word for word in next_row
+                            if word.x0 >= label_left
+                            and word.x0 - label_left <= row[0].page_width * 0.35
+                        ]
+                        candidate = _clean_party_name(_join_words(nearby))
+                        if candidate is not None:
+                            break
+                if candidate is not None:
+                    values.append(candidate)
+                break
+    return _only_distinct(values)
+
+
+def _spatial_buyer_name(rows: list[tuple[int, list[_Word]]]) -> str | None:
+    values: list[str] = []
+    for row_index, (page, row) in enumerate(rows):
+        label: tuple[int, int] | None = None
+        for start in range(len(row)):
+            for width in (2, 1):
+                phrase = " ".join(
+                    _normal(word.text) for word in row[start : start + width]
+                )
+                if phrase in {"bill to", "buyer"}:
+                    label = start, start + width
+                    break
+            if label is not None:
+                break
+        if label is None:
+            continue
+        start, end = label
+        label_left = row[start].x0
+        right_boundary = row[0].page_width
+        for position in range(end, len(row)):
+            phrase = " ".join(
+                _normal(word.text) for word in row[position : position + 2]
+            )
+            if phrase in {"ship to", "deliver to"}:
+                right_boundary = row[position].x0
+                break
+        label_y = _row_y(row)
+        label_height = max(word.height for word in row[start:end])
+        for next_page, candidate_row in (item for item in rows[row_index + 1 :] if item[0] == page):
+            gap = _row_y(candidate_row) - label_y
+            if gap <= 0:
+                continue
+            if gap > max(90.0, label_height * 8.0):
+                break
+            candidate_words = [
+                word for word in candidate_row
+                if word.x >= label_left and word.x < right_boundary
+            ]
+            candidate = _clean_party_name(_join_words(candidate_words))
+            if candidate is not None:
+                values.append(candidate)
+                break
+    return _only_distinct(values)
+
+
+def _spatial_compact_header(rows: list[tuple[int, list[_Word]]]) -> dict[str, str]:
+    """Read an explicit aligned No./Date/PO header block.
+
+    Bare ``No.`` and ``Date`` labels are too broad on their own.  They are
+    accepted only when all three invoice labels share the same right-side
+    column on one page and each has one visible value immediately to its right.
+    """
+
+    labels = {"no": "number", "date": "date", "po no": "po", "po number": "po"}
+    records: list[tuple[int, str, float, float, str]] = []
+    for page, row in rows:
+        for start in range(len(row)):
+            for width in (2, 1):
+                end = start + width
+                if end > len(row):
+                    continue
+                phrase = " ".join(_normal(word.text) for word in row[start:end])
+                field = labels.get(phrase)
+                if field is None:
+                    continue
+                if field == "date" and start and _normal(row[start - 1].text) == "due":
+                    continue
+                if field == "number" and start and _normal(row[start - 1].text) in {
+                    "po", "lpo", "warehouse",
+                }:
+                    continue
+                label_words = row[start:end]
+                label_right = max(word.x1 for word in label_words)
+                page_width = row[0].page_width
+                candidate = next(
+                    (
+                        word.text.strip()
+                        for word in row[end:]
+                        if word.x0 >= label_right
+                        and word.x0 - label_right <= page_width * 0.22
+                    ),
+                    None,
+                )
+                if candidate is None:
+                    continue
+                if field == "date":
+                    parsed = _parse_compact_header_date(candidate)
+                else:
+                    compact = candidate.replace(" ", "")
+                    parsed = (
+                        compact
+                        if _SAFE_IDENTIFIER.fullmatch(compact)
+                        and any(character.isdigit() for character in compact)
+                        else None
+                    )
+                if parsed is not None:
+                    records.append((page, field, label_words[0].x, page_width, parsed))
+                break
+
+    valid: list[dict[str, str]] = []
+    for page, _field, anchor, page_width, _value in records:
+        nearby = [
+            record
+            for record in records
+            if record[0] == page
+            and abs(record[2] - anchor) <= max(18.0, page_width * 0.04)
+        ]
+        values = {
+            field: {value for _page, candidate_field, _x, _width, value in nearby
+                    if candidate_field == field}
+            for field in {"number", "date", "po"}
+        }
+        if all(len(field_values) == 1 for field_values in values.values()):
+            valid.append({field: next(iter(field_values)) for field, field_values in values.items()})
+    distinct = {tuple(sorted(candidate.items())) for candidate in valid}
+    return dict(next(iter(distinct))) if len(distinct) == 1 else {}
+
+
+def _parse_compact_header_date(value: str) -> str | None:
+    parsed = _parse_date(value)
+    if parsed is not None:
+        return parsed
+    day_first = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", value.strip())
+    if day_first is None:
+        return None
+    day, month, year = map(int, day_first.groups())
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
 def _unique_text(lines: list[str], patterns: tuple[re.Pattern[str], ...]) -> str | None:
     values: list[str] = []
     for line in lines:
@@ -370,6 +670,43 @@ def _unique_text(lines: list[str], patterns: tuple[re.Pattern[str], ...]) -> str
                 values.append(value[:160])
             break
     return _only_distinct(values)
+
+
+def _extract_buyer_name(lines: list[str]) -> str | None:
+    values: list[str] = []
+    label = re.compile(r"(?i)^\s*(?:bill\s+to|buyer)\s*:?[ \t]*(.*)$")
+    for index, line in enumerate(lines):
+        match = label.match(line)
+        if match is None:
+            continue
+        candidate = match.group(1)
+        if not candidate and index + 1 < len(lines):
+            candidate = lines[index + 1]
+        cleaned = _clean_party_name(candidate)
+        if cleaned is not None:
+            values.append(cleaned)
+    return _only_distinct(values)
+
+
+def _clean_party_name(value: Any) -> str | None:
+    candidate = " ".join(str(value or "").split()).strip(" :|-")
+    while re.match(r"(?i)^(?:bill\s+to|buyer)\b", candidate):
+        candidate = re.sub(
+            r"(?i)^(?:bill\s+to|buyer)\b\s*:?[ \t|,-]*", "", candidate, count=1
+        )
+    candidate = re.split(
+        r"(?i)\b(?:ship\s+to|deliver\s+to|p\.?\s*o\.?\s*box|address|tel(?:ephone)?|trn)\b",
+        candidate,
+        maxsplit=1,
+    )[0].strip(" :|-,")
+    if (
+        not 2 <= len(candidate) <= 160
+        or _looks_dangerous(candidate)
+        or not any(character.isalpha() for character in candidate)
+        or _normal(candidate) in {"bill to", "buyer", "ship to", "deliver to"}
+    ):
+        return None
+    return candidate
 
 
 def _only_distinct(values: Iterable[str]) -> str | None:
@@ -403,6 +740,7 @@ def _extract_date(lines: list[str]) -> str | None:
 
 def _parse_date(value: str) -> str | None:
     cleaned = re.sub(r"\s+", " ", value.strip()).rstrip(".,")
+    cleaned = re.sub(r"(?i)\b(\d{1,2})(?:st|nd|rd|th)\b", r"\1", cleaned)
     month_name = re.fullmatch(r"(\d{1,2})[- /.]([A-Za-z]{3,9})[- /.](\d{4})", cleaned)
     if month_name:
         try:
@@ -458,6 +796,7 @@ def _extract_currency(lines: list[str]) -> str | None:
     patterns = (
         re.compile(r"(?i)\bcurrency\s*:\s*([A-Z]{3})\b"),
         re.compile(r"(?i)\btotal\s+in\s+([A-Z]{3})\b"),
+        re.compile(r"(?i)^\s*total\s+([A-Z]{3})\s+[0-9][0-9,.]*\s*$"),
     )
     for line in lines:
         for pattern in patterns:
@@ -510,6 +849,19 @@ def _extract_spatial_totals(words: list[_Word]) -> tuple[Decimal | None, Decimal
         rows = _group_page_rows(page_words)
         if not rows:
             continue
+        for row in rows:
+            normal = _normal(_row_text(row))
+            numbers = [
+                value
+                for word in row
+                if (value := _parse_decimal(word.text)) is not None
+            ]
+            if not numbers:
+                continue
+            if re.search(r"\b(?:sub\s*total|subtotal|net amount)\b", normal):
+                nets.append(numbers[-1])
+            if re.match(r"^(?:vat|tax)\b", normal):
+                taxes.append(numbers[-1])
         typical_height = median(word.height for word in page_words)
         index = 0
         while index < len(rows):
@@ -565,19 +917,25 @@ def _extract_table_lines(words: list[_Word]) -> list[Line]:
                 qty = _first_decimal(parts["qty"])
                 price = _first_decimal(parts["price"])
                 sku = _select_sku(parts["item"])
-                if sku and qty is not None and price is not None:
+                description = _clean_description_words(parts["description"])
+                gtin = _extract_gtin_words(parts["description"])
+                if (
+                    qty is not None
+                    and price is not None
+                    and (sku is not None or gtin is not None or description is not None)
+                ):
                     if draft is not None:
                         result.append(_finish_line(draft))
                     draft = _DraftLine(
                         sku=sku,
-                        description=_clean_description_words(parts["description"]),
+                        description=description,
                         uom=_clean_uom(_join_words(parts["uom"])),
                         qty=qty,
                         price=price,
                         evidence_parts=[row_text],
                         page=page,
                         last_y=_row_y(row),
-                        gtin=_extract_gtin_words(parts["description"]),
+                        gtin=gtin,
                         net_amount=_decimal_in_bounds(row, columns.net_bounds),
                         tax_amount=_decimal_in_bounds(row, columns.tax_bounds),
                     )
@@ -606,7 +964,7 @@ def _find_header(
     for index in range(start, len(rows)):
         anchors = _header_anchors(rows[index])
         end = index
-        if len(anchors) < 5 and index + 1 < len(rows):
+        if not {"description", "qty", "price"}.issubset(anchors) and index + 1 < len(rows):
             gap = abs(_row_y(rows[index + 1]) - _row_y(rows[index]))
             if gap <= max(8.0, typical_height * 2.0):
                 combined = dict(anchors)
@@ -616,13 +974,19 @@ def _find_header(
                 if len(combined) > len(anchors):
                     anchors = combined
                     end = index + 1
-        if all(key in anchors for key in ("item", "description", "uom", "qty", "price")):
-            item = anchors["item"]
+        if all(key in anchors for key in ("description", "qty", "price")):
+            item = anchors.get("item")
             description = anchors["description"]
-            uom = anchors["uom"]
+            uom = anchors.get("uom")
             qty = anchors["qty"]
             price = anchors["price"]
-            if not item < description < uom < qty < price:
+            serial = anchors.get("serial")
+            identity_columns = [value for value in (serial, item, description, uom) if value is not None]
+            if (
+                not description < qty < price
+                or any(value >= qty for value in identity_columns)
+                or len(set((*identity_columns, qty, price))) != len(identity_columns) + 2
+            ):
                 continue
             later = sorted(
                 word.x
@@ -635,14 +999,15 @@ def _find_header(
                 rows, index, end, price, typical_height
             )
             return _Columns(
-                item,
-                description,
-                uom,
-                qty,
-                price,
-                price_right,
-                net_bounds,
-                tax_bounds,
+                item=item,
+                description=description,
+                uom=uom,
+                qty=qty,
+                price=price,
+                price_right=price_right,
+                serial=serial,
+                net_bounds=net_bounds,
+                tax_bounds=tax_bounds,
             ), end
     return None, start
 
@@ -665,29 +1030,111 @@ _AFTER_PRICE_HEADERS = {
 
 def _header_anchors(row: list[_Word]) -> dict[str, float]:
     anchors: dict[str, float] = {}
+    repeated_spanned_headers: list[_Word] = []
     for word in row:
         value = _normal(word.text)
         compact = re.sub(r"[^a-z0-9]", "", word.text.casefold())
+        if all(part in compact for part in ("itemcode", "description", "uom", "qty")):
+            repeated_spanned_headers.append(word)
+        serial_part = next(
+            (part for part in ("serialnumber", "serialno", "srno", "sno") if part in compact),
+            None,
+        )
         item_part = next(
             (part for part in ("itemnumber", "itemcode", "itemno") if part in compact), None
         )
         description_part = next(
-            (part for part in ("description", "desc") if part in compact), None
+            (
+                part
+                for part in (
+                    "productdescription",
+                    "itemdescription",
+                    "servicedescription",
+                    "description",
+                    "productname",
+                    "itemname",
+                    "particulars",
+                    "desc",
+                )
+                if part in compact
+            ),
+            None,
         )
+        uom_part = next(
+            (part for part in ("unitofmeasure", "measureunit", "uom") if part in compact),
+            None,
+        )
+        qty_part = next(
+            (part for part in ("quantity", "qty") if part in compact),
+            None,
+        )
+        price_part = next(
+            (part for part in ("sellingprice", "unitprice", "priceperunit", "price", "rate") if part in compact),
+            None,
+        )
+        if serial_part:
+            anchors.setdefault("serial", _substring_x(word, compact, serial_part))
+        elif value in {"s no", "sno", "sr", "sr no", "serial", "serial no", "line no", "line number"}:
+            anchors.setdefault("serial", word.x)
         if item_part:
             anchors.setdefault("item", _substring_x(word, compact, item_part))
         elif re.fullmatch(r"item\s*(?:no|number|code)?|sku|product\s*code", value):
             anchors.setdefault("item", word.x)
         if description_part:
             anchors.setdefault("description", _substring_x(word, compact, description_part))
-        elif value.startswith("desc") or value in {"item description", "product description"}:
+        elif value.startswith("desc") or value in {
+            "name",
+            "item name",
+            "product name",
+            "service description",
+            "item description",
+            "product description",
+            "particulars",
+        }:
             anchors.setdefault("description", word.x)
-        if value in {"uom", "u m", "unit", "unit of measure"}:
+        if uom_part:
+            anchors.setdefault("uom", _substring_x(word, compact, uom_part))
+        elif value in {"uom", "u m", "unit", "unit of measure"}:
             anchors.setdefault("uom", word.x)
+        if qty_part:
+            anchors.setdefault("qty", _substring_x(word, compact, qty_part))
         elif value in {"qty", "quantity"}:
             anchors.setdefault("qty", word.x)
+        if price_part:
+            anchors.setdefault("price", _substring_x(word, compact, price_part))
         elif value in {"price", "unit price", "unitprice", "rate"}:
             anchors.setdefault("price", word.x)
+
+    if len(repeated_spanned_headers) >= 3:
+        # Some Docling scan tables repeat one merged header string in each
+        # covered physical cell. The measured cell centres still identify the
+        # UOM and quantity columns; the first wide cell retains item/description.
+        repeated_spanned_headers.sort(key=lambda word: word.x)
+        anchors["uom"] = repeated_spanned_headers[1].x
+        anchors["qty"] = repeated_spanned_headers[2].x
+
+    ordered = sorted(row, key=lambda word: word.x)
+    phrases = {
+        "product name": "description",
+        "item name": "description",
+        "product description": "description",
+        "item description": "description",
+        "service description": "description",
+        "unit price": "price",
+        "s no": "serial",
+        "sr no": "serial",
+        "line no": "serial",
+        "line number": "serial",
+    }
+    for first, second in zip(ordered, ordered[1:]):
+        phrase = f"{_normal(first.text)} {_normal(second.text)}"
+        role = phrases.get(phrase)
+        if role is None:
+            continue
+        centre = (first.x + second.x) / 2
+        anchors.setdefault(role, centre)
+        if role == "price" and anchors.get("uom") == first.x:
+            anchors.pop("uom")
     return anchors
 
 
@@ -710,6 +1157,33 @@ def _financial_column_bounds(
 
     main_row = rows[end]
     labels: list[tuple[str, float]] = []
+    repeated_financial = sorted(
+        (
+            word for word in main_row
+            if all(
+                part in re.sub(r"[^a-z0-9]", "", word.text.casefold())
+                for part in ("value", "disc", "subtotal")
+            )
+        ),
+        key=lambda word: word.x,
+    )
+    if len(repeated_financial) >= 3:
+        labels.extend(("other", word.x) for word in repeated_financial[:2])
+        labels.append(("net", repeated_financial[2].x))
+        labels.extend(("other", word.x) for word in repeated_financial[3:])
+    repeated_vat_total = sorted(
+        (
+            word for word in main_row
+            if all(
+                part in re.sub(r"[^a-z0-9]", "", word.text.casefold())
+                for part in ("amt", "total")
+            )
+        ),
+        key=lambda word: word.x,
+    )
+    if len(repeated_vat_total) >= 2:
+        labels.append(("tax", repeated_vat_total[0].x))
+        labels.extend(("other", word.x) for word in repeated_vat_total[1:])
     consumed: set[int] = set()
     for position, word in enumerate(main_row):
         value = _normal(word.text)
@@ -770,22 +1244,39 @@ def _row_y(row: list[_Word]) -> float:
 
 
 def _row_parts(row: list[_Word], columns: _Columns) -> dict[str, list[_Word]]:
-    item_description = (columns.item + columns.description) / 2
-    description_uom = columns.uom - max(3.0, (columns.uom - columns.description) * 0.08)
-    uom_qty = (columns.uom + columns.qty) / 2
-    qty_price = (columns.qty + columns.price) / 2
     parts = {"item": [], "description": [], "uom": [], "qty": [], "price": []}
+    anchors: list[tuple[str, float]] = []
+    if columns.serial is not None:
+        anchors.append(("serial", columns.serial))
+    if columns.item is not None:
+        anchors.append(("item", columns.item))
+    anchors.append(("description", columns.description))
+    if columns.uom is not None:
+        anchors.append(("uom", columns.uom))
+    anchors.extend((("qty", columns.qty), ("price", columns.price)))
+    anchors.sort(key=lambda anchor: anchor[1])
+    boundaries: list[float] = []
+    for (left_role, left), (_right_role, right) in zip(anchors, anchors[1:]):
+        if left_role == "serial" and _right_role == "item":
+            # A serial column is normally narrow.  Keep its numeric row marker
+            # out of the SKU while allowing a left-aligned item code beneath a
+            # merged "S.No Item Code" heading.
+            boundaries.append(left + (right - left) * 0.25)
+        elif left_role == "description" and columns.uom is not None:
+            boundaries.append(right - max(3.0, (right - left) * 0.08))
+        else:
+            boundaries.append((left + right) / 2)
     for word in row:
-        if word.x < item_description:
-            parts["item"].append(word)
-        elif word.x < description_uom:
-            parts["description"].append(word)
-        elif word.x < uom_qty:
-            parts["uom"].append(word)
-        elif word.x < qty_price:
-            parts["qty"].append(word)
-        elif word.x < columns.price_right:
-            parts["price"].append(word)
+        if word.x >= columns.price_right:
+            continue
+        column = len(anchors) - 1
+        for position, boundary in enumerate(boundaries):
+            if word.x < boundary:
+                column = position
+                break
+        role = anchors[column][0]
+        if role in parts:
+            parts[role].append(word)
     return parts
 
 
@@ -942,7 +1433,10 @@ def _merge_continuation(
         draft.gtin = gtin_match.group(1).replace(" ", "")
     description = _clean_description(description_text)
     if item and len(item) > 1:
-        draft.sku = item + draft.sku if prepend else draft.sku + item
+        if draft.sku is None:
+            draft.sku = item
+        else:
+            draft.sku = item + draft.sku if prepend else draft.sku + item
     if description:
         if draft.description:
             draft.description = (

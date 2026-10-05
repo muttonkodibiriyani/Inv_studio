@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT))
 CASES=(
     ("invoice2data",ROOT/"samples/invoice.pdf"),
     ("paddleocr",ROOT/"samples/invoice-scan.png"),
-    ("docling",ROOT/"samples/invoice.pdf"),
+    ("docling",ROOT/"samples/invoice-scan.png"),
 )
 
 

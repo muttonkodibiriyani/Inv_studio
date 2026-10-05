@@ -30,6 +30,9 @@ class Store:
             CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY, invoice_key TEXT UNIQUE NOT NULL,
                 job_id TEXT UNIQUE NOT NULL, payload TEXT NOT NULL, workbook BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS batches(id TEXT PRIMARY KEY, payload TEXT NOT NULL, workbook BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS deleted_invoices(
+                job_id TEXT PRIMARY KEY, invoice_key TEXT UNIQUE, payload TEXT NOT NULL,
+                deleted_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, event TEXT NOT NULL,
                 payload TEXT NOT NULL, at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
             ''')
@@ -100,4 +103,18 @@ class Store:
         c.execute("INSERT INTO audit(event,payload) VALUES (?,?)", (event, json.dumps({**payload, "actor": actor.get()})))
 
     def ledger(self, c):
-        return [json.loads(r[0]) for r in c.execute("SELECT payload FROM exports")]
+        receipts = [json.loads(r[0]) for r in c.execute("SELECT payload FROM exports")]
+        receipts.extend(
+            json.loads(r[0])
+            for r in c.execute(
+                "SELECT payload FROM deleted_invoices WHERE invoice_key IS NOT NULL"
+            )
+        )
+        return receipts
+
+    def delete_upload(self, path):
+        target = Path(path).resolve()
+        uploads = (self.root / "uploads").resolve()
+        if not target.is_relative_to(uploads):
+            raise ValueError("Invoice uploads must stay inside the uploads directory")
+        target.unlink(missing_ok=True)

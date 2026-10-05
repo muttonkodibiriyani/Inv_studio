@@ -1,14 +1,17 @@
 import gzip
 import hashlib
 import json
+import os
 import subprocess
 import sys
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from app.reference_lookup import ReferenceLookup, normalize_name
+from app.cloud_store import CompatConnection
+from app.reference_lookup import ReferenceLookup, _like_prefix, normalize_name
 from app.store import Store
 
 
@@ -115,6 +118,62 @@ def lookup(tmp_path):
     return ReferenceLookup(Store(tmp_path / "data"))
 
 
+@pytest.fixture
+def postgres_lookup(tmp_path):
+    database_url = os.getenv("INV_STUDIO_TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("set INV_STUDIO_TEST_DATABASE_URL for PostgreSQL lookup regression")
+    psycopg = pytest.importorskip("psycopg")
+    from psycopg import sql
+
+    schema = "reference_lookup_test_" + uuid.uuid4().hex
+    with psycopg.connect(database_url, autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    class SchemaStore:
+        root = tmp_path / "pg-data"
+
+        @contextmanager
+        def connection(self):
+            raw = psycopg.connect(database_url)
+            raw.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+            try:
+                yield CompatConnection(raw)
+                raw.commit()
+            except BaseException:
+                raw.rollback()
+                raise
+            finally:
+                raw.close()
+
+    store = SchemaStore()
+    store.root.mkdir()
+    with store.connection() as connection:
+        connection.execute(
+            "CREATE TABLE lookup_sources(id TEXT PRIMARY KEY,payload TEXT NOT NULL)"
+        )
+        connection.execute(
+            """CREATE TABLE lookup_rows(
+                id TEXT PRIMARY KEY,kind TEXT NOT NULL,source_hash TEXT NOT NULL,
+                sheet TEXT NOT NULL,row_number INTEGER NOT NULL,payload TEXT NOT NULL)"""
+        )
+        connection.execute(
+            """CREATE TABLE lookup_terms(
+                kind TEXT NOT NULL,term TEXT NOT NULL,row_id TEXT NOT NULL,
+                PRIMARY KEY(kind,term,row_id))"""
+        )
+        connection.execute("CREATE INDEX lookup_rows_kind_id ON lookup_rows(kind,id)")
+        connection.execute(
+            "CREATE UNIQUE INDEX lookup_rows_source_row "
+            "ON lookup_rows(source_hash,sheet,row_number)"
+        )
+    try:
+        yield ReferenceLookup(store), store
+    finally:
+        with psycopg.connect(database_url, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 class _CatalogCursor:
     def __init__(self, row):
         self.row = row
@@ -197,6 +256,10 @@ def test_import_and_search_preserve_ambiguity_provenance_and_manual_confirmation
     assert "exact_identifier" in exact["records"][0]["match"]["basis"]
 
 
+def test_literal_like_prefix_escapes_wildcards_for_both_database_dialects():
+    assert _like_prefix(r"t:50%_off\code") == "t:50\\%\\_off\\\\code%"
+
+
 def test_exact_filters_and_exact_po_context_join_do_not_fall_back(tmp_path, lookup):
     archive, manifest = catalog(tmp_path, [item(2, site="SITE-1"), item(3, site="SITE-2"), po(2)])
     lookup.import_archive(archive, manifest, batch_size=100)
@@ -219,6 +282,43 @@ def test_exact_filters_and_exact_po_context_join_do_not_fall_back(tmp_path, look
     assert po_result["records"][0]["candidate_fields"]["po"] == ["PO-55", "EXT-55"]
     assert "LOCATION" not in [entry["column"] for entry in
                               po_result["records"][0]["candidate_field_sources"]["po"]]
+
+
+def test_postgres_locale_prefix_and_po_identity_join_match_like_sqlite(
+    tmp_path, postgres_lookup
+):
+    lookup, store = postgres_lookup
+    archive, manifest = catalog(
+        tmp_path,
+        [
+            item(2, description="Fresh Apple Red", site="SITE-1"),
+            item(3, description="Blue Apricot", site="SITE-2"),
+            po(2),
+        ],
+        name="postgres-prefix",
+    )
+    lookup.import_archive(archive, manifest, batch_size=100)
+
+    prefix = lookup.search("item", "fresh app", limit=10)
+    assert len(prefix["records"]) == 1
+    assert prefix["records"][0]["candidate_fields"]["description"] == [
+        "Fresh Apple Red"
+    ]
+    joined = lookup.search("item", "fresh app", po="PO-55")
+    assert len(joined["records"]) == 1
+    assert "exact_po_context" in joined["records"][0]["match"]["basis"]
+
+    with store.connection() as connection:
+        connection.execute("SET LOCAL enable_seqscan=off")
+        plan = " ".join(
+            row[0]
+            for row in connection.execute(
+                """EXPLAIN SELECT row_id FROM lookup_terms
+                   WHERE kind='item' AND term LIKE ? ESCAPE '\\'""",
+                (_like_prefix("t:app"),),
+            )
+        )
+    assert "lookup_terms_pkey" in plan
 
 
 def test_ranked_cursor_returns_every_ambiguous_candidate_once_and_is_query_bound(tmp_path, lookup):

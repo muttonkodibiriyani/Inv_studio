@@ -752,3 +752,10 @@ dialog::backdrop { background: rgb(24 36 33 / 56%); backdrop-filter: blur(3px); 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+.candidate-confirm-label { display: flex; align-items: flex-start; gap: 10px; padding: 12px; background: var(--surface-soft, #eef5f2); border-radius: 8px; }
+.candidate-confirm-label input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 2px; }
+.danger-text { color: #a72e2e; }
+.button-danger { background: #a72e2e; color: white; }
+.button-danger:hover { background: #852424; }
+.delete-invoice-list { max-height: 12rem; overflow-y: auto; padding-left: 1.5rem; line-height: 1.8; }
+.batch-selection > div { display: flex; flex-wrap: wrap; gap: .25rem .65rem; }

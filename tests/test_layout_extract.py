@@ -3,7 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 
 from app.layout_extract import extract_invoice
-from app.models import Invoice
+from app.matching import validate
+from app.models import Invoice, Policy
 
 
 def _box(
@@ -55,6 +56,7 @@ def _table_row(
 def test_extracts_labeled_fields_and_multipage_spatial_lines() -> None:
     text = """TAX INVOICE
 Supplier: Example Supply House
+Bill To: Synthetic Buyer Company
 Invoice No: INV-00073
 Document Date: 14-JUL-2026
 Ref: LPO- 00045678
@@ -76,6 +78,7 @@ Total Amount Including VAT: 26.25
     invoice = Invoice.model_validate(result)
     assert invoice.number == "INV-00073"
     assert invoice.supplier_name == "Example Supply House"
+    assert invoice.buyer_name == "Synthetic Buyer Company"
     assert invoice.po == "00045678"
     assert invoice.date == "2026-07-14"
     assert invoice.currency == "AED"
@@ -355,3 +358,138 @@ def test_handles_one_ocr_box_for_item_code_and_description_headers() -> None:
     assert len(invoice.lines) == 1
     assert invoice.lines[0].sku == "SYN-MERGED-1"
     assert invoice.lines[0].description == "Merged heading item"
+
+
+def test_extracts_name_only_line_without_treating_serial_number_as_sku() -> None:
+    text = "TAX INVOICE\nInvoice No: NAME-ONLY-001\n"
+    boxes = [
+        _box("S.No", 18, 100, width=30),
+        _box("Product Name", 100, 100, width=110),
+        _box("Quantity", 345, 100, width=55),
+        _box("Unit Price", 430, 100, width=65),
+        _box("1", 18, 125, width=8),
+        _box("Synthetic consulting service", 100, 125, width=190),
+        _box("2", 345, 125, width=12),
+        _box("12.50", 430, 125, width=40),
+    ]
+
+    invoice = Invoice.model_validate(extract_invoice(text, boxes))
+
+    assert len(invoice.lines) == 1
+    assert invoice.lines[0].sku is None
+    assert invoice.lines[0].gtin is None
+    assert invoice.lines[0].description == "Synthetic consulting service"
+    assert invoice.lines[0].qty == Decimal("2")
+    assert invoice.lines[0].price == Decimal("12.50")
+
+    validation = validate(
+        invoice,
+        {
+            "version": "synthetic-v1",
+            "sites": [],
+            "routes": [],
+            "orders": [],
+            "items": [],
+            "taxRules": [],
+            "receipts": [],
+        },
+        Policy(),
+        reviewed=True,
+    )
+    assert validation["ready"] is False
+    assert any(
+        issue["code"] == "ITEM" and issue["line"] == 1
+        for issue in validation["issues"]
+    )
+
+
+def test_reads_aligned_compact_header_and_explicit_total_currency_and_tax() -> None:
+    text = """TAX INVOICE
+Net Amount 24.00
+Tax (5%) 1.20
+Total AED 25.20
+"""
+    boxes = [
+        _box("Warehouse", 20, 40, width=60),
+        _box("No.", 85, 40, width=20),
+        _box("8", 112, 40, width=8),
+        _box("No.", 400, 90, width=20),
+        _box("SYN-00797", 490, 90, width=70),
+        _box("Date", 400, 110, width=30),
+        _box("03/09/2026", 490, 110, width=70),
+        _box("PO", 400, 130, width=18),
+        _box("No.", 420, 130, width=20),
+        _box("14440000", 490, 130, width=60),
+        _box("Due", 400, 150, width=25),
+        _box("Date", 430, 150, width=30),
+        _box("03/10/2026", 490, 150, width=70),
+        _box("Receiver", 200, 300, width=55),
+        _box("Date", 300, 300, width=30),
+    ]
+
+    invoice = Invoice.model_validate(extract_invoice(text, boxes))
+
+    assert invoice.number == "SYN-00797"
+    assert invoice.date == "2026-09-03"
+    assert invoice.po == "14440000"
+    assert invoice.currency == "AED"
+    assert invoice.net == Decimal("24.00")
+    assert invoice.tax == Decimal("1.20")
+
+
+def test_accepts_description_column_before_item_code() -> None:
+    boxes = [
+        _box("Description", 40, 100, width=100),
+        _box("SKU", 250, 100, width=35),
+        _box("Quantity", 345, 100, width=55),
+        _box("Unit Price", 430, 100, width=65),
+        _box("Synthetic service", 40, 125, width=150),
+        _box("SYN-1", 250, 125, width=45),
+        _box("2", 345, 125, width=12),
+        _box("4.00", 430, 125, width=35),
+    ]
+
+    invoice = Invoice.model_validate(extract_invoice("TAX INVOICE", boxes))
+
+    assert len(invoice.lines) == 1
+    assert invoice.lines[0].sku == "SYN-1"
+    assert invoice.lines[0].description == "Synthetic service"
+    assert invoice.lines[0].qty == Decimal("2")
+    assert invoice.lines[0].price == Decimal("4.00")
+
+
+def test_reads_split_number_ordinal_date_supplier_and_labeled_totals() -> None:
+    boxes = [
+        _box("Supplier:", 20, 20, width=50),
+        _box("Tax", 400, 20, width=25),
+        _box("Invoice", 430, 20, width=45),
+        _box("Synthetic", 20, 36, width=60),
+        _box("Trading", 84, 36, width=45),
+        _box("LLC", 133, 36, width=25),
+        _box("Tax", 400, 52, width=25),
+        _box("Invoice", 430, 52, width=45),
+        _box("Number", 480, 52, width=50),
+        _box(":", 534, 52, width=5),
+        _box("SYN-", 543, 52, width=35),
+        _box("009", 580, 52, width=25),
+        _box("Date", 400, 68, width=30),
+        _box(":", 434, 68, width=5),
+        _box("14th", 443, 68, width=28),
+        _box("July", 475, 68, width=28),
+        _box("2026", 507, 68, width=35),
+        _box("SUBTOTAL", 400, 100, width=65),
+        _box("AED", 470, 100, width=25),
+        _box("120.00", 500, 100, width=45),
+        _box("VAT", 400, 116, width=25),
+        _box("-5%", 429, 116, width=25),
+        _box("AED", 470, 116, width=25),
+        _box("6.00", 500, 116, width=35),
+    ]
+
+    invoice = Invoice.model_validate(extract_invoice("TAX INVOICE", boxes))
+
+    assert invoice.number == "SYN-009"
+    assert invoice.date == "2026-07-14"
+    assert invoice.supplier_name == "Synthetic Trading LLC"
+    assert invoice.net == Decimal("120.00")
+    assert invoice.tax == Decimal("6.00")
