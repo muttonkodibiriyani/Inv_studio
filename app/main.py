@@ -282,8 +282,20 @@ def create_app(data_dir=None):
         entries=j.get("owner_entries") if entries is None else entries
         view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),entries)
         view.update(signature=signature,evidence_hash=evidence_hash(j),computed_at=datetime.now(timezone.utc).isoformat())
-        attach_target_check(view,config,entry["text"],entries,j.get("owner_entry_attribution"))
+        entries,attribution=picked_site_entry(view,j,entries,j.get("owner_entry_attribution"))
+        attach_target_check(view,config,entry["text"],entries,attribution)
         return view
+    def picked_site_entry(view,j,entries,attribution):
+        """A Supplier Site the rules took from the owner's supplier-code pick is scored as that owner's entry,
+        attributed to the stored pick's actor and time; without them it stays an unattributed owner entry."""
+        site=(view.get("fields") or {}).get("site") or {}
+        first=(site.get("evidence") or [{}])[0]
+        if first.get("kind")!="owner_entry" or first.get("rule")!="OWNER-PICK" or not j.get("owner_supplier_code"):
+            return entries,attribution
+        entries=owner_entries(entries) if entries else {"header":{},"lines":{}}
+        entries={**entries,"header":{**entries["header"],"site":site.get("value")}}
+        who=j.get("owner_supplier_pick") or {}
+        return entries,{**(attribution or {}),"header:site":who}
     def attach_target_check(view,config,text,entries,attribution):
         """Read-only target-sheet check (app/target_check): deterministic, no AI or cloud call; the owner config
         (buyer_name included) is compared in memory only. Its failures are review-level issues (decision 12)."""
@@ -578,7 +590,8 @@ def create_app(data_dir=None):
                 if body.invoice.model_dump(mode="json")["lines"]!=j["invoice"].get("lines"):entries["lines"]={}
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
             pick=supplier_pick(j,body)
-            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution,"owner_supplier_code":pick},entries)
+            picked_by=j.get("owner_supplier_pick") if pick and pick==j.get("owner_supplier_code") else {"actor":actor.get(),"at":datetime.now(timezone.utc).isoformat()} if pick else None
+            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution,"owner_supplier_code":pick,"owner_supplier_pick":picked_by},entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
@@ -587,8 +600,8 @@ def create_app(data_dir=None):
             j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
             if view is not None:
                 j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries;j["owner_entry_attribution"]=attribution
-                if pick:j["owner_supplier_code"]=pick
-                else:j.pop("owner_supplier_code",None)
+                if pick:j.update(owner_supplier_code=pick,owner_supplier_pick=picked_by)
+                else:j.pop("owner_supplier_code",None);j.pop("owner_supplier_pick",None)
                 if body.confirm:
                     # Confirm-time accuracy: per field, its status before and changed yes/no; never a value.
                     supplier=(view["fields"].get("site") or {}).get("value") or ""

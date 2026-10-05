@@ -132,6 +132,8 @@ def _evidence(entry):
     elif entry.get("evidence_kind")=="printed":kind="printed"
     # Picked by the rules among candidate orders (decision 16): never shown as printed.
     elif entry.get("evidence_kind")=="selected":kind="selected"
+    # The owner's supplier-code pick (rule OWNER-PICK): scored as an owner entry, never as machine-read.
+    elif entry.get("evidence_kind")=="owner_entry":kind="owner_entry"
     elif _SHEET_ROW.match(reference):kind="sheet"
     elif "|" in reference:kind="table"
     elif source.startswith("Invoice"):kind="printed"
