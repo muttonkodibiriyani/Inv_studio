@@ -608,13 +608,13 @@ def create_app(data_dir=None):
         """Actor and time per owner entry; an unchanged entry keeps its first attribution."""
         before,previous,out=before or {},previous or {},{}
         now=datetime.now(timezone.utc).isoformat()
-        for key,value in (after.get("header") or {}).items():
-            k=f"header:{key}"
-            out[k]=previous[k] if k in previous and (before.get("header") or {}).get(key)==value else {"actor":actor.get(),"at":now}
+        for name,value in (after.get("header") or {}).items():
+            k=f"header:{name}"
+            out[k]=previous[k] if k in previous and (before.get("header") or {}).get(name)==value else {"actor":actor.get(),"at":now}
         for line,cells in (after.get("lines") or {}).items():
-            for key,value in cells.items():
-                k=f"line:{line}:{key}"
-                old=((before.get("lines") or {}).get(str(line)) or {}).get(key)
+            for name,value in cells.items():
+                k=f"line:{line}:{name}"
+                old=((before.get("lines") or {}).get(str(line)) or {}).get(name)
                 out[k]=previous[k] if k in previous and old==value else {"actor":actor.get(),"at":now}
         return out
     def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
