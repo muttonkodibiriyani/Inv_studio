@@ -413,3 +413,19 @@ def test_a_scan_whose_paddle_lines_reconcile_stops_after_paddle(monkeypatch,tmp_
     result,calls=scan_reads(monkeypatch,tmp_path,4,4)
     assert calls==['invoice2data','paddleocr'] and result['selected_engine']=='paddleocr'
     assert result['trace'][-1]['engine']=='docling' and result['trace'][-1]['status']=='skipped'
+
+
+def test_a_later_reader_that_loses_keeps_the_selected_readers_text_and_boxes(monkeypatch,tmp_path):
+    # Docling runs after an unreconciled PaddleOCR read, reads longer text but fewer lines, and loses:
+    # the target check must re-check PaddleOCR's values against PaddleOCR's own text and boxes.
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    lines=lambda n:[{'sku':f'S{i}','qty':'1','uom':'PCE','price':'10.00','net_amount':'10.00'} for i in range(n)]
+    reads={'paddleocr':{'text':'paddle page','boxes':[{'text':'paddle box'}],'invoice':{'number':'SYN-SCAN','date':'2026-01-15','currency':'AED','net':'40.00','tax':'2.00','lines':lines(2)}},
+           'docling':{'text':'a much longer docling page text','boxes':[{'text':'docling box'}],'invoice':{'number':'SYN-SCAN','lines':lines(1)}}}
+    def read(engine,*args):
+        calls.append(engine)
+        return reads.get(engine,{'text':'','boxes':[],'invoice':None})
+    monkeypatch.setattr(engines,'local_read',read)
+    result=engines.process(tmp_path/'scan.pdf',opts,store,lambda *args:None)
+    assert calls==['invoice2data','paddleocr','docling'] and result['selected_engine']=='paddleocr'
+    assert result['text']=='paddle page' and result['boxes']==[{'text':'paddle box'}]

@@ -155,8 +155,10 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
     trace=[];best=None;best_score=-1;text="";boxes=[];selected="none";best_evidence={}
     document_type_hint=None;extraction_note=None;native_review=[]
     ai_attempted=False;invoice2data_ocr=False
+    # The text and boxes of the selected local read: the target check re-checks its values against them.
+    selected_page=None
     def read_ai():
-        nonlocal best,best_score,selected,ai_attempted,best_evidence
+        nonlocal best,best_score,selected,ai_attempted,best_evidence,selected_page
         ai_attempted=True
         progress(options.provider,"AI is reading the invoice")
         start=time.monotonic()
@@ -174,7 +176,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             # Each candidate stays intact; never blend conflicting engine values.
             # A local read is kept on a completeness tie; the AI must read strictly more.
             if has_fields and score>best_score:
-                best=candidate;best_score=score;selected=f"{options.provider} / {options.model}"
+                best=candidate;best_score=score;selected=f"{options.provider} / {options.model}";selected_page=None
                 best_evidence=build_evidence(candidate.model_dump(mode="json"),boxes,"ai",header=ai_evidence)
             return bool(candidate.number and candidate.lines and candidate.net is not None and all(l.qty is not None and l.price is not None for l in candidate.lines))
         except Exception as e:
@@ -257,6 +259,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 selected=("native PDF text" if engine=="native_pdf_text" else
                     "invoice2data + PaddleOCR" if invoice2data_ocr and engine=="paddleocr" else engine)
                 best_evidence=build_evidence(result["invoice"],result.get("boxes",[]),"ocr" if engine=="paddleocr" else "native")
+                selected_page=(result["text"],result.get("boxes",[]))
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
             if engine=="native_pdf_text":
                 if native_suitable:
@@ -308,6 +311,10 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         extraction_note=None
     if native_review and selected in ("native PDF text","invoice2data"):
         extraction_note="Read from the PDF text; every printed amount checks. Review: "+"; ".join(native_review)+"."
+    if selected_page is not None:
+        # A later reader that lost on score (e.g. Docling after an unreconciled PaddleOCR read) must not
+        # replace the selected reader's text and boxes.
+        text,boxes=selected_page
     return {"invoice":(best or Invoice()).model_dump(mode="json"),"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
             "document_type_hint":document_type_hint,"extraction_note":extraction_note,
