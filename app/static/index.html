@@ -123,6 +123,7 @@
                 </div>
                 <div class="batch-actions">
                   <button id="batch-review" class="button button-secondary button-small" type="button" disabled>Download review workbook</button>
+                  <button id="batch-fine-rules" class="button button-secondary button-small" type="button" disabled>Run ULTA rules</button>
                   <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export approved</button>
                   <button id="batch-delete" class="button button-quiet button-small danger-text" type="button" disabled>Delete selected…</button>
                 </div>
@@ -585,6 +586,17 @@
         <div class="dialog-header"><div><p class="eyebrow">Combined extracted facts</p><h2 id="batch-review-title">Download one review workbook?</h2><p><span id="batch-review-count">0</span> saved invoice records will be combined into one Excel file.</p></div><button class="icon-button" type="button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5l-10 10"/></svg></button></div>
         <div class="draft-warning" role="note"><strong>EXTRACTION · REVIEW ONLY</strong><span>Blank or unmatched fields stay blank. This download does not approve invoices, reserve receipts or write to the approved export ledger. Save each edited invoice before continuing.</span></div>
         <div class="dialog-actions"><button class="button button-quiet" type="button" value="cancel">Cancel</button><button id="confirm-batch-review" class="button button-primary" type="button">Download combined review Excel</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="fine-rules-dialog" aria-labelledby="fine-rules-title">
+      <form method="dialog" class="dialog-shell fine-rules-dialog">
+        <div class="dialog-header"><div><p class="eyebrow">ULTA fine-grained rules</p><h2 id="fine-rules-title">Rule results</h2><p id="fine-rules-count">0 invoices</p></div><button class="icon-button" type="button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5l-10 10"/></svg></button></div>
+        <div id="fine-rules-config-note" class="draft-warning" role="note" hidden><strong>BUSINESS INPUT MISSING</strong><span id="fine-rules-config-text"></span></div>
+        <div id="fine-rules-summary" class="fine-rules-summary" aria-live="polite"></div>
+        <div id="fine-rules-results" class="fine-rules-results"></div>
+        <p id="fine-rules-target-reason" class="validation-summary" hidden></p>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" value="cancel">Close</button><button id="fine-rules-review" class="button button-secondary" type="button" disabled>Download review workbook</button><button id="fine-rules-target" class="button button-primary" type="button" disabled>Download target workbook</button></div>
       </form>
     </dialog>
 

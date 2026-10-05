@@ -535,6 +535,7 @@ function updateBatchControls() {
     ? `${reviewableSelected} have extracted data; ${approvedSelected} approved. Delete removes only the selected invoices.`
     : "Select invoices to download together or delete.";
   $("#batch-review").disabled = valid.length === 0 || reviewableSelected !== valid.length;
+  $("#batch-fine-rules").disabled = valid.length === 0 || reviewableSelected !== valid.length;
   $("#batch-export").disabled = valid.length === 0 || approvedSelected !== valid.length || app.reviewDirty;
   $("#batch-delete").disabled = valid.length === 0;
   $("#select-all-finished").disabled = !jobs.some(isSelectableInvoice);
@@ -1108,6 +1109,172 @@ async function downloadBatchReview() {
   } finally {
     button.disabled = false;
     button.textContent = "Download combined review Excel";
+  }
+}
+
+const FINE_RULES_STATUS = { Approved: "success", Review: "warning", Blocked: "error" };
+
+function fineRulesJobIds() {
+  return selectedBatchReviewJobs().map((job) => job.id);
+}
+
+function fineRulesCell(value) {
+  // Blanks stay blank: no placeholder text is invented for a missing value.
+  const text = value === null || value === undefined ? "" : String(value);
+  return make("td", text ? "" : "fine-rules-blank", text);
+}
+
+function fineRulesTable(title, columns, rows, emptyText) {
+  const section = make("div", "fine-rules-block");
+  section.append(make("h4", "", title));
+  if (!rows.length) {
+    section.append(make("p", "table-empty", emptyText));
+    return section;
+  }
+  const table = make("table", "line-table fine-rules-table");
+  const head = make("tr");
+  columns.forEach(([label]) => head.append(make("th", "", label)));
+  table.append(make("thead"), make("tbody"));
+  table.tHead.append(head);
+  rows.forEach((row) => {
+    const tr = make("tr");
+    columns.forEach(([, key]) => tr.append(fineRulesCell(typeof key === "function" ? key(row) : row[key])));
+    table.tBodies[0].append(tr);
+  });
+  const scroll = make("div", "table-scroll");
+  scroll.append(table);
+  section.append(scroll);
+  return section;
+}
+
+function renderFineRulesResult(result) {
+  const card = make("details", "fine-rules-invoice");
+  card.open = result.status !== "Approved";
+  const summary = make("summary");
+  const header = result.header || {};
+  summary.append(
+    make("span", `status-pill ${FINE_RULES_STATUS[result.status] || "neutral"}`, result.status),
+    make("strong", "", result.filename || header.Document || ""),
+    make("small", "", `${(result.exceptions || []).filter((e) => e.blocking).length} blocking · ${(result.exceptions || []).length} exceptions`),
+  );
+  card.append(summary);
+
+  const facts = make("dl", "fine-rules-facts");
+  const po = result.po || {};
+  [["Document", header.Document], ["Supplier Site", header["Supplier Site"]], ["Order No", header["Order No"]],
+    ["PO source", po.source], ["Location", header.Location], ["Location Type", header["Location Type"]],
+    ["Market", header.Market], ["Currency", header.Currency], ["Document Date", header["Document Date"]],
+    ["Net Amount", header["Net Amount"]], ["Tax Amount", header["Tax Amount"]], ["EBS supplier code", result.ebs_supplier_code]]
+    .forEach(([label, value]) => {
+      const item = make("div");
+      const text = value === null || value === undefined ? "" : String(value);
+      item.append(make("dt", "", label), make("dd", text ? "" : "fine-rules-blank", text));
+      facts.append(item);
+    });
+  card.append(facts);
+
+  card.append(fineRulesTable("Exceptions", [
+    ["Rule ID", "Rule ID"], ["Type", "Exception Type"], ["Line", "Line No."], ["Description", "Description"],
+    ["Candidates / evidence", "Candidates / Evidence"], ["Proposed resolution", "Proposed Resolution"],
+    ["Blocking", (e) => (e.blocking ? "Yes" : "No")],
+  ], result.exceptions || [], "No exceptions."));
+
+  card.append(fineRulesTable("Candidate PO and location", [
+    ["PO", "POGRN RMS Order No"], ["Location", "POGRN Location ID"], ["Location type", "Location Type"],
+    ["Market", "Market"], ["Qty match", "Qty Match"], ["Pre-tax value match", "Pre-Tax Value Match"],
+    ["Checks passed", "Candidate Pass Count"], ["Status", "Validation Status"], ["Reason", "Exception Reason"],
+    ["Evidence row", "POGRN Row Reference"],
+  ], result.pogrn_validation || [], "No PO/GRN candidate was found for this supplier."));
+
+  const lines = result.lines || [];
+  const items = (result.workbench || []).map((row, index) => ({ ...lines[index], ...row }));
+  card.append(fineRulesTable("Items", [
+    ["Line", "Line No."], ["Barcode", "Barcode"], ["VPN", "VPN"], ["ITEM_PARENT", "ITEM_PARENT"], ["ITEM", "ITEM"],
+    ["Match", "Match Method"], ["Rule ID", "Rule ID"], ["Confidence", "Confidence"],
+    ["Barcode check", "Barcode Check"], ["VPN check", "VPN Check"], ["Description check", "Description Check"],
+    ["Status", "Validation Status"],
+  ], items, "No invoice lines."));
+  return card;
+}
+
+function fineRulesConfigGaps(config) {
+  const gaps = [];
+  if (!Object.keys(config?.location_market || {}).length) gaps.push("location→market list (V-007)");
+  if (!(config?.supplier_site_currency || []).length) gaps.push("supplier-site currency list (V-010)");
+  return gaps;
+}
+
+async function openFineRules() {
+  const ids = fineRulesJobIds();
+  if (!ids.length) return;
+  if (app.reviewDirty) {
+    notify("Save the current invoice before running the rules. Your unsaved edits are still in the form.", "error", 8000);
+    return;
+  }
+  app.fineRules = { ids, results: [] };
+  $("#fine-rules-count").textContent = `Running on ${ids.length} invoice${ids.length === 1 ? "" : "s"}…`;
+  $("#fine-rules-summary").replaceChildren();
+  $("#fine-rules-results").replaceChildren();
+  $("#fine-rules-target-reason").hidden = true;
+  $("#fine-rules-review").disabled = true;
+  $("#fine-rules-target").disabled = true;
+  $("#fine-rules-dialog").showModal();
+  try {
+    const [config, run] = await Promise.all([
+      api("/api/fine-rules/config"),
+      api("/api/fine-rules/run", { method: "POST", body: { job_ids: ids } }),
+    ]);
+    const gaps = fineRulesConfigGaps(config);
+    $("#fine-rules-config-note").hidden = !gaps.length;
+    $("#fine-rules-config-text").textContent = gaps.length
+      ? `The ${gaps.join(" and ")} ${gaps.length === 1 ? "is" : "are"} missing, so no PO can be confirmed and every invoice stays in Review. The rules never guess these values.`
+      : "";
+    renderFineRules(run.results || []);
+  } catch (error) {
+    $("#fine-rules-count").textContent = "The rules could not run.";
+    $("#fine-rules-results").replaceChildren(make("p", "validation-summary error", error.message));
+  }
+}
+
+function renderFineRules(results) {
+  app.fineRules.results = results;
+  const counts = { Approved: 0, Review: 0, Blocked: 0 };
+  results.forEach((result) => { counts[result.status] = (counts[result.status] || 0) + 1; });
+  $("#fine-rules-count").textContent = `${results.length} invoice${results.length === 1 ? "" : "s"} checked. Nothing is approved or exported until you download.`;
+  $("#fine-rules-summary").replaceChildren(...Object.entries(counts)
+    .map(([status, count]) => make("span", `status-pill ${FINE_RULES_STATUS[status]}`, `${count} ${status}`)));
+  $("#fine-rules-results").replaceChildren(...results.map(renderFineRulesResult));
+  $("#fine-rules-review").disabled = !results.length;
+  const notApproved = results.filter((result) => result.status !== "Approved");
+  $("#fine-rules-target").disabled = !results.length || notApproved.length > 0;
+  $("#fine-rules-target-reason").hidden = !notApproved.length;
+  $("#fine-rules-target-reason").textContent = notApproved.length
+    ? `Target workbook is available only when every invoice is Approved. Not approved: ${notApproved
+      .map((result) => `${result.filename || result.header?.Document || "invoice"} (${result.status})`).join(", ")}.`
+    : "";
+}
+
+async function downloadFineRules(kind) {
+  const ids = app.fineRules?.ids || [];
+  if (!ids.length) return;
+  const button = $(`#fine-rules-${kind}`);
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "Preparing…";
+  try {
+    const response = await studioFetch(`/api/fine-rules/${kind}.xlsx`, { method: "POST", body: { job_ids: ids } });
+    if (!response.ok) throw await responseError(response);
+    const fallback = kind === "target" ? "ULTA_Target.xlsx" : "ULTA_Rules_Review.xlsx";
+    saveBlob(await response.blob(), dispositionFilename(response.headers.get("content-disposition") || "", fallback));
+  } catch (error) {
+    if (kind === "target") {
+      $("#fine-rules-target-reason").textContent = error.message;
+      $("#fine-rules-target-reason").hidden = false;
+    }
+    notify(error.message, "error", 8000);
+  } finally {
+    button.textContent = label;
+    button.disabled = kind === "target" ? app.fineRules.results.some((r) => r.status !== "Approved") : false;
   }
 }
 
@@ -2117,6 +2284,9 @@ function bindEvents() {
   $("#batch-review").addEventListener("click", openBatchReview);
   $("#confirm-batch-review").addEventListener("click", downloadBatchReview);
   $("#batch-export").addEventListener("click", exportBatch);
+  $("#batch-fine-rules").addEventListener("click", openFineRules);
+  $("#fine-rules-review").addEventListener("click", () => downloadFineRules("review"));
+  $("#fine-rules-target").addEventListener("click", () => downloadFineRules("target"));
   $("#batch-delete").addEventListener("click", openDeleteInvoices);
   $("#confirm-delete-invoices").addEventListener("click", deleteInvoices);
   $("#delete-invoice-acknowledge").addEventListener("change", () => {

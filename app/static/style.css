@@ -617,6 +617,23 @@ dialog::backdrop { background: rgb(24 36 33 / 56%); backdrop-filter: blur(3px); 
 .dialog-shell { max-height: calc(100vh - 36px); overflow-y: auto; padding: 23px; }
 .small-dialog { max-width: 600px; }
 .manual-draft-dialog { width: min(980px, calc(100vw - 28px)); }
+.fine-rules-dialog { width: min(1180px, calc(100vw - 28px)); }
+dialog:has(.fine-rules-dialog) { width: min(1180px, calc(100vw - 28px)); }
+.fine-rules-summary { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.fine-rules-results { display: grid; gap: 10px; }
+.fine-rules-invoice { background: #fafcfb; border: 1px solid var(--line); border-radius: 11px; }
+.fine-rules-invoice > summary { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 11px 13px; cursor: pointer; }
+.fine-rules-invoice > summary strong { font-size: 12px; }
+.fine-rules-invoice > summary small { color: var(--muted); font-size: 10px; }
+.fine-rules-invoice[open] > summary { border-bottom: 1px solid var(--line); }
+.fine-rules-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 14px; margin: 0; padding: 12px 13px; }
+.fine-rules-facts dt { color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.fine-rules-facts dd { min-height: 18px; margin: 2px 0 0; font-size: 11px; overflow-wrap: anywhere; }
+.fine-rules-blank { background: repeating-linear-gradient(135deg, transparent 0 5px, #eef2f0 5px 6px); }
+.fine-rules-block { padding: 0 13px 13px; }
+.fine-rules-block h4 { margin: 4px 0 6px; font-size: 11px; }
+.fine-rules-table td { padding: 6px 7px; font-size: 10px; overflow-wrap: anywhere; }
+.fine-rules-table td:nth-child(n) { width: auto; min-width: 0; }
 .draft-warning { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; padding: 12px 13px; color: #765319; background: var(--warning-bg); border: 1px solid #ead7a5; border-radius: 10px; font-size: 10px; }
 .draft-warning strong { flex: 0 0 auto; padding: 5px 8px; color: #fff; background: #9a6d19; border-radius: 6px; font-size: 9px; letter-spacing: .06em; }
 .draft-warning code { font-size: 9px; font-weight: 800; }
@@ -759,3 +776,7 @@ dialog::backdrop { background: rgb(24 36 33 / 56%); backdrop-filter: blur(3px); 
 .button-danger:hover { background: #852424; }
 .delete-invoice-list { max-height: 12rem; overflow-y: auto; padding-left: 1.5rem; line-height: 1.8; }
 .batch-selection > div { display: flex; flex-wrap: wrap; gap: .25rem .65rem; }
+
+@media (max-width: 700px) {
+  .fine-rules-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
