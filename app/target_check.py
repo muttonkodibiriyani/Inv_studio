@@ -234,7 +234,7 @@ def check_evidence(value, evidence, sources, location=None):
     if source.startswith("Owner VAT code table"):
         ok = any(v.get("code") == value for v in sources.config.get("vat_codes", []))
         return (VERIFIED, "") if ok else (MISMATCH, "")
-    if source.startswith("Invoice"):
+    if source.startswith("Invoice") or source == PRINTED_SOURCE:
         original = evidence.get("original", "")
         found = printed(sources.text, original)
         if found is False and same(value, original):
@@ -295,12 +295,14 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
 
 
 SELECTED = "Selected by POG-001"  # RULES 7ae7836: Order No picked among candidates (decision 16)
+PRINTED_SOURCE = "Printed on invoice"  # matching.printed_evidence label (e.g. a multi-number totals row)
 SCAN_REASON = "evidence not re-checkable: read by AI from a scan; no box to re-check"
 
 
 def _ai_scan(evidence):
     """Printed evidence with no text layer to re-read and no box on its page reference: an AI read of a scan."""
-    return (str(evidence.get("source") or "").startswith("Invoice")
+    source = str(evidence.get("source") or "")
+    return ((source.startswith("Invoice") or source == PRINTED_SOURCE)
             and " box " not in f"{evidence.get('reference') or ''} ")
 
 
@@ -394,9 +396,16 @@ def arithmetic(view, sources):
         exact = _q(sum((q * c for q, c in pairs), Decimal(0)), places)
         per_line = sum((_q(q * c, places) for q, c in pairs), Decimal(0))
         ok = _q(net, places) in (exact, per_line)
-        out.append({"check": "lines_to_net", "status": PASS if ok else FAIL, "decimals": places,
-                    "detail": "Sum of quantity x unit cost equals the Header net" if ok else
-                    "Sum of quantity x unit cost differs from the Header net"})
+        # Unit costs printed rounded (line totals from the unrounded price): each line may be off by up to
+        # quantity x half a unit-cost step. Within that bound it is a warning, never a pass.
+        step = max(Decimal(1).scaleb(c.as_tuple().exponent) for _, c in pairs)
+        bound = sum((abs(q) for q, _ in pairs), Decimal(0)) * step / 2 + Decimal(1).scaleb(-places)
+        rounded = not ok and abs(exact - _q(net, places)) <= bound
+        status, detail = ((PASS, "Sum of quantity x unit cost equals the Header net") if ok else
+                          (WARNING, "Sum of quantity x unit cost differs from the Header net within unit-cost "
+                                    "rounding") if rounded else
+                          (FAIL, "Sum of quantity x unit cost differs from the Header net"))
+        out.append({"check": "lines_to_net", "status": status, "decimals": places, "detail": detail})
 
     if net is None or tax is None:
         out.append({"check": "net_plus_tax_gross", "status": SKIPPED, "detail": "Header net or tax is empty"})

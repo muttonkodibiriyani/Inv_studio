@@ -319,3 +319,14 @@ def test_selected_order_no_is_checked_on_rms_order_no():
     assert cell["status"] == "verified" and "not printed" in cell["reason"]
     v = view(fields={"po": field("800001", ev(sel, "PO Extract!5"))})  # held by the row, but as LOCATION
     assert status(tc.check_view(v, sources()), "Header", "Order No") == ("mismatch", "")
+
+
+def test_lines_to_net_within_unit_cost_rounding_is_a_warning():
+    # Unit cost printed as 0.33 for a true 1/3; the 2.00 net is 6 x 1/3.
+    sd = ev("Supplier-site table", "200001|v1", "", "table")
+    net = field("2.00", ev("Invoice printed total", "page 1", "2.00", "printed"))
+    v = view(fields={"currency": field("SYD", sd), "net": net}, lines=[line(1, cost="0.33", qty="6")])
+    k = check(tc.check_view(v, sources()), "lines_to_net")
+    assert k["status"] == "warning" and "rounding" in k["detail"]
+    v = view(fields={"currency": field("SYD", sd), "net": net}, lines=[line(1, cost="0.66", qty="6")])
+    assert check(tc.check_view(v, sources()), "lines_to_net")["status"] == "fail"
