@@ -868,6 +868,7 @@ function renderTrace(job) {
         layout: "Layout conversion",
         docling_table: "Table and word geometry conversion",
         docling_table_higher_resolution: "Table conversion after a higher-resolution read",
+        table_higher_resolution: "Table conversion after a higher-resolution read",
         layout_higher_resolution: "Layout conversion after a higher-resolution read",
         text_only: "Text only",
       };
