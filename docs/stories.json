@@ -19,12 +19,12 @@
     "role": "AP operator",
     "want": "extract headers and every item line from supported files",
     "benefit": "I avoid retyping supplier documents",
-    "status": "Local paths measured; broad 95% quality and current hosted deployment remain pending",
+    "status": "Local and hosted paths measured on bounded cases; broad 95% quality remains unproven",
     "acceptance": [
-      "Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family; Paddle has a conservative 90.91% floor with descriptions unproven; Docling retains documented long-file and scan failures.",
+      "Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family; Paddle has a conservative 90.91% floor with descriptions unproven, while a separate bounded adaptive local two-page path improved from 90/99 (90.9%) to 96/99 (97.0%) with 23/23 rows, about 168 seconds combined and 2.31 GiB peak memory. Revision 00008 introduced Paddle's 360-second budget and 150-second eligibility ceiling; its hosted Paddle run completed the adaptive path in 242.98 seconds and returned the same 23 rows and 96/99 facts. A separate hosted managed-AI check returned 23 rows and 97/99 facts in 16.18 seconds. Docling stays capped at 240 seconds and exposes its 10/23 result on that scan and ten-page limitations.",
       "A readable PDF with no matching template keeps native text; conservative rules require an invoice heading, reject purchase orders and never infer internal codes or totals.",
-      "The job view names the active extraction stage.",
-      "Unread or incomplete output records an explainable reader trace.",
+      "A scanned invoice2data route names Paddle as its image-text input in the trace.",
+      "The job view names the active extraction stage and separates engine failure from text-only output with zero structured items; field completeness is read coverage, not accuracy.",
       "Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction."
     ]
   },
@@ -34,10 +34,11 @@
     "role": "AP operator",
     "want": "select a provider/model and enable automatic fallback",
     "benefit": "unfamiliar layouts can be proposed for review",
-    "status": "Adapter contracts and a narrow 15-document/570-line source check passed; representative accuracy and current hosted deployment remain pending",
+    "status": "Adapter contracts and bounded hosted managed-AI checks passed; representative accuracy and live subscription inference remain pending",
     "acceptance": [
       "Managed Vertex uses the hosted service identity and project billing; every AI path still requires an explicitly confirmed plan.",
       "Provider output must pass the strict invoice schema; missing facts remain missing.",
+      "Saved credentials are distinct from verified access; an available connected model is offered only when no connected model is selected and never replaces a still-connected user selection.",
       "Credentials never appear in browser storage, exported files or ordinary API errors.",
       "Mocked Claude and ChatGPT adapters do not imply live subscription eligibility or inference.",
       "The measured one-layout result cannot establish the expected 95% across suppliers, scans, languages and lengths; frozen held-out gold still governs acceptance."
@@ -49,12 +50,12 @@
     "role": "data steward",
     "want": "profile the whole item and PO/GRN files and approve explicit mappings",
     "benefit": "the validator uses evidence with known meaning",
-    "status": "The private source profile contains 412,139 rows; hosted import is paused/cancelling and live lookup availability is unconfirmed",
+    "status": "Atomic cutover completed with 412,139 live evidence rows, exact item/PO counts and a sanitized archive receipt beginning d06678; authenticated API and References UI lookup QA passed",
     "acceptance": [
       "Preserve original bytes, hashes and row/column provenance; inspect all populated cells.",
       "Separate unique matches, duplicates, ambiguous joins and missing fields.",
-      "Identifier and product-name searches show source/conflict context and require explicit confirmation without approving matching data.",
-      "Unknown seller/buyer/route, receipt acceptance and invoiced baseline block approval; never default them silently."
+      "Identifier and fuzzy product-name searches show source/conflict context plus price/quantity/unit clues and require explicit human confirmation without approving matching data.",
+      "Unknown seller, printed buyer name versus internal buyer/company code, route, receipt acceptance and invoiced baseline block approval; never default them silently."
     ]
   },
   {
@@ -95,7 +96,8 @@
       "Concurrent edits with stale revisions are rejected.",
       "Rules changing during extraction prevent stale approval and require a new processing plan.",
       "A manual draft created from an active job cannot alter the job revision, extracted invoice or review status.",
-      "Printed line net/tax amounts survive edits without changing printed unit price; there is no automatic repricing."
+      "Printed line net/tax amounts survive edits without changing printed unit price; there is no automatic repricing.",
+      "Printed buyer name remains separate from the internal buyer/company code; a visible name cannot populate the code without approved reference evidence."
     ]
   },
   {
@@ -137,7 +139,7 @@
       "Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.",
       "Database and document evidence survive a replacement application instance.",
       "Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff.",
-      "Access hotfix 00005-zdk passed login, 31 retained jobs and sign-out; the complete current feature bundle still needs hosted verification."
+      "Final revision inv-studio-api-00009-vxw has 100% traffic; Paddle, managed AI, authenticated API/browser lookup, deletion/model controls and cancel-dialog behavior passed. The allowlist is owner-only, the owner account remained email-verified, unauthenticated API calls are denied and the smoke identity was deleted."
     ]
   },
   {
@@ -172,7 +174,7 @@
     "role": "AP operator",
     "want": "edit every target workbook field and download a draft while OCR is still running",
     "benefit": "urgent manual work is not blocked by a slow reader",
-    "status": "Implemented and locally browser/workbook verified; hosted release validation pending",
+    "status": "Implemented and hosted; job and ledger non-mutation checks passed",
     "acceptance": [
       "Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction, leading-zero-safe identifiers and Decimal arithmetic.",
       "Download requires an explicit unvalidated acknowledgement and visible DRAFT_UNVALIDATED/no-reservation disclosure.",
@@ -185,9 +187,9 @@
     "role": "data steward",
     "want": "search actual item and PO sources by identifier or product name",
     "benefit": "I can find evidence without loading unapproved rows into canonical matching",
-    "status": "The 412,139-row private source profile is known, but hosted import is paused/cancelling and live lookup reports zero rows",
+    "status": "Atomic cutover completed with 412,139 live source-evidence rows and exact item/PO counts; authenticated API and References UI lookup QA passed and lookup cannot approve canonical matching",
     "acceptance": [
-      "Results retain source row and conflict/duplicate context with filters and bounded pagination.",
+      "Results retain source row and conflict/duplicate context with filters, bounded pagination and visible name/price/quantity/unit matching clues.",
       "The operator explicitly confirms a selected result before it can populate the manual workspace.",
       "Lookup source evidence is never represented as approved matching, receipt allocation or export readiness."
     ]
@@ -198,11 +200,25 @@
     "role": "workspace owner",
     "want": "connect the restricted Claude CLI or move my ChatGPT registration into my authenticated hosted workspace",
     "benefit": "the provider can use my authorized account without exposing credentials through browser state",
-    "status": "Connection and transfer controls are implemented in source; live subscription inference, release validation and hosted deployment pending",
+    "status": "Hosted model controls passed managed-Vertex autoload/retry and visible bad-key rejection; live Claude/ChatGPT subscription inference remains unverified",
     "acceptance": [
       "Claude setup tokens are encrypted, omitted from state, removable and supplied only to the restricted server CLI with tools disabled.",
       "ChatGPT local export creates a one-time bundle and then deletes local encrypted credentials, disconnects and clears the active account.",
       "Only authenticated cloud owners can import; cloud export and local import are denied, and tests do not imply live provider eligibility."
+    ]
+  },
+  {
+    "id": "INV-16",
+    "title": "Permanently remove invoice data with explicit retention",
+    "role": "workspace owner",
+    "want": "delete selected invoices with a clear retention receipt",
+    "benefit": "live evidence is removed without breaking duplicate or receipt controls",
+    "status": "Implemented and hosted deletion verification passed",
+    "acceptance": [
+      "Deletion requires explicit permanent confirmation and current job revisions; active jobs and partial exported batches are rejected atomically.",
+      "Live job payloads, source objects, detailed invoice audit, generated exports and batch workbooks are removed.",
+      "Approved invoices retain only the invoice key and PO-line quantity allocations required for duplicate and receipt controls, plus a minimal deletion audit without invoice content.",
+      "Provider backups, logs, object versions and soft-deleted copies follow provider retention and are outside the live-store action."
     ]
   }
 ]

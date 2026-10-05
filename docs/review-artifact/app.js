@@ -12,8 +12,8 @@ const node = (tag, className, text) => {
 const flowDetails = {
   1: ["Input control", "Each selected file becomes one job; up to two jobs run at once and the rest stay queued.", "Supported document, image and structured-text formats are checked for type and size. One file must contain one invoice; combined invoices must be split before upload."],
   2: ["Decision control", "The reviewer sees the effective rules before any document is processed.", "The plan names the engine, optional provider and model, reference version, tolerances, files and warnings. Cancel sends no document and preserves the queue."],
-  3: ["Extraction control", "The job names each stage; optional AI is a permitted fallback branch.", "A supplier template is tried first. Conservative native rules require an invoice heading, reject purchase orders and leave ambiguity empty. Managed Vertex or another selected provider can follow a confirmed plan. Completeness is not confidence."],
-  4: ["Business control", "Canonical references approve; lookup only supplies source evidence.", "The private source profile contains 412,139 item and PO/GRN rows, but hosted lookup currently reports zero loaded rows. Recovery, mappings and business meanings remain pending; a lookup choice never makes an invoice ready."],
+  3: ["Extraction control", "The job names each stage; optional AI is a permitted fallback branch.", "A supplier template is tried first. A scanned invoice2data route names Paddle as its input. The trace separates failed engines from text-only attempts, and completeness is read coverage rather than accuracy."],
+  4: ["Business control", "Canonical references approve; lookup only supplies source evidence.", "Atomic cutover completed with 412,139 item and PO/GRN evidence rows. Authenticated API ranking and strict-filter checks passed, but a person must still inspect and confirm every candidate; a lookup choice never makes an invoice ready."],
   5: ["Human control", "A person compares editable values with the source and confirms the evidence review.", "The original document, extracted evidence, derivations and validation issues stay together. Revision checks stop stale updates from overwriting newer work."],
   6: ["Release control", "Three workbook routes remain visibly separate.", "Combined EXTRACTION_REVIEW_ONLY exports saved processed facts without approval or allocation. Approved export revalidates and reserves receipts. The all-field DRAFT_UNVALIDATED path requires acknowledgement and reserves nothing."],
 };
@@ -27,21 +27,21 @@ const stories = [
   },
   {
     number: "INV-02", status: "working", persona: "AP operator", title: "Read digital invoices and scans",
-    summary: "Avoid retyping supplier documents.", delivery: "Local paths measured; broad 95% quality and current hosted deployment remain pending",
+    summary: "Avoid retyping supplier documents.", delivery: "Bounded local and hosted paths measured; broad 95% quality remains unproven",
     story: "As an AP operator, I want to extract headers and every item line from supported files so I avoid retyping supplier documents.",
-    acceptance: ["Native PDF tables recovered 570/570 lines and 3,990/3,990 tested line facts from one layout family; this is not a cross-supplier result.", "Paddle recovered 6/6 scan lines with a conservative 60/66 = 90.91% floor because descriptions remain unproven.", "Docling recovered bounded native-table examples, but a ten-page timeout and three scan failures remain visible release limits."],
+    acceptance: ["Native PDF tables recovered 570/570 lines and 3,990/3,990 tested line facts from one layout family; a hosted native check recovered 193 rows and 1,351/1,351 line facts in 10.21 seconds.", "Paddle recovered 6/6 adjudicated scan lines with a conservative 60/66 = 90.91% floor. Its adaptive two-page path returned 96/99 (97.0%) and 23/23 rows locally, then the same result hosted on revision 00008 in 242.98 seconds.", "Docling recovered bounded native tables but only 10/23 lines on that challenging two-page scan with poor source-position matches; a ten-page timeout remains visible."],
   },
   {
     number: "INV-03", status: "pending", persona: "AP operator", title: "Use a chosen AI connection for exceptions",
-    summary: "Let unfamiliar layouts be proposed for review.", delivery: "Narrow 15-document/570-line check passed; representative accuracy and deployment remain pending",
+    summary: "Let unfamiliar layouts be proposed for review.", delivery: "Hosted managed-Vertex checks passed; representative accuracy and live subscription inference remain pending",
     story: "As an AP operator, I want to select a provider/model and enable automatic fallback so unfamiliar layouts can be proposed for review.",
-    acceptance: ["Managed Vertex uses the workspace identity/project billing; every AI call requires explicit selection or confirmed fallback.", "All source-tested fields were exact on 15 documents/570 lines from one layout family; that cohort does not prove the expected 95% across suppliers, scans, languages and lengths.", "The acceptance targets require frozen held-out header exact, line exact and zero-correction metrics with failures in every denominator."],
+    acceptance: ["Managed Vertex uses the workspace identity/project billing; every AI call requires explicit selection or confirmed fallback.", "Saved credentials are distinct from verified provider access; model auto-offer does not replace a still-connected user selection.", "All source-tested fields were exact on 15 documents/570 lines from one layout family; that cohort does not prove the expected 95% across suppliers, scans, languages and lengths."],
   },
   {
     number: "INV-04", status: "planned", persona: "Data steward", title: "Map and approve business reference extracts",
-    summary: "Make the validator use evidence with known meaning.", delivery: "Private source profile known; hosted import paused and live lookup reports zero rows",
+    summary: "Make the validator use evidence with known meaning.", delivery: "412,139 evidence rows live; API lookup QA passed; approval mappings unresolved",
     story: "As a data steward, I want to profile the whole item and PO/GRN files and approve explicit mappings so the validator uses evidence with known meaning.",
-    acceptance: ["Preserve original bytes, hashes and row/column provenance; inspect all populated cells.", "Product-name and identifier lookup shows conflicts and requires explicit confirmation.", "Lookup evidence never becomes approved matching data; missing business meanings remain held."],
+    acceptance: ["Preserve original bytes, hashes and row/column provenance; inspect all populated cells.", "Product-name and identifier lookup shows conflicts plus price/quantity/unit clues and requires explicit human confirmation.", "Printed buyer name remains separate from the internal buyer/company code; lookup evidence never becomes approved matching data."],
   },
   {
     number: "INV-05", status: "working", persona: "AP operator", title: "Match the exact supplier route and items",
@@ -59,7 +59,7 @@ const stories = [
     number: "INV-07", status: "working", persona: "AP reviewer", title: "Review evidence and resolve exceptions",
     summary: "Ensure every exported value has checked evidence.", delivery: "Implemented and browser verified",
     story: "As an AP reviewer, I want to compare the source with editable fields and record review so every exported value has checked evidence.",
-    acceptance: ["Review confirmation cannot override validation holds.", "Printed line net and tax remain separate from printed unit price and are never repriced to force arithmetic.", "Concurrent edits and batch selection require an explicit save; stale revisions are rejected."],
+    acceptance: ["Review confirmation cannot override validation holds.", "Printed line net/tax remain separate from unit price, and printed buyer name remains separate from the internal buyer/company code.", "Concurrent edits and batch selection require an explicit save; stale revisions are rejected."],
   },
   {
     number: "INV-08", status: "working", persona: "AP operator", title: "Download combined review or approved Excel",
@@ -75,9 +75,9 @@ const stories = [
   },
   {
     number: "INV-10", status: "working", persona: "Workspace owner", title: "Run a restricted cloud workspace",
-    summary: "Use a hosted portal without losing evidence on restart.", delivery: "Access hotfix verified; complete feature deployment remains pending",
+    summary: "Use a hosted portal without losing evidence on restart.", delivery: "Final revision 00009-vxw live; reader, lookup, control and owner-only allowlist checks passed",
     story: "As a workspace owner, I want to sign in to a Firebase frontend backed by durable GCP services so the team can use a hosted portal without losing evidence on restart.",
-    acceptance: ["Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.", "Database and document evidence survive a replacement application instance.", "Hotfix 00005-zdk passed login, 31 retained jobs and sign-out; the complete current feature bundle still needs hosted verification."],
+    acceptance: ["Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.", "Database and document evidence survive a replacement application instance.", "Final revision 00009-vxw uses the tested core image plus cancel/footer fixes; hosted reader, workbook, lookup, deletion/model and cancel-dialog checks passed; the owner-only allowlist, email-verified owner flag, unauthenticated denial and smoke-identity deletion checks passed."],
   },
   {
     number: "INV-11", status: "planned", persona: "Procurement owner", title: "Qualify suppliers for a new store or market",
@@ -93,21 +93,27 @@ const stories = [
   },
   {
     number: "INV-13", status: "pending", persona: "AP operator", title: "Download an explicitly unvalidated manual draft",
-    summary: "Keep urgent manual work moving during OCR.", delivery: "Locally browser/workbook verified; hosted release validation pending",
+    summary: "Keep urgent manual work moving during OCR.", delivery: "Implemented and hosted; job and ledger non-mutation passed",
     story: "As an AP operator, I want to edit every target workbook field and download a draft while OCR is still running.",
     acceptance: ["Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction.", "Explicit acknowledgement and workbook disclosures say DRAFT_UNVALIDATED and no receipt reservation.", "Draft creation does not change the job, approve references, write the approved ledger or reserve receipts."],
   },
   {
     number: "INV-14", status: "pending", persona: "Data steward", title: "Search large source extracts without implying approval",
-    summary: "Find source evidence without promoting it into matching.", delivery: "Source profile known; hosted import paused and live lookup reports zero rows",
+    summary: "Find source evidence without promoting it into matching.", delivery: "412,139 evidence rows live; authenticated API and UI QA passed",
     story: "As a data steward, I want to search actual item and PO sources by identifier or product name.",
-    acceptance: ["Results retain source row and conflict context with bounded pagination and filters.", "The operator explicitly confirms a selection before it populates the manual workspace.", "Lookup is never represented as matching approval, receipt allocation or export readiness."],
+    acceptance: ["Results retain source row, conflict context and visible name/price/quantity/unit clues with bounded pagination and filters.", "The operator explicitly confirms a selection before it populates the manual workspace.", "Lookup is never represented as matching approval, receipt allocation or export readiness."],
   },
   {
     number: "INV-15", status: "pending", persona: "Workspace owner", title: "Move an owner subscription connection",
-    summary: "Use an authorized account without exposing it through browser state.", delivery: "Controls implemented; live subscription inference and hosted deployment pending",
+    summary: "Use an authorized account without exposing it through browser state.", delivery: "Hosted model controls passed; live Claude/ChatGPT subscription inference remains unverified",
     story: "As a workspace owner, I want to connect restricted Claude or move my ChatGPT registration into my hosted workspace.",
     acceptance: ["Claude setup tokens are encrypted, removable and supplied only to the restricted CLI.", "ChatGPT export deletes local encrypted credentials, disconnects and clears the active account.", "Only authenticated cloud owners import; tests do not imply live eligibility or quality."],
+  },
+  {
+    number: "INV-16", status: "pending", persona: "Workspace owner", title: "Permanently delete invoice data",
+    summary: "Remove live evidence without breaking duplicate or receipt controls.", delivery: "Hosted deletion verification passed",
+    story: "As a workspace owner, I want confirmed deletion with a clear retention receipt.",
+    acceptance: ["Confirmation and current revisions are required; active jobs and partial exported batches are rejected atomically.", "Live jobs, source objects, detailed audit and workbook copies are removed.", "Only a minimal deletion audit and approved invoice-key/PO-line allocation tombstone remain; provider backups and versions follow provider retention."],
   },
 ];
 

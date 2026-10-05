@@ -27,7 +27,7 @@ for name in ('Title','Heading 1','Heading 2','Heading 3'):
 doc.add_paragraph('INV STUDIO',style='Subtitle')
 doc.add_heading('From supplier invoice\nto checked Excel',0)
 doc.add_paragraph('Solution design • operating model • verification record • build stories',style='Subtitle')
-doc.add_paragraph('5 October 2026\nAccess hotfix 00005-zdk passed authenticated state checks, browser login with 31 retained jobs and sign-out. The complete feature release is not yet live, and hosted lookup currently reports zero rows. 148 backend tests pass with PostgreSQL included and no skips; Ruff, the full Chromium workflow and all three Docker reader warmups pass. Measured native and Paddle results are bounded to their evaluated layouts, while Docling failures and the unresolved broad 95% expectation remain visible.')
+doc.add_paragraph('5 October 2026\nFinal revision inv-studio-api-00009-vxw has 100% traffic and uses the tested core image plus the cancel/footer fixes. Reader, workbook, lookup, deletion/model and cancel-dialog checks passed. The allowlist is owner-only, the owner account remained email-verified, unauthenticated API calls are denied and the temporary identity was deleted. The private 412,139-row evidence catalog completed atomic cutover; authenticated API and References UI checks passed without mutation. 214 backend tests pass with PostgreSQL included and no skips; Ruff, both Chromium workflows, all four GitHub checks and all three packaged reader warm-ups pass. Native and Paddle measurements remain bounded to their evaluated layouts; hosted adaptive Paddle reached 96/99 facts on one challenging two-page scan, while Docling recovered only 10/23 lines on that scan.')
 doc.add_paragraph('For senior leaders, product owners, AP operators and the engineering team. Read the decision and process first; use the data contract and stories when building or accepting a release.')
 doc.add_page_break()
 for file in ['solution-design.md','data-contract.md','operator-guide.md','validation.md','stories.md']:
@@ -87,7 +87,7 @@ def cards(title,items,footer=None):
 s=slide('From supplier invoice\nto checked Excel','INV STUDIO / SLT PROPOSAL AND WORKING MVP')
 box(s,.7,2.8,7.6,1.5,'Build the business controls in house.\nReuse local readers. Keep AI replaceable.',28,ink)
 box(s,9,2.65,3.5,2.6,'01\nProve the invoice workflow first',28,white,True,teal)
-box(s,.7,5.45,11.5,1.05,'Access hotfix 00005-zdk is verified. 148 backend tests, Chromium and three Docker reader warmups pass. Full feature deployment and hosted catalog recovery remain pending.',17,muted)
+box(s,.7,5.45,11.5,1.05,'Revision 00009-vxw is live. 214 tests, PostgreSQL, browsers, CI and reader warm-ups pass.',17,muted)
 cards('The problem is bigger than reading text',[
  ('Identity','Which supplier site, buying company, market route and item does this invoice belong to?'),
  ('Evidence','Was the quantity accepted? Was it already invoiced? Does the unit price and tax match?'),
@@ -111,28 +111,32 @@ cards('Three controlled routes to the workbook',[
  ('Manual draft','Every target field is editable during OCR. Explicit acknowledgement; DRAFT_UNVALIDATED reserves nothing.')], 'All three use exact 13/3/6 sheets. Only approved export can reserve receipt quantity.')
 cards('Cross-market supply needs an explicit route',[
  ('Supplier legal entity','A supplier name is not enough. Operational sites have their own identities and approved names.'),
- ('Buying company','The same seller may serve different owned companies. PO scope must identify the correct buyer.'),
+ ('Buying company','Printed buyer name is evidence, not an internal code. PO scope must identify the approved buyer.'),
  ('Route and currency','UAE → Kuwait with AED billing remains a distinct route. Currency equality does not prove approval.')])
 cards('Reference files are evidence, not assumptions',[
- ('Known source profile','Private source files contain 412,139 item and PO/GRN rows, but hosted lookup currently reports zero loaded rows.'),
- ('Show conflicts','Keep source sheet/row and duplicate context. Require explicit operator confirmation before copying evidence.'),
+ ('Known source profile','Atomic cutover completed with 412,139 rows: 114,940 item and 297,199 PO/GRN. Authenticated API ranking/filter checks passed.'),
+ ('Show conflicts','Keep provenance and duplicates. Name, price, quantity and unit clues rank candidates; a person confirms.'),
  ('Approve separately','Lookup never approves matching. Supplier/site, receipt, prior invoicing, route and tax meaning still need owners.')], 'Completed target examples and lookup hits are evidence; neither establishes canonical master-data approval.')
 cards('Cloud delivery is a controlled pilot',[
  ('Firebase frontend','Responsive portal, approved account sign-in and authenticated document downloads.'),
- ('GCP application','Cloud Run readers/API and managed Vertex through the service identity. Cloud SQL ledger; private evidence.'),
- ('Release gates','Deploy the complete feature bundle, restore lookup, then rerun authenticated extraction/export and persistence checks.')], 'Access hotfix 00005-zdk is verified; the full feature release and hosted catalog are not yet live.')
+ ('GCP application','Cloud Run readers/API and managed Vertex through the service identity. Cloud SQL is 1 vCPU / 3.75 GB; estimated compute about USD 49/month, plus storage.'),
+ ('Release status','Revision 00009-vxw is live. Reader, lookup and control checks passed; the allowlist is owner-only.')], 'The 412,139-row evidence catalog is live; catalog evidence is not canonical approval.')
 cards('Owner subscription paths keep a hard boundary',[
- ('Claude setup token','Encrypted on the server and provided only to a restricted hosted CLI invocation with tools disabled.'),
+ ('Saved vs verified','An encrypted saved key is not verified access. Model retrieval or an explicit probe verifies the connection.'),
  ('ChatGPT move','Local OAuth uses the application registration. Export deletes local credentials and clears the active account.'),
- ('Hosted owner import','Authenticated import verifies and encrypts the one-time bundle. Protect it, import promptly, then delete it.')], 'No automated result proves subscription eligibility, model access or live inference quality.')
+ ('Model selection','Offer a connected model only when none is selected; never replace a still-connected user choice.')], 'No automated result proves subscription eligibility, model access or live inference quality.')
+cards('Review and deletion keep meanings explicit',[
+ ('Buyer identity','Printed buyer name stays separate from the approved internal buyer/company code.'),
+ ('Reader trace','Scanned invoice2data names Paddle input. Failed and text-only attempts are separate; coverage is not accuracy.'),
+ ('Permanent deletion','Confirmed deletion removes live evidence; minimal ledger tombstones remain, and provider retention still applies.')])
 cards('Release checks are green; deployment remains bounded',[
- ('Repository gate','148 backend tests pass with PostgreSQL included and no skips. Ruff and the latest full Chromium workflow pass.'),
- ('Reader image','All three Docker reader warmups passed in 63 seconds and recovered both synthetic lines.'),
- ('Hosted boundary','00005-zdk restored access. The complete feature release is not live; hosted lookup reports zero rows.')])
+ ('Repository gate','214 backend tests pass with PostgreSQL included and no skips. Ruff, both Chromium workflows and all four GitHub checks pass.'),
+ ('Reader image','All three packaged reader warm-ups recovered two synthetic lines.'),
+ ('Hosted boundary','Revision 00009-vxw has 100% traffic. The allowlist is owner-only; public and direct-service APIs returned 401.')])
 cards('Measured AI-off reader evidence',[
- ('Native tables','15/15 PDFs, 570/570 rows and 3,990/3,990 tested line facts exact in one layout family; 24.6 s first total, 12.9 s warm.'),
- ('PaddleOCR','6/6 scan lines and 60/60 tested facts exact. Treating six descriptions as wrong gives a 60/66 = 90.91% floor.'),
- ('Docling','5/5, 1/1 and 17/17 native lines. Ten pages exceeded 528 s; three scans took 103–170 s and returned no reliable lines.')], 'These bounded cohorts do not prove the expected 95% across suppliers, scans, languages and lengths.')
+ ('Native tables','15/15 PDFs, 570/570 rows and 3,990/3,990 tested line facts exact in one family. Hosted: 193 rows and 1,351/1,351 line facts in 10.21 s.'),
+ ('PaddleOCR','Adaptive two-page path: 90/99 to 96/99 (97.0%), 23/23 rows locally; revision 00008 returned the same hosted result in 242.98 s.'),
+ ('Docling','Native examples and three small scans yielded 6/6 rows. A challenging scan gave 10/23 poor matches; ten pages exceeded 528 s.')], 'These bounded cohorts do not prove the expected 95% across suppliers, scans, languages and lengths.')
 cards('Managed Vertex: useful evidence, narrow cohort',[
  ('Measured result','All source-tested fields were exact across 15 documents and 570 lines from one layout family.'),
  ('Measured usage','36,450 input and 91,892 output tokens including reasoning across 15 successful calls.'),
@@ -152,7 +156,7 @@ cards('Extend the platform after invoice proof',[
 cards('The next business decisions',[
  ('Name the owners','AP process owner, reference steward, receiving owner and finance/tax approver.'),
  ('Accept the evidence','Confirm receipt status meaning, invoice baseline, route scope and the initial supplier test set.'),
- ('Authorize the rollout','Set approved users, provider choices and budget; sign off downstream workbook compatibility.')], 'Fifteen acceptance-driven implementation stories accompany the design and operator guide.')
+ ('Authorize the rollout','Set approved users, provider choices and budget; sign off downstream workbook compatibility.')], 'Sixteen acceptance-driven implementation stories accompany the design and operator guide.')
 prs.save(OUT/'Invoice_Studio_SLT.pptx')
 downloads=ROOT/'docs'/'review-artifact'/'downloads';downloads.mkdir(exist_ok=True)
 for name in ('Invoice_Studio_Design_and_Stories.docx','Invoice_Studio_SLT.pptx'):
