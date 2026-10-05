@@ -284,7 +284,10 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 for remaining in chain[chain.index(engine)+1:]:
                     trace.append({"engine":remaining,"status":"skipped","reason":"Native text is already readable; a supplier mapping or selected AI is needed, not another OCR pass."})
                 break
-            if options.engine in ("auto","ai") and engine=="paddleocr" and candidate is not None and candidate.number and candidate.lines:
+            # Lines that do not sum to the net (a table read short of the printed rows) are not a stopping
+            # point: the next local reader still runs and the existing score keeps the better read.
+            unreconciled=any(x.startswith("line amounts do not reconcile") for x in missing)
+            if options.engine in ("auto","ai") and engine=="paddleocr" and candidate is not None and candidate.number and candidate.lines and not unreconciled:
                 for remaining in chain[chain.index(engine)+1:]:
                     trace.append({"engine":remaining,"status":"skipped","reason":"Invoice fields were read. Remaining exceptions go to the selected AI or manual review."})
                 break

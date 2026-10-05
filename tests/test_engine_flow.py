@@ -384,3 +384,32 @@ def test_verify_scan_asks_the_local_reader_for_text_only_under_the_ocr_slots(mon
     monkeypatch.setattr(engines,'local_read',read)
     assert engines.verify_scan(tmp_path/'scan.pdf',tmp_path)==([{'text':'INV-1'}],'INV-1')
     assert seen==[('paddleocr',('--text-only',))]
+
+
+def scan_reads(monkeypatch,tmp_path,paddle_lines,docling_lines):
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    def invoice(lines):
+        return {'number':'SYN-SCAN','date':'2026-01-15','currency':'AED','net':'40.00','tax':'2.00','lines':[
+            {'sku':f'S{n}','qty':'1','uom':'PCE','price':'10.00','net_amount':'10.00','page':1+n//2} for n in range(lines)]}
+    def read(engine,*args):
+        calls.append(engine)
+        found={'paddleocr':paddle_lines,'docling':docling_lines}.get(engine)
+        return {'text':f'{engine} words','boxes':[],'invoice':invoice(found) if found else None}
+    monkeypatch.setattr(engines,'local_read',read)
+    return engines.process(tmp_path/'scan.pdf',opts,store,lambda *args:None),calls
+
+
+def test_a_scan_whose_paddle_lines_do_not_sum_to_the_net_still_reaches_docling(monkeypatch,tmp_path):
+    # A 2-page scan printing 4 lines; the PaddleOCR table read 2 of them, so its lines fall short of the net.
+    result,calls=scan_reads(monkeypatch,tmp_path,2,4)
+    assert calls==['invoice2data','paddleocr','docling']
+    assert result['selected_engine']=='docling' and len(result['invoice']['lines'])==4
+    # The existing score decides: a docling read no better than PaddleOCR's leaves PaddleOCR's read.
+    result,calls=scan_reads(monkeypatch,tmp_path,2,1)
+    assert calls==['invoice2data','paddleocr','docling'] and result['selected_engine']=='paddleocr'
+
+
+def test_a_scan_whose_paddle_lines_reconcile_stops_after_paddle(monkeypatch,tmp_path):
+    result,calls=scan_reads(monkeypatch,tmp_path,4,4)
+    assert calls==['invoice2data','paddleocr'] and result['selected_engine']=='paddleocr'
+    assert result['trace'][-1]['engine']=='docling' and result['trace'][-1]['status']=='skipped'
