@@ -908,8 +908,8 @@ def create_app(data_dir=None):
         RulesConfig.from_dict(body)
         with store.connection(True) as c:
             store.set("fine_rules_config",body,c)
-            # Mapping tables are private business data: the audit keeps their sizes, not their rows.
-            store.audit("fine_rules_config_changed",{k:(len(v) if isinstance(v,(list,dict)) else v) for k,v in body.items()},c)
+            # The configuration is private business data: the audit keeps field names and sizes, never values.
+            store.audit("fine_rules_config_changed",{k:(len(v) if isinstance(v,(list,dict,str)) else type(v).__name__) for k,v in body.items()},c)
         return body
 
     @app.post("/api/fine-rules/run")

@@ -1,6 +1,7 @@
 """Review fields, banner and download from ONE fine-rules result with evidence. Synthetic data only."""
 
 import io
+import json
 from datetime import datetime
 from decimal import Decimal
 
@@ -382,3 +383,14 @@ def test_an_order_selected_by_the_rules_is_shown_as_picked_not_printed():
                            "reference": "POGRN!12", "confidence": "Derived from POGRN", "evidence_kind": "selected"}]}
     po = rules_view(result)["fields"]["po"]
     assert po["value"] == "70002" and po["evidence"][0]["kind"] == "selected"
+
+
+def test_config_audit_records_field_names_and_lengths_never_values(production):
+    app, client = production
+    secret = "Synthetic Buyer Holding Co"
+    assert client.post("/api/fine-rules/config", json={**CONFIG, "buyer_name": secret, "version": "syn-v9", "value_decimals": 2},
+                       headers=H).status_code == 200
+    with app.state.store.connection() as c:
+        audits = [json.loads(r[0]) for r in c.execute("SELECT payload FROM audit WHERE event='fine_rules_config_changed'")]
+    assert audits[-1]["buyer_name"] == len(secret) and audits[-1]["version"] == len("syn-v9") and audits[-1]["value_decimals"] == "int"
+    assert secret not in json.dumps(audits) and "syn-v9" not in json.dumps(audits)
