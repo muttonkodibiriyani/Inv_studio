@@ -13,7 +13,9 @@ printed text, the owner mapping config, or an attributed owner entry):
 - no_evidence: filled with no evidence;
 - unverifiable: evidence not re-checkable (e.g. a printed source and no stored text);
 - data_gap: rests on a malformed owner extract row;
-- owner_entry_unattributed: an owner entry without a matching stored entry, actor and time.
+- owner_entry_unattributed: an owner entry without a matching stored entry, actor and time;
+- missing_line: a Details cell of an item line the invoice prints but the read lacks (or merged away); estimated
+  when lines_to_net fails, never matched (MEASURE, T2(b)).
 
 A filled owner-rule cell is a template failure (mismatch). The owner-facing line collapses the buckets:
 verified · empty by owner rule · empty (flagged) · needs checking (every other bucket).
@@ -33,7 +35,9 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 VERIFIED, EMPTY, MISMATCH = "verified", "empty_flagged", "mismatch"
 NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, OVER_CITED = "no_evidence", "unverifiable", "data_gap", "over_cited"
 OWNER_RULE_EMPTY, UNATTRIBUTED, OWNER_ENTRY = "empty_owner_rule", "owner_entry_unattributed", "owner_entry"
-STATUSES = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, UNATTRIBUTED)
+MISSING_LINE = "missing_line"
+STATUSES = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, UNATTRIBUTED,
+            MISSING_LINE)
 NEEDS_CHECKING = "needs_checking"
 # Empty by owner rule is correct but proves nothing from evidence: its own group, not added to verified (n/a).
 GROUPS = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, NEEDS_CHECKING)
@@ -53,6 +57,7 @@ HEADER_FIELDS = {"Document": "number", "Supplier Site": "site", "Order No": "po"
 OWNER_EMPTY = {"Ref No. 1", "Ref No. 2", "Ref No. 3", "Comment"}
 OWNER_EMPTY_REASON = "Owner rule: left empty (owner form 01a10c4d)"
 UPC_EMPTY_REASON = "Owner rule: UPC left empty; Item is the Item Master ITEM_PARENT (owner form 01a10c4d)"
+MISSING_LINE_REASON = "Item line missing or merged: the read lines do not sum to the Header net"
 LOCATION_TYPES = ("Store (S)", "Warehouse (W)")
 # ISO 4217 minor units for the currencies the owner trades in; anything else is compared at two decimals.
 CURRENCY_DECIMALS = {"KWD": 3, "BHD": 3, "OMR": 3, "JOD": 3, "IQD": 3, "TND": 3, "LYD": 3}
@@ -382,6 +387,26 @@ def _vat_rate(config, code):
     return None
 
 
+def printed_line_count(text):
+    """A single distinct 'Total lines: N' printed on the invoice (mirrors docling_extract._printed_line_count)."""
+    values = {int(m.group(1)) for m in re.finditer(r"(?i)\btotal\s+lines\s*:?\s*(\d{1,4})\b", text or "")
+              if 0 < int(m.group(1)) <= 1000}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def missing_lines(read, net, exact, text):
+    """Item lines missing or merged when lines_to_net fails (MEASURE, T2(b)): printed - read when the invoice
+    prints a line count, else |residual| / mean read-line net; at least 1, at most 2 x the read lines."""
+    printed_count = printed_line_count(text)
+    if printed_count is not None:
+        k = printed_count - read
+    elif exact > 0:
+        k = int((abs(net - exact) * read / exact).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    else:
+        k = 1
+    return min(max(k, 1), 2 * read)
+
+
 def arithmetic(view, sources):
     """Line totals vs Header net, net + tax = printed gross, Tax_Breakdown vs Header, at the currency's decimals."""
     currency = ((view.get("fields") or {}).get("currency") or {}).get("value")
@@ -407,7 +432,11 @@ def arithmetic(view, sources):
                           (WARNING, "Sum of quantity x unit cost differs from the Header net within unit-cost "
                                     "rounding") if rounded else
                           (FAIL, "Sum of quantity x unit cost differs from the Header net"))
-        out.append({"check": "lines_to_net", "status": status, "decimals": places, "detail": detail})
+        check = {"check": "lines_to_net", "status": status, "decimals": places, "detail": detail}
+        if status == FAIL:
+            check["missing_lines"] = k = missing_lines(len(lines), _q(net, places), exact, sources.text)
+            check["detail"] += f"; {k} item line(s) missing or merged"
+        out.append(check)
 
     if net is None or tax is None:
         out.append({"check": "net_plus_tax_gross", "status": SKIPPED, "detail": "Header net or tax is empty"})
@@ -561,6 +590,19 @@ def template(sheets, currency_places=None):
 # --------------------------------------------------------------------------- the per-invoice check
 
 
+def missing_line_cells(checks, upc="empty"):
+    """The Details cells of the item lines a failed lines_to_net counts as missing: never matched."""
+    k = next((c.get("missing_lines", 0) for c in checks if c["check"] == "lines_to_net"), 0)
+    cells = []
+    for i in range(1, k + 1):
+        for column in TEMPLATE["Details"][1:]:
+            if column == "UPC" and upc == "empty":
+                cells.append(_cell("Details", column, f"missing {i}", None, OWNER_RULE_EMPTY, reason=UPC_EMPTY_REASON))
+            else:
+                cells.append(_cell("Details", column, f"missing {i}", None, MISSING_LINE, reason=MISSING_LINE_REASON))
+    return cells
+
+
 def counts(cells, scope=None):
     picked = [c for c in cells if scope is None or c["scope"] == scope]
     by, groups = Counter(c["status"] for c in picked), Counter(c["group"] for c in picked)
@@ -575,6 +617,7 @@ def check_view(view, sources, transaction=1, upc="empty", entries=None, attribut
     currency = ((view.get("fields") or {}).get("currency") or {}).get("value")
     sheets = planned_rows(view, transaction, upc)
     checks = arithmetic(view, sources) + joins(sheets) + template(sheets, decimals(currency))
+    cells += missing_line_cells(checks, upc)
     total, metric = counts(cells), counts(cells, "metric")
     failed = [c["check"] for c in checks if c["status"] == FAIL]
     return {
@@ -597,7 +640,9 @@ def issues(result):
     out = []
     for core, code, message in ((True, "Target Mismatch", "cell(s) do not equal the source their evidence points to"),
                                 (False, "Target Unverified", "filled cell(s) could not be proven from their evidence")):
-        cells = [x for x in result["cells"] if x["group"] == NEEDS_CHECKING and (x["status"] == MISMATCH) == core]
+        # Missing-line cells are reported by the failed lines_to_net check below, not as unproven filled cells.
+        cells = [x for x in result["cells"] if x["group"] == NEEDS_CHECKING and x["status"] != MISSING_LINE
+                 and (x["status"] == MISMATCH) == core]
         if cells:
             fields = sorted({f"{x['sheet']}.{x['column']}" for x in cells})
             out.append({"code": code, "message": f"{len(cells)} {message}: {', '.join(fields)}", "owner": "Accounts payable",
@@ -702,7 +747,9 @@ def confirm_records(system, final, supplier="", at=None):
     before = {_key(c): c for c in (system or {}).get("cells", []) if c["scope"] == "metric"}
     after = {_key(c): c for c in (final or {}).get("cells", []) if c["scope"] == "metric"}
     records = []
-    for key in sorted(set(before) | set(after), key=lambda k: (k[0], k[1], k[2] or 0)):
+    # Read lines are numbered; missing-line cells carry 'missing i' and sort after them.
+    order = lambda k: (k[0], k[1], isinstance(k[2], str), k[2] if isinstance(k[2], int) else 0, str(k[2] or ""))  # noqa: E731
+    for key in sorted(set(before) | set(after), key=order):
         b, a = before.get(key), after.get(key)
         old, new = (b or {}).get("value", ""), (a or {}).get("value", "")
         changed = not (old == new or (old and new and same(new, old)))

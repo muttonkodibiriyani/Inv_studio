@@ -337,3 +337,82 @@ def test_a_printed_date_with_an_ordinal_day_or_a_full_month_name_equals_its_iso_
     assert tc.same("2031-03-03", "3rd March 2031") and tc.same("2031-03-03", "3 Mar 2031")
     assert tc.same("2031-03-21", "21st-March-2031") and tc.same("2031-03-22", "March 22nd 2031")
     assert not tc.same("2031-03-04", "3rd March 2031") and not tc.same("2031-03-03", "3rd Marchy 2031")
+
+
+# --------------------------------------------------------------------------- T2(b): missing item lines
+
+
+def missing(result):
+    return [c for c in result["cells"] if isinstance(c["line"], str) and c["line"].startswith("missing ")]
+
+
+def lines_check(result):
+    return next(k for k in result["checks"] if k["check"] == "lines_to_net")
+
+
+def test_missing_lines_from_the_residual_count_as_needs_checking_never_verified():
+    base = tc.check_view(view(), sources())
+    # One read line of 10.500 against a net of 31.500: two lines of the mean read-line net are missing.
+    r = tc.check_view(view(fields={"net": field("31.500", ev("Invoice printed total", "page 1", "31.500", "printed"))}),
+                      sources(text=TEXT + "\nNet 31.500"))
+    k = lines_check(r)
+    assert (k["status"], k["missing_lines"]) == (tc.FAIL, 2)
+    assert k["detail"].endswith("; 2 item line(s) missing or merged")
+    cells = missing(r)
+    assert {c["line"] for c in cells} == {"missing 1", "missing 2"}
+    assert all(c["scope"] == "metric" and c["value"] == "" for c in cells)
+    assert sorted(c["status"] for c in cells if c["line"] == "missing 1") == \
+        ["empty_owner_rule", "missing_line", "missing_line", "missing_line", "missing_line"]
+    m, b = r["metric"], base["metric"]
+    assert m["cells"] - b["cells"] == 10 and m["buckets"]["missing_line"] == 8
+    assert m["verified"] == b["verified"] and m["needs_checking"] - b["needs_checking"] == 8
+    assert r["holds"]
+    codes = [i["code"] for i in tc.issues(r)]
+    assert "Target Unverified" not in codes  # missing cells are not 'filled cells that could not be proven'
+    assert any(i["rule"] == "TARGET-LINES_TO_NET" and "2 item line(s)" in i["message"] for i in tc.issues(r))
+    assert r["summary"].endswith("lines do not sum to net")
+
+
+def test_printed_line_count_wins_over_the_residual():
+    lines = [line(n) for n in range(1, 5)]  # 4 read lines of 10.500 = 42.000
+    text = TEXT + "\nTotal Lines: 13"
+    r = tc.check_view(view(lines=lines, fields={"net": field("99.000", ev("Invoice printed total", "page 1", "99.000",
+                                                                            "printed"))}), sources(text=text))
+    assert lines_check(r)["missing_lines"] == 8  # 13 - 4 = 9, clamped to 2 x 4 read lines
+    r = tc.check_view(view(lines=lines[:3] + [line(4)] * 4, fields={"net": field("99.000", ev(
+        "Invoice printed total", "page 1", "99.000", "printed"))}), sources(text=text))
+    assert lines_check(r)["missing_lines"] == 6  # 13 - 7 read lines
+    assert tc.printed_line_count("Total lines: 3\nTotal lines: 4") is None  # two different counts: not known
+
+
+def test_merged_lines_that_over_sum_and_clamps():
+    over = view(fields={"net": field("2.100", ev("Invoice printed total", "page 1", "2.100", "printed"))})
+    assert lines_check(tc.check_view(over, sources()))["missing_lines"] == 1  # |2.1 - 10.5| / 10.5 rounds to 1
+    huge = view(fields={"net": field("999.000", ev("Invoice printed total", "page 1", "999.000", "printed"))})
+    assert lines_check(tc.check_view(huge, sources()))["missing_lines"] == 2  # at most 2 x read lines
+    printed_fewer = tc.check_view(over, sources(text=TEXT + "\nTotal lines: 1"))
+    assert lines_check(printed_fewer)["missing_lines"] == 1  # printed - read <= 0 still counts one
+    free = view(lines=[line(1, cost="0.000")])  # mean read-line net 0
+    assert lines_check(tc.check_view(free, sources()))["missing_lines"] == 1
+    assert tc.missing_lines(3, tc.Decimal("10"), tc.Decimal("-5"), "") == 1
+
+
+def test_pass_warning_and_skipped_add_no_missing_lines():
+    assert not missing(tc.check_view(view(), sources()))  # pass
+    rounded = view(lines=[line(1, cost="2.1", qty="5")],
+                   fields={"net": field("10.520", ev("Invoice printed total", "page 1", "10.520", "printed"))})
+    r = tc.check_view(rounded, sources())
+    assert lines_check(r)["status"] == tc.WARNING and not missing(r) and "missing_lines" not in lines_check(r)
+    r = tc.check_view(view(lines=[]), sources())
+    assert lines_check(r)["status"] == tc.SKIPPED and not missing(r)
+
+
+def test_missing_lines_in_barcode_mode_and_downstream_consumers():
+    v = view(fields={"net": field("21.000", ev("Invoice printed total", "page 1", "21.000", "printed"))})
+    r = tc.check_view(v, sources(), upc="barcode")
+    assert [c["status"] for c in missing(r)] == ["missing_line"] * 5
+    rows = tc.checks_rows([r])
+    assert sum(1 for x in rows if x.get("Line") == "missing 1" and x.get("Detail") == "missing_line") == 5
+    records = tc.confirm_records(r, r)  # read lines are ints, missing lines strings: still sorts
+    assert sum(1 for x in records if x["line"] == "missing 1") == 5 and not any(x["changed"] for x in records)
+    assert tc.log_fields(r)["checks"]["lines_to_net"] == tc.FAIL
