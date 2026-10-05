@@ -417,9 +417,12 @@ def create_app(data_dir=None):
         except Exception:slots.release();raise
 
     def public(j,full=True):
-        j={k:v for k,v in j.items() if k!="path"}
+        # The confirm-time snapshot and records are served by the target-check endpoints, not with every job.
+        j={k:v for k,v in j.items() if k not in ("path","target_system","target_accuracy")}
         if not full:
             j.pop("text",None);j.pop("boxes",None)
+            check=(j.get("rules") or {}).get("target_check")
+            if check:j["rules"]={**j["rules"],"target_check":{k:check[k] for k in ("counts","metric","holds","summary","upc")}}
         return j
 
     @app.get("/api/public-config")
@@ -547,7 +550,7 @@ def create_app(data_dir=None):
                 if body.confirm:
                     # Confirm-time accuracy: per field, its status before and changed yes/no; never a value.
                     supplier=(view["fields"].get("site") or {}).get("value") or ""
-                    j["target_accuracy"]=tc.confirm_records(j.get("target_system"),view["target_check"],supplier)
+                    j["target_accuracy"]=[{**r,"job_id":jid} for r in tc.confirm_records(j.get("target_system"),view["target_check"],supplier)]
                     store.audit("target_check_confirmed",{"job_id":jid,"revision":j["revision"],**tc.log_fields(view["target_check"]),
                                 "changed":sorted({r["field"] for r in j["target_accuracy"] if r["changed"]})},c)
             # Keep original derivation evidence, add new derivations and record edits separately.
@@ -595,10 +598,11 @@ def create_app(data_dir=None):
             else:
                 accepted=j["validation"].get("accepted",[])
                 content,evidence=rules_workbook([{**j["rules"],"owner_accepted":accepted}],target_upc(c))
+                content,target=with_checks_sheet(content,[j["rules"]])
                 receipt={"id":eid,"job_id":jid,"invoice_key":rules_key(j["rules"]),"number":inv.number,"created_at":datetime.now(timezone.utc).isoformat(),
                          "source":"fine_rules","rules_signature":j["rules"]["signature"],"rules_revision":j["rules"]["revision"],
                          "rules_status":j["rules"]["status"],"owner_accepted":accepted,"owner_entries":j.get("owner_entries") or {},
-                         "allocations":[],"evidence":evidence.get(1,{})}
+                         "allocations":[],"evidence":evidence.get(1,{}),"target_check":target[1]}
             c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(eid,key(inv),jid,json.dumps(receipt),content))
             j.update(status="exported",export_id=eid,revision=j["revision"]+1);store.job(jid,j,c);store.audit("exported",audit_receipt(receipt),c)
         learn_later(j)
@@ -617,6 +621,20 @@ def create_app(data_dir=None):
                 old=((before.get("lines") or {}).get(str(line)) or {}).get(name)
                 out[k]=previous[k] if k in previous and old==value else {"actor":actor.get(),"at":now}
         return out
+    def with_checks_sheet(content,views):
+        """Append the 'Checks' sheet (cells by status with evidence, row and workbook checks) to a written
+        target workbook; returns it with each transaction's target-sheet accuracy for its receipt (counts only)."""
+        results=[]
+        for n,view in enumerate(views,1):
+            check=view.get("target_check") or {}
+            cells=[{**x,"value":str(n)} if x["column"]=="Transaction Number" else x for x in check.get("cells",[])]
+            results.append({**check,"transaction":n,"cells":cells,"checks":check.get("checks",[])})
+        currencies=[((v.get("fields") or {}).get("currency") or {}).get("value") for v in views]
+        content,workbook_checks=tc.add_checks_sheet(content,results,currencies)
+        receipts={r["transaction"]:{"summary":r.get("summary",""),"counts":r.get("counts",{}),"metric":r.get("metric",{}),
+                  "checks":{k["check"]:k["status"] for k in r["checks"]},
+                  "workbook_checks":{k["check"]:k["status"] for k in workbook_checks}} for r in results}
+        return content,receipts
     def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
     def audit_receipt(receipt):
         # Cell evidence holds owner rows; the audit keeps its size, the receipt keeps the rows.
@@ -686,9 +704,10 @@ def create_app(data_dir=None):
             if demo_references:content=batch_workbook(entries)
             else:
                 content,evidence=rules_workbook(entries,target_upc(c))
+                content,target=with_checks_sheet(content,entries)
                 for _,receipt in selected:
                     row=receipt["transaction_number"];receipt["source"]="fine_rules"
-                    receipt["evidence"]=evidence.get(row,{})
+                    receipt["evidence"]=evidence.get(row,{});receipt["target_check"]=target[row]
             c.execute("INSERT INTO batches VALUES (?,?,?)",(batch_id,json.dumps([r for _,r in selected]),content))
             for j,receipt in selected:
                 c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(receipt["id"],receipt["invoice_key"],j["id"],json.dumps(receipt),content))
@@ -702,6 +721,25 @@ def create_app(data_dir=None):
         with store.connection() as c:r=c.execute("SELECT workbook FROM batches WHERE id=?",(bid,)).fetchone()
         if not r:raise HTTPException(404,"Batch not found")
         return Response(bytes(r[0]),media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="Merch_Inv_Batch_{bid[:8]}.xlsx"'})
+
+    @app.get("/api/jobs/{jid}/target-check")
+    def target_check(jid:str):
+        """Read-only: the invoice's target-sheet cells by status with evidence, its row checks and the owner line."""
+        ensure_rules(jid)
+        j=job_or_404(jid);check=(fresh_rules(j) or {}).get("target_check")
+        if not check:raise HTTPException(409,"The target check runs with the fine rules; it is not available for this invoice yet")
+        return {"job_id":jid,"revision":j["revision"],**check,"issues":tc.issues(check),"confirmed":bool(j.get("target_accuracy"))}
+
+    @app.get("/api/target-check/accuracy")
+    def target_accuracy(supplier:str|None=None):
+        """Read-only confirm-time accuracy against owner truth (MEASURE reads this): per field and overall,
+        by status before confirm and per supplier code, for 7 days, 30 days and all time. No values."""
+        records=[];invoices=0
+        with store.connection() as c:
+            for r in c.execute("SELECT payload FROM jobs"):
+                found=json.loads(r["payload"]).get("target_accuracy") or []
+                invoices+=bool(found);records+=found
+        return {**tc.accuracy_summary(records,supplier=supplier),"invoices":invoices}
 
     @app.get("/api/jobs/{jid}/audit")
     def audit(jid:str):
