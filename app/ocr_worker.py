@@ -24,8 +24,8 @@ PADDLE_MAX_SIDE = 1600
 PADDLE_RECOVERY_MAX_SIDE = 2400
 PADDLE_RECOVERY_RENDER_SCALE = 3
 PADDLE_RECOVERY_MAX_PAGES = 2
-PADDLE_RECOVERY_BASELINE_LIMIT_SECONDS = 100
-PADDLE_WORKER_BUDGET_SECONDS = 240
+PADDLE_RECOVERY_BASELINE_LIMIT_SECONDS = 150
+PADDLE_WORKER_BUDGET_SECONDS = 360
 
 
 def paddle_model_config(language):
@@ -303,6 +303,11 @@ def paddle_recovery_criteria(baseline,alternate):
     reconciliation_no_worse=(
         alternate_reconciliation.count(True)>=baseline_reconciliation.count(True)
         and alternate_reconciliation.count(False)<=baseline_reconciliation.count(False)
+        and all(
+            status is not True
+            or (index<len(alternate_reconciliation) and alternate_reconciliation[index] is True)
+            for index,status in enumerate(baseline_reconciliation)
+        )
     )
     criteria={
         "row_count_not_lower":len(alternate_lines)>=len(baseline_lines),
@@ -368,13 +373,14 @@ def _run_paddle_recovery_pass(path,language,timeout):
 def maybe_recover_paddle(
     path,language,templates,baseline_text,baseline_boxes,baseline_candidate,
     baseline_method,baseline_seconds,worker_elapsed,
+    worker_budget=PADDLE_WORKER_BUDGET_SECONDS,
 ):
     """Try one higher-resolution pass and retain it only on strict improvement."""
     missing=_missing_quantity_price(baseline_candidate)
     lines=(baseline_candidate or {}).get("lines",[])
     page_count=_pdf_page_count(path)
     estimated_alternate=max(15.0,baseline_seconds*1.35)
-    remaining=max(0.0,PADDLE_WORKER_BUDGET_SECONDS-worker_elapsed)
+    remaining=max(0.0,min(PADDLE_WORKER_BUDGET_SECONDS,worker_budget)-worker_elapsed)
     eligibility={
         "has_lines":bool(lines),
         "missing_qty_or_price":missing>0,
@@ -489,6 +495,7 @@ def main():
     p=argparse.ArgumentParser();p.add_argument("--engine",choices=["invoice2data","paddleocr","docling"],required=True)
     p.add_argument("--file",type=Path,required=True);p.add_argument("--output",type=Path,required=True)
     p.add_argument("--templates",type=Path,action="append",default=[]);p.add_argument("--language",default="en")
+    p.add_argument("--budget-seconds",type=int,default=PADDLE_WORKER_BUDGET_SECONDS)
     args=p.parse_args()
     try:
         worker_started=time.monotonic();tables=[];parser_error=None;recovery=None
@@ -513,7 +520,7 @@ def main():
         if args.engine=="paddleocr" and parser_error is None:
             text,boxes,parsed,extraction_method,recovery=maybe_recover_paddle(
                 args.file,args.language,templates,text,boxes,parsed,extraction_method,
-                baseline_seconds,time.monotonic()-worker_started,
+                baseline_seconds,time.monotonic()-worker_started,args.budget_seconds,
             )
         payload={"text":text[:150000],"boxes":boxes[:10000],
             "invoice":parsed,"extraction_method":extraction_method,"tables":tables,

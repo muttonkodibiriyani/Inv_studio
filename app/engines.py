@@ -51,8 +51,10 @@ def quality(i:Invoice | None):
 
 def local_read(engine,path,root,language="en"):
     output=root/"work"/(uuid.uuid4().hex+".json")
+    timeout=int(os.getenv("INV_ENGINE_TIMEOUT","360" if engine=="paddleocr" else "240"))
     cmd=[sys.executable,"-m","app.ocr_worker","--engine",engine,"--file",str(path),"--output",str(output),
-         "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language]
+         "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language,
+         "--budget-seconds",str(timeout)]
     # Workers receive runtime paths, not the application's API keys or provider tokens.
     allowed_env={"PATH","HOME","LANG","LC_ALL","LD_LIBRARY_PATH","SSL_CERT_FILE","SSL_CERT_DIR",
                  "REQUESTS_CA_BUNDLE","TMPDIR","TMP","TEMP","XDG_CACHE_HOME","HF_HOME",
@@ -60,7 +62,7 @@ def local_read(engine,path,root,language="en"):
     env={k:v for k,v in os.environ.items() if k in allowed_env}
     env["OMP_NUM_THREADS"]="2"
     try:
-        proc=subprocess.run(cmd,capture_output=True,text=True,timeout=int(os.getenv("INV_ENGINE_TIMEOUT","240")),env=env)
+        proc=subprocess.run(cmd,capture_output=True,text=True,timeout=timeout,env=env)
         if not output.exists():raise ValueError("Reader process failed before producing output")
         result=json.loads(output.read_text())
         if proc.returncode or result.get("error"):raise ValueError(result.get("hint","Reader failed"))

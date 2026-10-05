@@ -357,7 +357,7 @@ def create_app(data_dir=None):
         warnings=[];blocking=[];opts=body.options
         if opts.engine=="invoice2data":warnings.append("invoice2data reads native text and supplier templates. Scanned PDFs and images use PaddleOCR locally as the input reader; the trace names both components.")
         if opts.engine in ("auto","invoice2data","paddleocr"):
-            warnings.append("Short scanned PDFs with unread quantities or prices may receive one bounded higher-resolution local OCR pass. It is retained only when consistency checks improve; all values still require review. Local OCR files wait their turn to keep the workspace responsive.")
+            warnings.append("Short scanned PDFs with unread quantities or prices may receive one higher-resolution local OCR pass, within a six-minute reader limit. It is retained only when consistency checks improve; all values still require review. Local OCR files wait their turn to keep the workspace responsive.")
         if not references():warnings.append("No reference files loaded. Extraction can run, but Excel export stays on hold until references are imported and checked.")
         if opts.ai_fallback or opts.engine=="ai":
             if not opts.model:warnings.append("No AI model selected. If local reading fails, this batch will wait for an AI connection or manual review.")

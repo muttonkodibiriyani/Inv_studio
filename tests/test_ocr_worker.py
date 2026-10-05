@@ -360,3 +360,25 @@ def test_timed_out_paddle_recovery_keeps_complete_baseline_output(tmp_path, monk
     assert result[4]["attempted"] is True
     assert result[4]["alternate_status"] == "timed_out"
     assert result[4]["selected_pass"] == "baseline"
+
+
+@pytest.mark.parametrize("budget,attempted", [(240, False), (360, True)])
+def test_cloud_reader_latency_respects_parent_budget(tmp_path, monkeypatch, budget, attempted):
+    baseline = _recovery_candidate([
+        {"sku": "A", "qty": None, "price": "5", "net_amount": "10"},
+    ])
+    monkeypatch.setattr(ocr_worker, "_pdf_page_count", lambda path: 2)
+    calls = []
+    def recovery(path, language, timeout):
+        calls.append(timeout)
+        return {"status": "timed_out", "seconds": timeout}
+    monkeypatch.setattr(ocr_worker, "_run_paddle_recovery_pass", recovery)
+    result = ocr_worker.maybe_recover_paddle(
+        tmp_path / "invoice.pdf", "en", [], "baseline", [], baseline,
+        "table", 134.0, 136.0, worker_budget=budget,
+    )
+    assert result[:4] == ("baseline", [], baseline, "table")
+    assert result[4]["attempted"] is attempted
+    assert bool(calls) is attempted
+    if calls:
+        assert calls[0] + 136.0 <= budget - 20.0
