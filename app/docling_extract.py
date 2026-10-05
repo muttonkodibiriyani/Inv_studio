@@ -224,6 +224,34 @@ def _exact_header_role(header: Any) -> str | None:
     return next((role for role, values in aliases.items() if packed in values), None)
 
 
+def _page_slope(words: list[dict[str, Any]]) -> float:
+    """Vertical drift per pixel of a tilted scan: the slope that lines printed rows up most sharply.
+
+    Zero unless rows align clearly better when tilted, so a straight page is grouped exactly as before.
+    """
+    centres = [((float(w["box"][0]) + float(w["box"][2])) / 2, (float(w["box"][1]) + float(w["box"][3])) / 2)
+               for w in words]
+    if len(centres) < 40:
+        return 0.0
+
+    def sharpness(slope: float) -> int:
+        bands: dict[int, int] = {}
+        for x, y in centres:
+            key = round((y - slope * x) / 2)
+            bands[key] = bands.get(key, 0) + 1
+        return sum(count * count for count in bands.values())
+
+    level = sharpness(0.0)
+    score, slope = max((sharpness(step / 1000), step / 1000) for step in range(-30, 31))
+    return slope if abs(slope) >= 0.003 and score >= level * 1.15 else 0.0
+
+
+def _overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    narrower = min(float(left["box"][2]) - float(left["box"][0]), float(right["box"][2]) - float(right["box"][0]))
+    shared = min(float(left["box"][2]), float(right["box"][2])) - max(float(left["box"][0]), float(right["box"][0]))
+    return narrower > 0 and shared > 0.5 * narrower
+
+
 def _rows_from_words(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     # Some OCR readers return measured whitespace tokens as well as words.
     # They are not columns and must not widen compound header spans.
@@ -232,22 +260,41 @@ def _rows_from_words(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         return []
     typical = median(max(1.0, float(word["box"][3]) - float(word["box"][1])) for word in words)
     tolerance = max(3.0, typical * 0.6)
+    # A tilted scan puts the right end of a printed row half a row lower than its left end; rows are
+    # grouped on tilt-corrected centres. Words and their boxes are returned unchanged.
+    slope = _page_slope(words)
+
+    def centre_of(word: dict[str, Any]) -> float:
+        middle = (float(word["box"][0]) + float(word["box"][2])) / 2
+        return (float(word["box"][1]) + float(word["box"][3])) / 2 - slope * middle
+
     rows: list[list[dict[str, Any]]] = []
     centres: list[float] = []
-    for word in sorted(words, key=lambda value: (
-        (float(value["box"][1]) + float(value["box"][3])) / 2,
-        float(value["box"][0]),
-    )):
-        centre = (float(word["box"][1]) + float(word["box"][3])) / 2
+    for word in sorted(words, key=lambda value: (centre_of(value), float(value["box"][0]))):
+        centre = centre_of(word)
         if rows and abs(centre - centres[-1]) <= tolerance:
             rows[-1].append(word)
-            centres[-1] = sum(
-                (float(item["box"][1]) + float(item["box"][3])) / 2 for item in rows[-1]
-            ) / len(rows[-1])
+            centres[-1] = sum(centre_of(item) for item in rows[-1]) / len(rows[-1])
         else:
             rows.append([word])
             centres.append(centre)
-    return [sorted(row, key=lambda value: float(value["box"][0])) for row in rows]
+    # Two words stacked over the same span cannot share one printed row: closely spaced rows were
+    # chained together. Split such a group into rows by height, each word joining the nearest row
+    # that has nothing above or below it.
+    split: list[list[dict[str, Any]]] = []
+    for row in rows:
+        if not any(_overlaps(a, b) for i, a in enumerate(row) for b in row[i + 1:]):
+            split.append(row)
+            continue
+        parts: list[tuple[float, list[dict[str, Any]]]] = []
+        for word in sorted(row, key=centre_of):
+            free = [part for part in parts if not any(_overlaps(word, other) for other in part[1])]
+            if free:
+                min(free, key=lambda part: abs(centre_of(word) - part[0]))[1].append(word)
+            else:
+                parts.append((centre_of(word), [word]))
+        split.extend(part for _anchor, part in sorted(parts, key=lambda p: median(centre_of(w) for w in p[1])))
+    return [sorted(row, key=lambda value: float(value["box"][0])) for row in split]
 
 
 def _header_roles(row: list[dict[str, Any]]) -> list[tuple[str, float, float]]:
@@ -321,6 +368,20 @@ def _mapped_row(row, roles, bounds, expected_serial=None):
                     and bounds[column] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 1]]
             values[column] = " ".join(kept).strip() or None
             values[column + 1] = token
+    # A right-aligned quantity can end just past the column boundary and land
+    # in the price cell ("7 AED 10.25"). A whole integer that ends left of the
+    # price heading, with the price still in that cell, is the quantity.
+    for column in range(len(roles) - 1):
+        if roles[column][0] != "qty" or roles[column + 1][0] != "price" or values[column]:
+            continue
+        cell = sorted((word for word in row
+                       if bounds[column + 1] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 2]),
+                      key=lambda word: float(word["box"][0]))
+        if (len(cell) >= 2 and re.fullmatch(r"[0-9]{1,6}", str(cell[0]["text"]).strip())
+                and float(cell[0]["box"][2]) < roles[column + 1][1]
+                and any(_decimal(word["text"]) is not None for word in cell[1:])):
+            values[column] = str(cell[0]["text"]).strip()
+            values[column + 1] = " ".join(str(word["text"]).strip() for word in cell[1:]).strip() or None
     for column, role in enumerate(roles):
         if role[0] == "description" and values[column]:
             # OCR reads a printed size's 0 as O and l as I ("3OML", "10mI").
