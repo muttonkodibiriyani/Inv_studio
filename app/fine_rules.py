@@ -12,7 +12,7 @@ import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 
 WAREHOUSE = "Warehouse (W)"
@@ -202,7 +202,8 @@ def supplier_candidates(scan, printed_name=None, buyer_name=None):
         value = " ".join(text(value).split()).strip(" :|-,")
         if len(value) < 2 or (buyer_name and fold(buyer_name) in fold(value)):
             return
-        region = "top" if line_no < max(1, len(lines)) / 3 else "bottom" if line_no >= 2 * len(lines) / 3 else "body"
+        position = (line_no + 0.5) / max(1, len(lines))
+        region = "top" if position < 1 / 3 else "bottom" if position > 2 / 3 else "body"
         key = fold(value)
         if not any(fold(c["name"]) == key for c in found):
             found.append({"name": value, "page": page, "line": line_no + 1, "region": region, "method": how})
@@ -324,7 +325,8 @@ def location_market(location, config):
     location = text(location)
     values = {v for v in ((config.location_master.get(location) or {}).get("market"),
                           config.location_market.get(location)) if v}
-    return values.pop() if len(values) == 1 else None, len(values)
+    count = len(values)
+    return (values.pop() if count == 1 else None), count
 
 
 def parse_printed_date(printed, parsed):
@@ -488,7 +490,7 @@ def match_line(run, n, line, source, sites=None):
         result["checks"]["description"] = "Consistent" if score >= run.config.description_threshold else "Weak"
 
     if "Fail" in (result["checks"]["barcode"], result["checks"]["vpn"]) or (
-            barcode_parents and vpn_parents and barcode_parents != vpn_parents):
+            barcode_parents and vpn_parents and not barcode_parents & vpn_parents):
         result["exception"] = run.exception(
             "Item Conflict", "Barcode and VPN identify different items, or an exact identifier disagrees",
             "ALG-020", n, evidence=f"barcode parents {sorted(barcode_parents)}; VPN parents {sorted(vpn_parents)}",
@@ -794,7 +796,13 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     candidates = supplier_candidates(scan, invoice.supplier_name, invoice.buyer_name)
     first_names = {r_site for c in candidates for r_site in
                    (text(r.get("SUPPLIER")) for r in source.items_by_supplier_name(c["name"])) if r_site}
-    matches = [match_line(run, n, line, source, first_names or None) for n, line in enumerate(invoice.lines, 1)]
+    # A probe pass finds the supplier from unambiguous lines; the recorded pass then
+    # constrains every line by that supplier (ALG-018 / R-015).
+    probe = Run(invoice, config, filename)
+    probe_matches = [match_line(probe, n, line, source, first_names or None) for n, line in enumerate(invoice.lines, 1)]
+    probe_site, _ = resolve_supplier(probe, source, probe_matches, candidates)
+    sites = {probe_site} if probe_site else (first_names or None)
+    matches = [match_line(run, n, line, source, sites) for n, line in enumerate(invoice.lines, 1)]
     supplier_site, master_name = resolve_supplier(run, source, matches, candidates)
     if supplier_site:
         # Re-check items under the resolved supplier where the first pass was unconstrained.
@@ -866,6 +874,13 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         line_ok = m["status"] == "Matched" and line.qty is not None and line.price is not None
         if line.qty is None or line.price is None:
             run.exception("Line Exception", "Quantity or unit cost missing on the invoice line", "ALG-026", n)
+        elif line.net_amount is not None:
+            # 02A Unit Cost: line/value reconciliation at the printed line amount's precision.
+            computed = (line.qty * line.price).quantize(line.net_amount, rounding=ROUND_HALF_UP)
+            if computed != line.net_amount:
+                line_ok = False
+                run.exception("Line Exception", f"Quantity x unit cost {computed} differs from line amount "
+                              f"{line.net_amount}", "02A-Unit Cost", n)
         for f, v in (("Unit Cost", line.price), ("Quantity", line.qty)):
             run.trace(f, v, "ALG-026", "Invoice line", line=n)
         if tax_code:

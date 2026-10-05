@@ -24,7 +24,7 @@ code or with an earlier owner answer (resolution stated, never silent).
 | R-006 | Supplier name to Item Master SUPPLIER_NAME, then SUPPLIER code; several codes resolved by market/entity/currency | matching.py:47 canonical sites only | missing | `resolve_supplier`: normalized exact SUPPLIER_NAME lookup; >1 SUPPLIER value = `Supplier Exception`, narrowed only by the item match |
 | R-007 | Brand = UDA_LV_1_VALUE | none | missing | Brand from `UDA_LV_1_VALUE`. **Data gap:** the source Item Master has UDA_LV_1_VALUE, but the live lookup catalog did not select that column. Brand stays blank with a data-quality warning until the integrator re-imports the catalog with it. BRAND is not substituted |
 | R-008 | Supplier/site suffix (RA1, RB2, RA4, RE2) mapped through the maintained entity table; text alone is not enough | none | missing | `entity_hint` parses the suffix after the 6-char key; a hint only, never the market |
-| R-009 | RA1=Kuwait, RB2=KSA, RA4=UAE; RE2 unconfirmed | none | missing | `ENTITY_MAP` holds the three confirmed rows; RE2 and other suffixes = `Entity Exception` (V-001) |
+| R-009 | RA1=Kuwait, RB2=KSA, RA4=UAE; RE2 unconfirmed | none | missing | `ENTITY_MAP` holds the three confirmed rows; RE2 and other unmapped suffixes = `Entity Hint` review warning (V-001); never sets the market |
 | R-010 | 8000-series locations: classify by Location Master, never hardcode | excel.py:37 requires a reference type | conflict | Conflicts with ALG-012/013 and the owner's 800=W / 380=S. Resolved as the owner wrote: master first, prefix as fallback and cross-check, disagreement = `Location Mapping` exception |
 | R-011 | Return location code, name, type, country, market from POGRN + Location Master; missing master = exception | none | partial-blocked | Code from POGRN; type by master or prefix; name, country and market need the location master (V-007) and stay blank on the review list |
 | R-012 | Currency from supplier-site-market map, never from ship-from country | matching.py:56 canonical routes | missing-blocked | `resolve_currency` reads only a supplied map; with no map, Currency is blank plus a `Currency Mapping` exception (V-010) |
@@ -104,3 +104,24 @@ V-004 cross-border combinations (R-013) · V-005 USD exceptions (R-014, deferred
 V-007 POGRN location file (ALG-014, R-011, R-027) · V-008 date convention (ALG-004) · V-009 description
 threshold (ALG-019) · V-010 supplier-site-market-currency list (R-012, ALG-023). Until each is closed, the
 engine routes the affected case to review rather than guessing.
+
+## Implementation (branch feat/fine-grained-rules)
+
+Code: `app/fine_rules.py` (engine), `app/fine_rules_source.py` (read-only lookup-catalog adapter; every term hit is re-checked against the original column; >50,000 rows refuses), `app/fine_rules_export.py` (review workbook with sheets 06/06A/07/08/09/10/11/12 + Lineage; target workbook with the unchanged 13/3/6 template columns, refused unless every invoice is `Approved`).
+Existing engine: `app/matching.py` compares barcodes after `strip_ult` on both sides; `app/excel.py` never writes `ULT_` into UPC.
+
+API: `GET/POST /api/fine-rules/config` (location master, location to market, supplier-site currency, USD exceptions, tolerances; validated, audited), `POST /api/fine-rules/run`, `POST /api/fine-rules/review.xlsx`, `POST /api/fine-rules/target.xlsx` (409 unless all Approved), `GET/POST /api/fine-rules/feedback`, `POST /api/fine-rules/feedback/{id}/decision`.
+
+Tests: `tests/test_fine_rules.py` has one test per rule ID (`test_R_001_…` to `test_R_030_…`, `test_ALG_001_…` to `test_ALG_030_…`, `test_02A_target_mapping[02A-<column>]` for the 12 02A rows, `test_02A_unit_cost_line_value_reconciliation`, `test_working_sheets_have_exact_rulebook_headers`). `tests/test_fine_rules_api.py` runs the rules over an imported synthetic catalog using the deployed manifest's roles, plus the API. All fixtures are synthetic.
+
+### Blocked on business input (implemented with exceptions, cannot pass yet)
+
+| Item | Effect until supplied | Unblocks |
+|---|---|---|
+| V-007 location to market map (R-011, R-027, R-030) | Market blank; no PO passes the R-030 gate, so nothing is `Approved`; the unique candidate is listed in the `Missing PO` exception | `POST /api/fine-rules/config` `location_master`/`location_market` |
+| V-010 supplier-site + market currency list (R-012, ALG-023/024/025) | Currency blank, `Currency Mapping` exception | `supplier_site_currency`, `usd_exceptions` |
+| R-007 / ALG-022 Brand | Live catalog did not import `UDA_LV_1_VALUE`; Brand blank with a non-blocking `Data Quality` warning | Integrator re-imports the Item Master with `UDA_LV_1_VALUE` in the manifest |
+| V-001 RE2 entity | `Entity Hint` warning | Add the row to `entity_map` |
+| V-008 ambiguous dates | `Date Review` exception | Business date-format rule per supplier |
+| V-009 description threshold | Description route is review-only | Approved threshold |
+| R-016 tax mapping | `Unit Tax Code` only from the reviewed invoice tax code; blank = `Tax Code` exception | Approved ULTA tax mapping |
