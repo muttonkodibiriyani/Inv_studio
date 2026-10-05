@@ -846,6 +846,16 @@ def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     assert "Totals Audit" in types(missing) and missing["status"] == "Approved"
 
 
+def test_TGT_001_amount_printed_with_two_decimals_or_thousands_separators_is_found():
+    scan = {"pages": {1: "Invoice", 2: "Net Total 520.00\nVAT 0.00"}}
+    assert fr._printed_page(scan, D("520.0")) == 2
+    assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Total 1,520"}}, D("1520.0")) == 1
+    assert fr._printed_page(scan, D("520.5")) is None
+    assert fr._printed_page({"pages": {1: "Total 520.50"}}, D("520.0")) is None
+    assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("520.0")) is None
+
+
 def test_item_resolution_counts_lines_whose_quantity_agrees_with_the_order():
     good = run()["item_resolution"]
     assert (good["resolved"], good["total"], good["below"]) == (2, 2, False)

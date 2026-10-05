@@ -1229,13 +1229,20 @@ def _line_value(invoice):
 
 
 def _printed_page(scan, amount):
-    """Page on which a printed amount appears (as printed, with or without thousands separators)."""
+    """Page on which a printed amount appears (as printed, with or without thousands separators). The reader
+    may drop trailing zeros, so the two-decimal and, for a whole amount, the integer forms are also looked for;
+    those may not run on into further decimals ("520" is not found in "520.50")."""
     if amount is None:
         return None
     forms = {f"{amount}", f"{amount:,}"}
+    padded = {f"{amount:.2f}", f"{amount:,.2f}"}
+    if amount == amount.to_integral():
+        padded |= {f"{amount:.0f}", f"{amount:,.0f}"}
+    patterns = [re.escape(f) + r"(?![\d])" for f in forms]
+    patterns += [re.escape(f) + r"(?![\d]|[.,]\d)" for f in padded - forms]
     for page, value in scan["pages"].items():
         flat = value.replace(" ", "")
-        if any(re.search(r"(?<![\d.,])" + re.escape(f.replace(" ", "")) + r"(?![\d])", flat) for f in forms):
+        if any(re.search(r"(?<![\d.,])" + p, flat) for p in patterns):
             return page
     return None
 
