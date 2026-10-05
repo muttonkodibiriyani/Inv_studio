@@ -348,7 +348,6 @@ def test_measured_label_row_supplies_header_values_and_tolerates_label_typo():
 
 
 def test_unit_heading_with_ocr_dropped_letter_still_supplies_uom():
-    size = (320, 100)
     boxes = [word("Description", 1, 38, 20, width=42), word("Qty.", 1, 160, 20, width=12),
              word("(n", 1, 175, 20, width=8), word("PCE)", 1, 186, 20, width=14),
              word("Unit Price", 1, 218, 20, width=35), word("Net Amount", 1, 270, 20, width=42),
