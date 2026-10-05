@@ -307,3 +307,13 @@ def test_confirm_records_and_accuracy_summary():
     assert s["periods"]["all"]["by_status_before"]["verified"]["changed"] == 1
     only = tc.accuracy_summary(records + old, now=now, supplier="200002")
     assert only["periods"]["all"]["overall"]["cells"] == 15
+
+
+def test_selected_order_no_is_checked_on_rms_order_no():
+    sel = ("Selected by POG-001 among 2 order/location candidates under the supplier's 6-character EBS code SYN001: "
+           "the only one whose quantity and value agree; not printed on the invoice")
+    v = view(fields={"po": field("300001", ev(sel, "PO Extract!5"))})
+    cell = next(c for c in tc.check_view(v, sources())["cells"] if c["column"] == "Order No")
+    assert cell["status"] == "verified" and "not printed" in cell["reason"]
+    v = view(fields={"po": field("800001", ev(sel, "PO Extract!5"))})  # held by the row, but as LOCATION
+    assert status(tc.check_view(v, sources()), "Header", "Order No") == ("mismatch", "")

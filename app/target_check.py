@@ -213,6 +213,8 @@ def check_evidence(value, evidence, sources, location=None):
     if refs:
         words = source.split()
         column = words[-1] if words and words[-1].isupper() else None
+        if source.startswith(SELECTED):
+            column = "RMS_ORDER_NO"  # decision 16: the cited POGRN rows must carry the selected order
         rows = [sources.row(x) for x in refs]
         if any(r is None for r in rows):
             return MISMATCH, ""
@@ -284,9 +286,12 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
               OVER_CITED: "Some cited rows do not hold the value"}.get(sub or status, "")
     if sub == UNVERIFIABLE and _ai_scan(first):
         reason = SCAN_REASON
+    elif status == VERIFIED and str(first.get("source") or "").startswith(SELECTED):
+        reason = "Selected by POG-001 from the cited POGRN rows; not printed on the invoice"
     return _cell(sheet, column, line, value, status, sub, reason, first)
 
 
+SELECTED = "Selected by POG-001"  # RULES 7ae7836: Order No picked among candidates (decision 16)
 SCAN_REASON = "evidence not re-checkable: read by AI from a scan; no box to re-check"
 
 
