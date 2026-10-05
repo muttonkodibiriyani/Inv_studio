@@ -137,6 +137,13 @@ def structured_extract(text, boxes, templates, tables=None):
     parsed = template_extract(text, templates) if text else None
     if parsed is not None:
         return parsed, "template"
+    if boxes:
+        # A recognised columnar 'TAX INVOICE' layout is read by its own geometry for every engine.
+        from .columnar_tax_invoice import extract as columnar_extract
+        columnar = columnar_extract(text, boxes)
+        if columnar is not None:
+            from .models import Invoice
+            return Invoice.model_validate(columnar[0]).model_dump(mode="json"), "columnar_tax_invoice"
     if tables or boxes:
         from .docling_extract import extract_invoice_from_tables
         candidate=extract_invoice_from_tables(text,tables or [],boxes=boxes)
