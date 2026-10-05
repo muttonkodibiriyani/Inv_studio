@@ -292,7 +292,7 @@ const HEADER_FIELDS = [
   ["po", "Purchase order", "text"],
   ["location", "Delivery location", "text"],
   ["date_printed", "Printed invoice date · source", "text", { readOnly: true }],
-  ["date", "Invoice date · confirm YYYY-MM-DD", "date"],
+  ["date", "Invoice date · confirm calendar date", "date"],
   ["currency", "Currency", "text"],
   ["origin", "Origin", "text"],
   ["market", "Market", "text"],
@@ -934,7 +934,7 @@ function renderJobs() {
     const dot = make("span", `status-dot ${job.status === "error" ? "error" : ["processing", "queued"].includes(job.status) ? "processing" : ""}`);
     dot.setAttribute("aria-hidden", "true");
     button.append(dot);
-    button.addEventListener("click", () => selectJob(job.id));
+    button.addEventListener("click", () => selectJob(job.id, { reveal: true }));
     row.append(select, button);
     list.append(row);
   });
@@ -978,7 +978,9 @@ function renderBatchWorkflow(jobs) {
   $("#workflow-download-count").textContent = `${app.selectedForBatch.size} selected`;
 }
 
-async function selectJob(id) {
+// A reviewer's tap reveals the review when it sits off-screen (stacked layouts), and another invoice starts at the
+// top of its details instead of the previous invoice's scroll position.
+async function selectJob(id, { reveal = false } = {}) {
   if (id !== app.selectedJobId && app.reviewDirty) {
     notify("Save this invoice before opening another one. Your edits are still here.", "error", 7000);
     return;
@@ -989,13 +991,24 @@ async function selectJob(id) {
   try {
     const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (token !== app.selectionToken) return;
+    const switched = app.currentJob?.id !== job.id;
     app.currentJob = job;
     app.reviewDirty = false;
     renderSelectedJob(job);
+    if (switched) $(".fields-card").scrollTop = 0;
+    if (reveal) revealReview();
     startPollingIfNeeded();
   } catch (error) {
     notify(error.message, "error");
   }
+}
+
+function revealReview() {
+  const panel = $("#review-panel");
+  if (panel.hidden) return;
+  const top = panel.getBoundingClientRect().top;
+  const stacked = top >= $(".inbox-card").getBoundingClientRect().bottom - 1;
+  if (stacked && (top < 0 || top > window.innerHeight * 0.25)) panel.scrollIntoView({ block: "start" });
 }
 
 function clearSelectedJob() {
@@ -1299,10 +1312,15 @@ function renderValidation(job) {
     return;
   }
   summary.hidden = false;
-  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
+  // After the reviewer's confirm, what remains are the notes they accepted, not open issues.
+  const confirmed = job.status === "ready" || job.status === "exported";
+  summary.className = confirmed
+    ? "validation-summary accepted"
+    : `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
   const details = make("details", "validation-details");
   const heading = make("summary");
-  heading.append(make("strong", "", `${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve`), make("span", "", "Show all"));
+  const plural = issues.length === 1 ? "" : "s";
+  heading.append(make("strong", "", confirmed ? `${issues.length} note${plural} accepted at review` : `${issues.length} issue${plural} to resolve`), make("span", "", "Show all"));
   const list = make("ul");
   issues.forEach((issue) => {
     const line = issue.line ? `Line ${issue.line}: ` : "";
