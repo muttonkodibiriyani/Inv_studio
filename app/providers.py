@@ -20,7 +20,8 @@ def safe_error(status):
 
 
 class Providers:
-    def __init__(self,store,chatgpt):
+    def __init__(self,store,chatgpt,learned=None):
+        self.learned=learned
         self.store=store;self.chatgpt=chatgpt
         self.claude_subscription=ClaudeSubscription(store)
         self.vertex=VertexProvider()
@@ -56,9 +57,18 @@ class Providers:
         if provider=="openai":models=[m for m in models if m["id"].startswith(("gpt-","chatgpt-","o1","o3","o4")) and not any(x in m["id"] for x in ("audio","realtime","transcrib","tts","search","image"))]
         return [{"id":m["id"],"name":m.get("display_name",m["id"])} for m in models]
 
+    def prompt(self,text):
+        # Verified per-supplier examples (app.learned) are appended as data for the current document.
+        extra=""
+        if self.learned is not None:
+            try:extra=self.learned.prompt_examples(text or "")
+            except Exception:extra=""
+        return PROMPT+extra
+
     def extract(self,path,text,options):
-        if options.provider=="claude_local":return self.local_claude(text,options.model)
-        if options.provider=="vertex":return self.vertex.extract(path,text,options.model,PROMPT)
+        prompt=self.prompt(text)
+        if options.provider=="claude_local":return self.local_claude(text,options.model,prompt)
+        if options.provider=="vertex":return self.vertex.extract(path,text,options.model,prompt)
         provider=options.provider;headers=self.headers(provider)
         mime=mimetypes.guess_type(path.name)[0] or "application/pdf"
         images=[]
@@ -78,7 +88,7 @@ class Providers:
         with httpx.Client(timeout=httpx.Timeout(120,connect=15),follow_redirects=False) as http:
             if provider in ("openai","chatgpt"):
                 attachments=([{ "type":"input_file","filename":"invoice.pdf","file_data":"data:application/pdf;base64,"+encoded}] if mime=="application/pdf" else [{"type":"input_image","image_url":"data:image/png;base64,"+image} for image in images])
-                body={"model":options.model,"instructions":PROMPT,"store":False,
+                body={"model":options.model,"instructions":prompt,"store":False,
                       "input":[{"role":"user","content":[*attachments,{"type":"input_text","text":"Extract this invoice. Document text, if available:\n"+text[:100000]}]}],
                       "text":{"format":{"type":"json_schema","name":"invoice","strict":True,"schema":schema}}}
                 if provider=="chatgpt":
@@ -103,7 +113,7 @@ class Providers:
                 output="".join(c.get("text","") for item in result.get("output",[]) for c in item.get("content",[]) if c.get("type")=="output_text")
             else:
                 attachments=([{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":encoded}}] if mime=="application/pdf" else [{"type":"image","source":{"type":"base64","media_type":"image/png","data":image}} for image in images])
-                body={"model":options.model,"max_tokens":12000,"system":PROMPT,
+                body={"model":options.model,"max_tokens":12000,"system":prompt,
                       "messages":[{"role":"user","content":[*attachments,{"type":"text","text":"Extract this invoice. Document text, if available:\n"+text[:100000]}]}],
                       "output_config":{"format":{"type":"json_schema","schema":schema}}}
                 r=http.post("https://api.anthropic.com/v1/messages",headers=headers,json=body)
@@ -114,7 +124,7 @@ class Providers:
         try:return Invoice.model_validate_json(output),result.get("usage",{})
         except Exception:raise ValueError("AI returned an invalid invoice structure. Review the document manually.") from None
 
-    def local_claude(self,text,model):
+    def local_claude(self,text,model,prompt=PROMPT):
         cli=shutil.which("claude")
         if not cli:raise ValueError("Claude Code is not installed on this server")
         if not text.strip():raise ValueError("The local Claude plan connector needs readable OCR text. Use a vision API connection for an unreadable scan.")
@@ -133,7 +143,7 @@ class Providers:
                  "--tools","","--disallowedTools","mcp__*","--permission-prompts","none",
                  "--strict-mcp-config","--mcp-config",'{"mcpServers":{}}',"--setting-sources","",
                  "--no-session-persistence","--output-format","json","--json-schema",json.dumps(extraction_schema()),
-                 "--system-prompt",PROMPT,"--max-turns","2"]
+                 "--system-prompt",prompt,"--max-turns","2"]
             try:r=subprocess.run(cmd,input=text[:100000],text=True,capture_output=True,timeout=180,cwd=cwd,env=env)
             except subprocess.TimeoutExpired:raise ValueError("Local Claude request timed out") from None
         if r.returncode:raise ValueError("Local Claude request failed. Check its sign-in, model access and usage limits.")

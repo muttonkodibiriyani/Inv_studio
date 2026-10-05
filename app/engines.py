@@ -113,6 +113,9 @@ def local_read(engine,path,root,language="en"):
     cmd=[sys.executable,"-m","app.ocr_worker","--engine",engine,"--file",str(path),"--output",str(output),
          "--templates",str(ROOT/"templates"),"--templates",str(root/"templates"),"--language",language,
          "--budget-seconds",str(timeout)]
+    if os.getenv("INV_STUDIO_LEARN","1")!="0":
+        # Learned supplier templates live in the private data directory (app.learned), never in the repo.
+        cmd+=["--learned-templates",str(root/"learned"/"templates")]
     # Workers receive runtime paths, not the application's API keys or provider tokens.
     allowed_env={"PATH","HOME","LANG","LC_ALL","LD_LIBRARY_PATH","SSL_CERT_FILE","SSL_CERT_DIR",
                  "REQUESTS_CA_BUNDLE","TMPDIR","TMP","TEMP","XDG_CACHE_HOME","HF_HOME",
