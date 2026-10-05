@@ -51,6 +51,8 @@ class ProcessingOptions(StrictModel):
     engine: Literal["auto", "invoice2data", "paddleocr", "docling", "ai"] = "auto"
     prefer_native_text: bool = True
     ai_fallback: bool = True
+    # An AI call on an invoice the local engines read completely: flags only, a cost, so off unless chosen.
+    ai_cross_check: bool = False
     provider: Literal["openai", "anthropic", "chatgpt", "claude_local", "vertex"] = "openai"
     model: str = Field(default="", max_length=150, pattern=r"^[A-Za-z0-9._:/-]*$")
     language: Literal["en", "ar", "ch", "fr", "de"] = "en"
