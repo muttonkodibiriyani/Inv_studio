@@ -260,3 +260,86 @@ def test_ai_customer_number_does_not_become_internal_buyer(monkeypatch,tmp_path)
     assert result['invoice']['lines'][0]['item_id'] is None
     assert result['invoice']['lines'][0]['sku']=='VISIBLE-SKU'
     assert set(result['trace'][0]['usage']['unverified_internal_fields_ignored'])=={'buyer','site'}
+
+
+def identityless_native_invoice(number='NATIVE-1'):
+    invoice=complete_native_invoice(number)
+    invoice['lines'][0]['tax_amount']='0.50';invoice['lines'][1]['tax_amount']='0.25'
+    invoice['lines'][1]['gtin']=None;invoice['date']='2026-01-15'
+    return invoice
+
+
+def test_native_gate_keeps_an_identityless_line_only_when_every_amount_checks():
+    from app.models import Invoice
+    accepted,notes=engines.native_pdf_quality(Invoice.model_validate(identityless_native_invoice()))
+    assert accepted is True and notes==['line 2 prints no item code; kept blank for review']
+    for field,value in (('tax','0.76'),('net','15.01')):
+        broken=identityless_native_invoice();broken[field]=value
+        assert engines.native_pdf_quality(Invoice.model_validate(broken))[0] is False
+    for change in ({'price':'5.01'},{'tax_amount':None}):
+        broken=identityless_native_invoice();broken['lines'][1].update(change)
+        assert engines.native_pdf_quality(Invoice.model_validate(broken))[0] is False
+    no_codes=identityless_native_invoice();no_codes['lines'][0]['sku']=None
+    assert engines.native_pdf_quality(Invoice.model_validate(no_codes))[0] is False
+
+
+def ai_on(monkeypatch,tmp_path,native,ai_invoice,engine='paddleocr'):
+    from app.models import Invoice
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    opts.engine=engine;opts.ai_fallback=True;opts.model='stub-model'
+    def read(engine,*args):
+        calls.append(engine)
+        return {'text':f'{engine} text','boxes':[],'invoice':native if engine=='invoice2data' else None}
+    monkeypatch.setattr(engines,'local_read',read)
+    def ai_reader(*args):
+        calls.append('ai')
+        return Invoice.model_validate(ai_invoice),{}
+    return engines.process(tmp_path/'invoice.pdf',opts,store,ai_reader),calls
+
+
+# The paddleocr choice checks the PDF text first; auto (the default) reads it through invoice2data.
+ENGINES=[('paddleocr',['invoice2data','paddleocr','ai'],'native PDF text'),
+         ('auto',['invoice2data','ai'],'invoice2data')]
+
+
+def invented_code_ai_read(number='AI-1'):
+    invoice=identityless_native_invoice(number);invoice['lines'][1]['sku']='INVENTED-9'
+    return invoice
+
+
+@pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
+def test_ai_on_completeness_tie_keeps_the_native_read(monkeypatch,tmp_path,engine,calls_expected,native_selected):
+    native=identityless_native_invoice();native['lines'][1]['tax_amount']=None
+    ai=identityless_native_invoice('AI-1');ai['lines'][1]['tax_amount']=None
+    result,calls=ai_on(monkeypatch,tmp_path,native,ai,engine)
+    assert calls==calls_expected
+    ai_entry=next(x for x in result['trace'] if x['engine']=='openai')
+    assert result['trace'][0]['completeness']==ai_entry['completeness']==result['completeness']
+    assert result['selected_engine']==native_selected and result['invoice']['number']=='NATIVE-1'
+
+
+@pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
+def test_ai_on_strictly_more_complete_ai_read_is_kept(monkeypatch,tmp_path,engine,calls_expected,native_selected):
+    native=identityless_native_invoice();native['lines'][1]['tax_amount']=None
+    result,calls=ai_on(monkeypatch,tmp_path,native,{**complete_native_invoice('AI-1'),'date':'2026-01-15'},engine)
+    assert calls==calls_expected
+    assert result['selected_engine']=='openai / stub-model' and result['invoice']['number']=='AI-1'
+
+
+@pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
+def test_ai_on_identityless_line_with_every_amount_checking_skips_ocr_and_ai(monkeypatch,tmp_path,engine,
+                                                                            calls_expected,native_selected):
+    result,calls=ai_on(monkeypatch,tmp_path,identityless_native_invoice(),invented_code_ai_read(),engine)
+    assert calls==['invoice2data']
+    assert result['selected_engine']==native_selected and result['invoice']['number']=='NATIVE-1'
+    line=result['invoice']['lines'][1]
+    assert line['gtin'] is None and line['sku'] is None
+    assert 'line 2 prints no item code' in result['trace'][0]['reason']
+    assert 'line 2 prints no item code; kept blank for review' in result['extraction_note']
+
+
+def test_auto_identity_gap_that_fails_a_check_still_reaches_the_ai(monkeypatch,tmp_path):
+    native=identityless_native_invoice();native['net']='15.01'
+    result,calls=ai_on(monkeypatch,tmp_path,native,invented_code_ai_read(),'auto')
+    assert calls==['invoice2data','ai'] and result['extraction_note'] is None
+    assert 'line 2 item identity' in result['trace'][0]['reason']
