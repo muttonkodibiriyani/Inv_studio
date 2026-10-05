@@ -281,6 +281,33 @@ try {
   // Reprocessing is separately gated, even when the document is already local.
   await page.locator("#retry-job").click();
   await page.locator("#retry-dialog").waitFor({ state: "visible" });
+  const retryPreflightsBeforeCancel = requestLog.filter(
+    (entry) => entry.method === "POST" && entry.path === "/api/preflight",
+  ).length;
+  await page.locator("#retry-model").fill("synthetic-cancel-model");
+  await page.locator("#retry-dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator("#retry-dialog").waitFor({ state: "hidden" });
+  await page.waitForTimeout(100);
+  assert.equal(
+    requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/preflight").length,
+    retryPreflightsBeforeCancel,
+    "Retry Cancel submitted the retry form",
+  );
+
+  await page.locator("#retry-job").click();
+  await page.locator("#retry-dialog").waitFor({ state: "visible" });
+  await page.locator("#retry-model").fill("synthetic-close-model");
+  await page.locator("#retry-dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await page.locator("#retry-dialog").waitFor({ state: "hidden" });
+  await page.waitForTimeout(100);
+  assert.equal(
+    requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/preflight").length,
+    retryPreflightsBeforeCancel,
+    "Retry Close submitted the retry form",
+  );
+
+  await page.locator("#retry-job").click();
+  await page.locator("#retry-dialog").waitFor({ state: "visible" });
   const retryResponse = await runPreflight(
     () => page.locator("#retry-dialog").getByRole("button", { name: "Reprocess" }).click(),
     `/api/jobs/${demoJob.id}/retry`,
@@ -560,6 +587,24 @@ try {
     buffer: tinyInvoice(secondNumber),
   });
   await page.locator("#start-upload").waitFor({ state: "visible" });
+
+  const uploadPreflightsBeforeDialogCancel = requestLog.filter(
+    (entry) => entry.method === "POST" && entry.path === "/api/preflight",
+  ).length;
+  await page.locator("#upload-dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.locator("#upload-dialog").waitFor({ state: "hidden" });
+  await page.waitForTimeout(100);
+  assert.equal(
+    requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/preflight").length,
+    uploadPreflightsBeforeDialogCancel,
+    "Upload Cancel submitted the upload form",
+  );
+  await page.locator("[data-open-upload]").first().click();
+  await page.locator("#upload-dialog").waitFor({ state: "visible" });
+  assert(
+    (await page.locator("#upload-queue").textContent())?.includes(secondFilename),
+    "Closing the upload dialog discarded the selected file",
+  );
 
   const uploadsBeforeCancel = requestLog.filter(
     (entry) => entry.method === "POST" && entry.path === "/api/invoices",

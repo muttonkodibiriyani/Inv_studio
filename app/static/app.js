@@ -2057,6 +2057,9 @@ async function runRetry(preflightToken, options) {
 
 function bindEvents() {
   ["settings", "upload", "retry"].forEach(setupModelPicker);
+  $$('button[value="cancel"]').forEach((button) => button.addEventListener("click", () => {
+    button.closest("dialog")?.close("cancel");
+  }));
   $$('[data-nav]').forEach((control) => control.addEventListener("click", (event) => { event.preventDefault(); navigate(control.dataset.nav); }));
   $$('[data-open-upload]').forEach((button) => button.addEventListener("click", openUpload));
   $("#job-search").addEventListener("input", renderJobs);
