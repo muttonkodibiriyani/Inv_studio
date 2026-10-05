@@ -318,6 +318,8 @@ def test_reference_json_rejects_nested_values_before_semantic_matching(refs, mut
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
     monkeypatch.setenv("INV_STUDIO_DATA", str(tmp_path / "module-default"))
+    # These API tests exercise the legacy demo-reference validation, which is test-only.
+    monkeypatch.setenv("INV_STUDIO_DEMO_REFERENCES", "1")
     import app.main as main
 
     def fake_process(path, options, store, ai_reader, progress):
@@ -481,6 +483,7 @@ def test_invalid_options_json_returns_sanitized_client_error(api_client):
 
 def test_rule_change_during_extraction_never_enriches_or_readies_job(tmp_path, monkeypatch):
     monkeypatch.setenv("INV_STUDIO_DATA", str(tmp_path / "module-default"))
+    monkeypatch.setenv("INV_STUDIO_DEMO_REFERENCES", "1")
     import app.main as main
 
     started = threading.Event()

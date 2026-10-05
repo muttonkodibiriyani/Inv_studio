@@ -35,9 +35,9 @@ def item_row(row, parent, barcode, vpn, desc):
             "keys": [parent], "data": data, "flags": []}
 
 
-def po_row(row, qty, cost, barcode):
+def po_row(row, qty, cost, barcode, parent):
     data = {"EBS_SUPPLIER_CODE": "ABC001", "LOCATION": "38091", "RMS_ORDER_NO": "13000001", "EXT_ORDER_NO": "",
-            "ASN": "", "BARCODE": barcode, "RMS_ITEM_ID": "", "QTY_RECEIVED": qty, "TOTAL COST": cost,
+            "ASN": "", "BARCODE": barcode, "RMS_ITEM_ID": parent, "QTY_RECEIVED": qty, "TOTAL COST": cost,
             "CURRENCY_CODE": "KWD", "RECEIPT_DATE": "2026-01-10", "SUP_NAME": "ABC"}
     return {"kind": "po", "source_hash": PO_HASH, "source_sheet": "POGRN", "source_row": row, "keys": ["13000001"],
             "data": data, "flags": []}
@@ -45,7 +45,7 @@ def po_row(row, qty, cost, barcode):
 
 ROWS = [item_row(2, "345000001", "ULT_0012345678905", "100001", "Glow Serum Rose 30ml"),
         item_row(3, "345000002", "ULT_0098765432109", "100002", "Matte Lipstick Red 4g"),
-        po_row(2, 3, 30, "0012345678905"), po_row(3, 2, 40, "0098765432109")]
+        po_row(2, 3, 30, "0012345678905", "345000001"), po_row(3, 2, 40, "0098765432109", "345000002")]
 CONFIG = {"location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"}},
           "supplier_site_currency": [{"supplier_site": "22001", "market": "Kuwait", "currency": "KWD"}]}
 INVOICE = Invoice(number="INV-API", supplier_name="ABC Trading LLC", date="2026-01-15", date_printed="15/01/2026",
@@ -88,7 +88,8 @@ def test_fine_rules_api_config_run_exports_and_feedback(tmp_path, monkeypatch):
     imported(tmp_path, monkeypatch)
     app = create_app(tmp_path / "data")
     app.state.store.job("job-1", {"id": "job-1", "status": "review", "reviewed": False, "revision": 1,
-                                  "filename": "synthetic.pdf", "invoice": INVOICE.model_dump(mode="json")})
+                                  "filename": "synthetic.pdf", "invoice": INVOICE.model_dump(mode="json"),
+                                  "text": "Net total 70.00\nTax 0.00"})
     headers = {"x-studio-request": "1"}
     with TestClient(app) as client:
         bad = client.post("/api/fine-rules/config", json={"qty_tolerance": "-1"}, headers=headers)
@@ -102,7 +103,7 @@ def test_fine_rules_api_config_run_exports_and_feedback(tmp_path, monkeypatch):
         assert "07_Match_Workbench" in load_workbook(io.BytesIO(review.content)).sheetnames
         target = client.post("/api/fine-rules/target.xlsx", json={"job_ids": ["job-1"]}, headers=headers)
         assert target.status_code == 200
-        assert load_workbook(io.BytesIO(target.content))["Details"]["B2"].value == "345000001"
+        assert load_workbook(io.BytesIO(target.content))["Details"]["B2"].value == 345000001
         proposed = client.post("/api/fine-rules/feedback", headers=headers, json={
             "invoice_line": "INV-API/1", "correction": "345000002", "evidence": "label photo"}).json()
         assert proposed["Decision"] == "Proposed"

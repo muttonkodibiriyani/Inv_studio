@@ -60,7 +60,8 @@ def test_review_api_preserves_printed_date_until_reviewer_supplies_iso(tmp_path,
         held = first.json()
         assert held["invoice"]["date_printed"] == "03-08-2026"
         assert held["invoice"]["date"] is None
-        assert "DATE" in {issue["code"] for issue in held["validation"]["issues"]}
+        # The banner comes from the fine rules; key on the rule id, not the Failure Status text.
+        assert "ALG-004" in {issue.get("rule") for issue in held["validation"]["issues"]}
         assert held["validation"]["ready"] is False
 
         reviewed_invoice = held["invoice"]

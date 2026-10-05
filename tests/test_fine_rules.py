@@ -23,8 +23,12 @@ def item(parent, barcode, vpn, site="22001", name="ABC001RA1KWD", desc="Glow Ser
             "UDA_LV_1_VALUE": brand, "BRAND": "NotTheBrand", "_ref": f"Items!{ref}"}
 
 
-def pogrn(order, location, qty, cost, ebs="ABC001", currency="KWD", ref=1, barcode="0012345678905"):
-    return {"EBS_SUPPLIER_CODE": ebs, "LOCATION": location, "RMS_ORDER_NO": order, "BARCODE": barcode,
+PARENT_OF = {"0012345678905": "345000001", "0098765432109": "345000002"}
+
+
+def pogrn(order, location, qty, cost, ebs="ABC001", currency="KWD", ref=1, barcode="0012345678905", item=None):
+    return {"EBS_SUPPLIER_CODE": ebs, "LOCATION": location, "RMS_ORDER_NO": order, "BARCODE": "ULT_" + barcode,
+            "RMS_ITEM_ID": item or PARENT_OF.get(barcode, ""),
             "QTY_RECEIVED": qty, "UNIT_COST": "", "TOTAL COST": cost, "CURRENCY_CODE": currency,
             "RECEIPT_DATE": "2026-01-10 00:00:00", "SUP_NAME": "ABC", "_ref": f"POGRN!{ref}"}
 
@@ -39,7 +43,7 @@ POGRN = [
     pogrn("13000001", "38091", "3", "30", ref=2),
     pogrn("13000001", "38091", "2", "40", ref=3, barcode="0098765432109"),
     pogrn("13000001", "38091", None, None, ref=4),
-    pogrn("13000002", "800901", "99", "990", ref=5),
+    pogrn("13000002", "800901", "99", "990", ref=5, ebs="XYZ002"),  # another 6-character code: never a candidate
 ]
 CONFIG = {"location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"},
                               "800901": {"type": fr.WAREHOUSE, "market": "Kuwait"}},
@@ -67,7 +71,7 @@ def run(inv=None, items=ITEMS, rows=POGRN, config=CONFIG, **kwargs):
 
 
 def types(result, rule=None):
-    return [e["Exception Type"] for e in result["exceptions"] if rule is None or e["Rule ID"] == rule]
+    return [e["Engine Type"] for e in result["exceptions"] if rule is None or e["Rule ID"] == rule]
 
 
 def test_happy_path_is_approved():
@@ -88,15 +92,23 @@ def test_R_001_raw_capture_unchanged_and_unreadable_invoice_blocked():
     assert "Unreadable Invoice" in types(empty) and empty["status"] == "Blocked"
 
 
-def test_R_002_leading_number_is_vpn_and_several_numbers_need_unique_master_match():
+def test_R_002_only_the_leading_six_digit_number_is_a_vpn():
     leading = run(invoice(lines=lines(first={"gtin": None, "sku": None, "description": "100001 Glow Serum Rose"})))
-    assert leading["lines"][0]["Item"] == "345000001"
-    unique_secondary = run(invoice(lines=lines(first={"gtin": None, "sku": None,
-                                                      "description": "Glow Serum ref 100001 lot 999999"})))
-    assert unique_secondary["lines"][0]["Item"] == "345000001"
-    several = run(invoice(lines=lines(first={"gtin": None, "sku": None,
-                                             "description": "Glow Serum 100001 or 100002"})))
-    assert several["lines"][0]["Item"] == "" and "Item Exception" in types(several, "R-002")
+    assert leading["lines"][0]["Item"] == "345000001" and leading["lines"][0]["Match Method"] == "VPN exact"
+    secondary = run(invoice(lines=lines(first={"gtin": None, "sku": None,
+                                               "description": "Glow Serum ref 100001 lot 999999"})))
+    assert secondary["lines"][0]["Item"] == "" and secondary["status"] != "Approved"
+    assert fr.vpn_candidates(Line(description="Glow Serum 100001 or 100002")) == []
+
+
+def test_e71a_line_10_leading_vpn_resolves_after_barcode_and_vpn_column_fail():
+    """Must-pass (owner answer, ITM-004): a line whose barcode is unknown and whose VPN column is empty resolves
+    through the leading six-digit number of the description, constrained to the invoice supplier."""
+    line = {"gtin": "4006000000001", "sku": None, "description": "100002 Matte Lipstick Red 4g 12pcs 2024"}
+    result = run(invoice(lines=lines(second=line)))
+    assert result["lines"][1]["Item"] == "345000002" and result["lines"][1]["Match Method"] == "VPN exact"
+    other = ITEMS + [item("345000099", "ULT_7770001112223", "100002", site="22099", name="QRS001RA1KWD", ref=9)]
+    assert run(invoice(lines=lines(second=line)), items=other)["lines"][1]["Item"] == "345000002"
 
 
 def test_R_003_six_digit_number_with_no_or_many_master_rows_is_item_exception():
@@ -121,7 +133,9 @@ def test_R_005_route_order_barcode_vpn_item_parent_then_description_only_as_revi
     assert vpn["lines"][0]["Match Method"] == "VPN exact"
     parent = run(invoice(lines=lines(first={"gtin": None, "sku": None, "item_id": "345000001",
                                             "description": "Glow"})))
-    assert parent["lines"][0]["Match Method"] == "ITEM_PARENT exact" and parent["lines"][0]["Item"] == "345000001"
+    # ITM-006: an ITEM_PARENT printed on the invoice is only a review candidate, never a fill.
+    assert parent["lines"][0]["Match Method"] == "ITEM_PARENT candidate" and parent["lines"][0]["Item"] == ""
+    assert parent["status"] != "Approved"
     fuzzy = run(invoice(lines=lines(first={"gtin": None, "sku": None, "description": "Glow Serum Rose"})))
     assert fuzzy["lines"][0]["Match Method"] == "Description candidate"
     assert fuzzy["lines"][0]["Item"] == "" and fuzzy["status"] != "Approved"
@@ -166,7 +180,7 @@ def test_R_010_location_master_wins_over_8000_prefix():
 
 def test_R_011_location_from_pogrn_and_missing_master_market_is_exception():
     result = run(config={**CONFIG, "location_master": {}})
-    assert result["header"]["Location"] == "" and result["header"]["Market"] == ""
+    assert result["header"]["Location"] == "38091" and result["header"]["Market"] == ""
     validation = [g for g in result["pogrn_validation"] if g["POGRN RMS Order No"] == "13000001"][0]
     assert validation["POGRN Location ID"] == "38091" and validation["Market Check"] == "Fail"
 
@@ -186,7 +200,7 @@ def test_R_013_cross_border_market_from_receiving_location_not_supplier():
 def test_R_014_usd_invoice_goes_to_manual_review():
     run_state = fr.Run(invoice(currency="USD"), fr.RulesConfig.from_dict(CONFIG), "")
     assert fr.resolve_currency(run_state, "22001", "Kuwait", None) is None
-    assert [e["Exception Type"] for e in run_state.exceptions] == ["USD Review"]
+    assert [e["Engine Type"] for e in run_state.exceptions] == ["USD Review"]
 
 
 def test_R_015_auto_match_only_when_supplier_and_identifier_give_one_record():
@@ -236,42 +250,92 @@ def test_R_019_ebs_key_is_first_six_characters_of_supplier_name():
     assert "Supplier Exception" in types(short, "R-019")
 
 
+def both(order, location, q1="3", c1="30", q2="2", c2="40", **kw):
+    """One POGRN order/location carrying both synthetic invoice items."""
+    return [pogrn(order, location, q1, c1, **kw), pogrn(order, location, q2, c2, barcode="0098765432109", **kw)]
+
+
 def test_R_020_no_pogrn_rows_for_ebs_code_is_missing_po():
     result = run(rows=[pogrn("1", "38091", "5", "70", ebs="ZZZ999")])
-    assert result["header"]["Order No"] == "" and "Missing PO" in types(result, "R-020")
+    assert result["header"]["Order No"] == "" and "POGRN Supplier Exception" in types(result, "SUP-002")
 
 
-def test_R_021_quantity_mismatch_is_never_auto_approved():
-    result = run(rows=[pogrn("13000001", "38091", "4", "70")])
-    assert result["header"]["Order No"] == "" and result["pogrn_validation"][0]["Qty Match"] == "Fail"
+def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
+    # Owner form 01a10c4d qty_cost_tolerance = invoice_flag: POG-006 and C-11 warn, they do not block.
+    result = run(rows=both("13000001", "38091", q2="1"))
+    assert result["header"]["Order No"] == "13000001" and result["pogrn_validation"][0]["Qty Match"] == "Fail"
+    assert result["pogrn_validation"][0]["Validation Status"] == "Pass"
+    assert [line["Quantity"] for line in result["lines"]] == [D(3), D(2)]  # the invoice figures
+    warnings = [e for e in result["exceptions"] if e["Engine Type"] in ("Quantity Mismatch", "Item Quantity Mismatch")]
+    assert {e["Rule ID"] for e in warnings} == {"POG-006", "C-11"} and not any(e["blocking"] for e in warnings)
+    # Still Review only through the owner's item-line check (as defined: lines whose quantity agrees).
+    assert {e["Rule ID"] for e in result["exceptions"] if e["blocking"]} == {"ITEM-LINE-95"}
 
 
-def test_R_022_value_mismatch_is_never_auto_approved():
-    result = run(rows=[pogrn("13000001", "38091", "5", "71")])
-    assert result["header"]["Order No"] == "" and result["pogrn_validation"][0]["Pre-Tax Value Match"] == "Fail"
+def test_R_022_value_mismatch_beyond_tolerance_is_never_auto_approved():
+    result = run(rows=both("13000001", "38091", c2="45"))
+    assert result["header"]["Order No"] == "13000001" and result["pogrn_validation"][0]["Pre-Tax Value Match"] == "Fail"
+    assert "Value Mismatch" in types(result, "POG-007") and result["status"] == "Review"
 
 
-def test_R_023_several_passing_orders_is_ambiguous_po():
-    result = run(rows=[pogrn("13000001", "38091", "5", "70"), pogrn("13000009", "38091", "5", "70")])
-    assert result["header"]["Order No"] == "" and "Ambiguous PO" in types(result, "R-030")
+def test_POG_007_owner_tolerance_is_one_kwd_or_two_aed_at_two_decimals():
+    within = run(rows=both("13000001", "38091", c2="40.9990000001"))
+    assert within["pogrn_validation"][0]["Value Result"] == "Pass" and within["status"] == "Approved"
+    assert "01a10c4f" in within["pogrn_validation"][0]["Value Tolerance Source"]
+    aed = both("13000001", "38091", c2="41.99", currency="AED")
+    assert run(invoice(currency="AED"), rows=aed)["pogrn_validation"][0]["Value Result"] == "Pass"
+    assert run(rows=both("13000001", "38091", c2="41.01"))["pogrn_validation"][0]["Value Result"] == "Fail"
+    usd = fr.RulesConfig.from_dict(CONFIG)
+    assert fr._value_variance(usd, D("70"), D("70.004"), "USD") == (D("0.00"), True)
+    assert fr._value_variance(usd, D("70"), D("70.01"), "USD")[1] is False
 
 
-def test_R_024_invoice_po_is_never_overwritten_by_derived_po():
+def test_R_023_several_orders_carrying_every_item_is_ambiguous_po():
+    result = run(rows=both("13000001", "38091") + both("13000009", "38091"))
+    assert result["header"]["Order No"] == "" and "Ambiguous PO" in types(result, "POG-001")
+    assert result["po_candidates"] == 2 and result["header"]["Location"] == ""
+
+
+def test_R_024_printed_po_is_kept_and_flagged_when_not_in_pogrn():
     result = run(invoice(po="99999999"))
-    assert result["header"]["Order No"] == "99999999" and "PO Conflict" in types(result, "R-024")
-    assert result["status"] != "Approved"
+    assert result["header"]["Order No"] == "99999999" and "Missing PO" in types(result, "POG-001")
+    assert "25 Sep" in next(e["Candidates / Evidence"] for e in result["exceptions"] if e["Rule ID"] == "POG-001")
+    assert result["status"] != "Approved" and result["header"]["Location"] == ""
+
+
+def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
+    rows = POGRN + both("13000077", "800901", ebs="ZZZ999")
+    result = run(invoice(po="13000001"), rows=rows)
+    assert result["header"]["Order No"] == "13000001" and result["po"]["source"] == fr.FROM_INVOICE
+    assert result["status"] == "Approved", result["exceptions"]
+    # strict_6 (owner form 01a10c4d): a printed order of another 6-character EBS code is not filled.
+    other = run(invoice(po="13000077"), rows=rows)
+    assert other["header"]["Order No"] == "" and other["header"]["Location"] == ""
+    assert "POGRN Supplier Exception" in types(other, "SUP-002") and other["status"] == "Review"
+
+
+def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
+    # The only order under the code is linked even without the invoice items; the item check then fails it.
+    lone = run(rows=[pogrn("13000001", "38091", "5", "70")])
+    assert lone["header"]["Order No"] == "13000001" and lone["status"] == "Review"
+    assert lone["pogrn_validation"][0]["Items Check"] == "Fail"
+    # Two orders under the code are ambiguous even when only one carries the items.
+    two = run(rows=POGRN + [pogrn("13000003", "38091", "1", "1", item="345000099")])
+    assert two["header"]["Order No"] == "" and "Ambiguous PO" in types(two, "POG-001")
+    assert two["po_candidates"] == 2
 
 
 # --------------------------------------------------------------------------- owner POGRN rules
 
 
 def test_R_025_location_is_exact_order_location_and_never_combined():
-    split = [pogrn("13000001", "38091", "3", "30"), pogrn("13000001", "38092", "2", "40")]
-    result = run(rows=split)
-    assert result["header"]["Location"] == ""
+    result = run(rows=both("13000001", "38091") + both("13000001", "38092"))
+    assert result["header"]["Order No"] == "13000001" and result["header"]["Location"] == ""
+    assert "Location ID" in types(result, "POG-002")
     assert all("several locations" in g["Exception Reason"] for g in result["pogrn_validation"])
-    blank = run(rows=[pogrn("13000001", "", "5", "70")])
+    blank = run(rows=both("13000001", ""))
     assert "Location ID blank" in blank["pogrn_validation"][0]["Exception Reason"]
+    assert blank["header"]["Location"] == "" and blank["status"] != "Approved"
 
 
 def test_R_026_location_type_prefix_master_override_and_mismatch():
@@ -281,7 +345,8 @@ def test_R_026_location_type_prefix_master_override_and_mismatch():
     config = fr.RulesConfig.from_dict({"location_master": {"38091": {"type": fr.WAREHOUSE}}})
     assert fr.location_type("38091", config)["conflict"] is True
     result = run(config={**CONFIG, "location_master": {"38091": {"type": fr.WAREHOUSE, "market": "Kuwait"}}})
-    assert result["header"]["Order No"] == "" and "disagrees with prefix" in result["pogrn_validation"][0]["Exception Reason"]
+    assert "disagrees with prefix" in result["pogrn_validation"][0]["Exception Reason"]
+    assert result["header"]["Location Type"] == "" and result["status"] != "Approved"
 
 
 def test_R_027_market_only_from_location_mapping():
@@ -297,23 +362,24 @@ def test_R_027_market_only_from_location_mapping():
 def test_R_028_quantity_received_aggregated_per_order_location_with_tolerance():
     group = [g for g in run()["pogrn_validation"] if g["POGRN RMS Order No"] == "13000001"][0]
     assert group["Aggregated QTY_RECEIVED"] == D(5) and group["Quantity Variance"] == D(0)
-    loose = run(rows=[pogrn("13000001", "38091", "4", "70")], config={**CONFIG, "qty_tolerance": "1"})
-    assert loose["header"]["Order No"] == "13000001"
+    loose = run(rows=both("13000001", "38091", q2="1"), config={**CONFIG, "qty_tolerance": "1"})
+    assert loose["header"]["Order No"] == "13000001" and "Quantity Mismatch" not in types(loose)
 
 
 def test_R_029_currency_checked_before_pre_tax_value():
-    result = run(rows=[pogrn("13000001", "38091", "5", "70", currency="AED")])
+    result = run(rows=both("13000001", "38091", currency="AED"))
     group = result["pogrn_validation"][0]
     assert group["Value Result"] == "Fail" and "Currency differs" in group["Exception Reason"]
     assert group["Aggregated TOTAL COST"] == D(70)
 
 
-def test_R_030_unique_fully_passing_order_is_derived_else_candidate_shown_for_review():
+def test_R_030_unique_order_is_derived_and_unmapped_market_stays_blank_and_flagged():
     result = run()
     assert result["header"]["Order No"] == "13000001" and result["po"]["source"] == fr.DERIVED_FROM_POGRN
     unmapped = run(config={**CONFIG, "location_master": {}})
-    missing = [e for e in unmapped["exceptions"] if e["Rule ID"] == "R-030"][0]
-    assert "13000001@38091" in missing["Candidates / Evidence"] and "V-007" in missing["Proposed Resolution"]
+    assert unmapped["header"]["Order No"] == "13000001" and unmapped["header"]["Location"] == "38091"
+    assert unmapped["header"]["Market"] == "" and unmapped["status"] != "Approved"
+    assert "Market unresolved" in unmapped["pogrn_validation"][0]["Exception Reason"]
 
 
 # --------------------------------------------------------------------------- 01A_Algorithm_Rules
@@ -356,7 +422,7 @@ def test_ALG_005_supplier_site_is_item_master_supplier_as_text():
     result = run()
     assert result["header"]["Supplier Site"] == "22001"
     site = next(x for x in result["lineage"] if x["target"] == "Supplier Site")
-    assert site["rule"] == "ALG-005" and "Items!2" in site["reference"]
+    assert site["rule"] == "SUP-003" and "Items!2" in site["reference"]
 
 
 def test_ALG_006_pogrn_searched_by_six_character_ebs_key():
@@ -378,10 +444,10 @@ def test_ALG_008_printed_po_validated_against_pogrn_before_use():
     assert result["status"] == "Approved"
 
 
-def test_ALG_009_missing_po_recovered_by_quantity_and_value():
+def test_ALG_009_missing_po_derived_from_the_only_order_carrying_every_item():
     result = run()
-    assert result["po"]["status"] == "Approved"
-    assert [g["Validation Status"] for g in result["pogrn_validation"]] == ["Pass", "Fail"]
+    assert result["po"]["status"] == "Approved" and result["po_candidates"] == 1
+    assert [g["Validation Status"] for g in result["pogrn_validation"]] == ["Pass"]
 
 
 def test_ALG_010_derived_order_written_with_source_only_when_unique():
@@ -427,7 +493,13 @@ def test_ALG_016_barcode_matches_item_without_ult_and_many_parents_is_exception(
     result = run(items=twin)
     assert result["lines"][0]["Item"] == "" and "Item Exception" in types(result, "ALG-016")
     no_barcode = run(invoice(lines=lines(first={"gtin": "9999999999999"})))
-    assert no_barcode["lines"][0]["Barcode Check"] == "Fail"
+    # A printed barcode absent from the Item Master is not found, not a disagreement; the VPN route follows.
+    assert no_barcode["lines"][0]["Barcode Check"] == fr.ITEM_NOT_FOUND
+    assert no_barcode["lines"][0]["Item"] == "345000001" and no_barcode["lines"][0]["Match Method"] == "VPN exact"
+    clash = ITEMS + [item("345000011", "ULT_9999999999999", "100011", ref=11)]
+    conflict = run(invoice(lines=lines(first={"gtin": "9999999999999"})), items=clash)
+    assert conflict["lines"][0]["Item"] == "" and "Item Exception" in types(conflict, "ALG-016") or \
+        "Item Conflict" in types(conflict, "ALG-020")
 
 
 def test_ALG_017_vpn_column_first_else_leading_six_digits():
@@ -474,7 +546,7 @@ def test_ALG_023_currency_from_map_not_supplier_suffix():
 
 def test_ALG_024_usd_only_with_explicit_supplier_site_exception():
     usd = {**CONFIG, "supplier_site_currency": [{"supplier_site": "22001", "market": "Kuwait", "currency": "USD"}]}
-    rows = [pogrn("13000001", "38091", "5", "70", currency="USD")]
+    rows = both("13000001", "38091", currency="USD")
     blocked = run(invoice(currency="USD"), rows=rows, config=usd)
     assert blocked["header"]["Currency"] == "" and "USD Review" in types(blocked, "ALG-024")
     allowed = run(invoice(currency="USD"), rows=rows, config={**usd, "usd_exceptions": ["22001"]})
@@ -534,8 +606,8 @@ def test_ALG_030_nothing_invented_when_sources_are_empty():
 
 TARGET_02A = {
     "Document": ("header", "INV-1", "ALG-003"),
-    "Supplier Site": ("header", "22001", "ALG-005"),
-    "Order No": ("header", "13000001", "ALG-010"),
+    "Supplier Site": ("header", "22001", "SUP-003"),
+    "Order No": ("header", "13000001", "POG-001"),
     "Location": ("header", "38091", "ALG-011"),
     "Location Type": ("header", fr.STORE, "ALG-014"),
     "Document Date": ("header", "2026-01-15", "ALG-004"),
@@ -596,3 +668,136 @@ def test_config_rejects_unapproved_currency_rows_and_negative_tolerance():
             {"supplier_site": "1", "market": "K", "currency": "USD"}]})
     with pytest.raises(ValueError):
         fr.RulesConfig.from_dict({"qty_tolerance": "-1"})
+
+
+# --------------------------------------------------------------------------- owner rulesheet (2026-10-05)
+
+
+def test_shifted_pogrn_rows_are_never_lookup_keys_or_evidence_and_flag_the_invoice():
+    shifted = {**pogrn("13000001", "38091", "3", "30", ref=9), "RMS_ITEM_ID": "", "CREATED_DATE": "KWD"}
+    assert fr.malformed_row(shifted) and fr.malformed_row({"RMS_ITEM_ID": "ABC", "CREATED_DATE": "2026-01-01"})
+    assert not fr.malformed_row({**POGRN[0], "CREATED_DATE": "2026-01-01T00:00:00"})
+    printed = run(invoice(po="13000001"), rows=POGRN + [shifted])
+    assert "Malformed Source Row" in types(printed, "POG-001") and printed["status"] == "Review"
+    assert all("POGRN!9" not in x["reference"] for x in printed["lineage"])
+    assert printed["exceptions"][0]["Exception Type"] == "Audit Exception"
+    derived = run(rows=POGRN + [shifted])
+    assert derived["header"]["Order No"] == "13000001" and "Malformed Source Row" in types(derived)
+    elsewhere = {**shifted, "RMS_ORDER_NO": "13000077", "EBS_SUPPLIER_CODE": "XYZ002"}
+    assert "Malformed Source Row" not in types(run(rows=POGRN + [elsewhere]))
+
+
+def party_boxes(seller, buyer, page=1, labels=("Issued By:", "Issued To:")):
+    """Synthetic two-column party row: labels at x 140 / 410, names below from x 30 / 306."""
+    boxes = []
+
+    def put(phrase, x, top):
+        for word in phrase.split():
+            boxes.append({"text": word, "page": page, "box": [x, top, x + 6 * len(word), top + 8]})
+            x += 6 * len(word) + 4
+    put(labels[0], 140, 95)
+    put(labels[1], 410, 95)
+    put(seller, 30, 108)
+    put(buyer, 306, 108)
+    put("Total 70", 30, 400)
+    return boxes
+
+
+OWNER = {**CONFIG, "buyer_name": "Synthowner LLC"}
+
+
+def test_buyer_name_matches_the_entity_on_the_buyer_side_with_the_printed_line_as_evidence():
+    boxes = party_boxes("ABC Trading LLC", "SYNTHOWNER INTERNATIONAL CO. L.L.C")
+    result = run(invoice(buyer_name="CO. L.L.C"), config=OWNER, boxes=boxes)
+    assert result["header"]["Buyer Name"] == "Synthowner LLC" and "Buyer Review" not in types(result)
+    trace = next(x for x in result["lineage"] if x["target"] == "Buyer Name")
+    assert trace["original"] == "SYNTHOWNER INTERNATIONAL CO. L.L.C" and trace["reference"] == "page 1"
+    assert trace["evidence_kind"] == fr.EVIDENCE_PRINTED
+    assert result["status"] == "Approved", result["exceptions"]
+
+
+def test_buyer_name_without_printed_evidence_uses_the_owner_rule():
+    missed = run(invoice(buyer_name="CO. L.L.C"), config=OWNER)
+    trace = next(x for x in missed["lineage"] if x["target"] == "Buyer Name")
+    assert missed["header"]["Buyer Name"] == "Synthowner LLC" and "Buyer Review" not in types(missed)
+    assert trace["evidence_kind"] == fr.EVIDENCE_OWNER_RULE and trace["reference"] == fr.BUYER_RULE_EVIDENCE
+    assert run()["header"]["Buyer Name"] == ""
+
+
+def test_buyer_review_only_for_a_buyer_side_company_without_the_entity():
+    other = run(invoice(buyer_name="CO. L.L.C"), config=OWNER, boxes=party_boxes("ABC Trading LLC", "Othername Co. L.L.C"))
+    assert other["header"]["Buyer Name"] == "Synthowner LLC" and other["status"] == "Review"
+    assert any(e["Description"] == "printed buyer differs from owner entity" for e in other["exceptions"])
+    # The entity on the seller side is not the buyer; a group company may sell to the owner.
+    seller_side = run(invoice(buyer_name=None), config=OWNER, boxes=party_boxes("Synthowner Beauty LLC", "Othername LLC"))
+    assert "Buyer Review" in types(seller_side)
+    assert "Buyer Review" in types(run(invoice(buyer_name="Othername Co. L.L.C"), config=OWNER))
+    # Whole words only: a longer word that merely contains the entity is not it.
+    assert "Buyer Review" in types(run(config=OWNER, boxes=party_boxes("ABC Trading LLC", "Synthownerx LLC")))
+
+
+def test_supplier_candidates_drop_the_buyer_side_by_position_never_by_name():
+    scan = fr.scan_pages(boxes=party_boxes("Synthowner Beauty LLC", "SYNTHOWNER INTERNATIONAL CO. L.L.C"))
+    page, rows = fr.buyer_party(scan)
+    assert page == 1 and rows == ["SYNTHOWNER INTERNATIONAL CO. L.L.C"]
+    names = [c["name"] for c in fr.supplier_candidates(scan, buyer_name="CO. L.L.C", buyer_rows=rows)]
+    assert names == ["Synthowner Beauty LLC"]
+    # A reader supplier field loses buyer-side text, whole or joined on across the columns; a seller-side group
+    # company is kept.
+    bled = fr.supplier_candidates(scan, printed_name="Synthsell Trading FZCO SYNTHOWNER", buyer_rows=rows)
+    assert bled[0]["name"] == "Synthsell Trading FZCO"
+    swapped = fr.supplier_candidates(scan, printed_name="SYNTHOWNER INTERNATIONAL CO. L.L.C", buyer_rows=rows)
+    assert [c["name"] for c in swapped] == ["Synthowner Beauty LLC"]
+    seller = fr.supplier_candidates(scan, printed_name="Synthowner Beauty LLC", buyer_rows=rows)
+    assert [c["method"] for c in seller][0] == "extracted supplier field"
+    assert fr.buyer_party(fr.scan_pages("Issued By: Issued To:\nA LLC B LLC")) == (None, [])
+
+
+def test_SUP_001_bridge_and_site_chosen_by_order_ebs_code_and_location_entity():
+    family_items = ITEMS + [item("345000001", "ULT_0012345678905", "100001", site="22005", name="ABC001RB2SAR",
+                                ref=7),
+                            item("345000002", "ULT_0098765432109", "100002", site="22005", name="ABC001RB2SAR",
+                                 ref=8)]
+    sites = [{"supplier_site": s, "currency": "KWD", "status": "Active", "supplier_code": "1",
+              "supplier_name": "ABC Trading LLC", "site_name": n} for s, n in (("22001", "a"), ("22005", "b"))]
+    master = {"38091": {"type": fr.STORE, "market": "Kuwait", "entity_currency": "RA1KWD"}}
+    config = {**CONFIG, "supplier_sites": sites, "location_master": master}
+    result = run(items=family_items, config=config)
+    assert result["header"]["Supplier Site"] == "22001" and result["header"]["Order No"] == "13000001"
+    trace = [x for x in result["lineage"] if x["target"] == "Supplier Site"][-1]
+    assert trace["rule"] == "SUP-003" and "LOCATIONS entity" in trace["source"]
+    unknown = {**config, "location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"}}}
+    review = run(items=family_items, config=unknown)
+    assert review["header"]["Supplier Site"] == "" and "Supplier Site Exception" in types(review, "SUP-003")
+
+
+def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
+    traced = run(text_value="Net 70.000\fTax 0\nTotal 70")
+    refs = {x["target"]: x["reference"] for x in traced["lineage"]}
+    assert refs["Net Amount"] == "page 1" and refs["Tax Amount"] in ("page 1", "page 2")
+    assert traced["header"]["Gross Amount"] == D(70)
+    missing = run()
+    assert "Totals Audit" in types(missing) and missing["status"] == "Approved"
+
+
+def test_item_resolution_counts_lines_whose_quantity_agrees_with_the_order():
+    good = run()["item_resolution"]
+    assert (good["resolved"], good["total"], good["below"]) == (2, 2, False)
+    short = run(rows=both("13000001", "38091", q2="1"))
+    assert short["item_resolution"]["resolved"] == 1 and short["item_resolution"]["below"] is True
+    assert "Item Quantity Mismatch" in types(short, "C-11") and "Owner Validation" in types(short, "ITEM-LINE-95")
+
+
+def test_upc_trace_records_the_ult_prefix_removal():
+    result = run(invoice(lines=lines(first={"gtin": "ULT_0012345678905"})))
+    trace = next(x for x in result["lineage"] if x["target"] == "UPC" and x["line"] == 1)
+    assert result["lines"][0]["UPC"] == "0012345678905" and "ULT_ prefix removed" in trace["rule"]
+
+
+def test_exception_types_are_the_owner_checklist_failure_statuses():
+    result = run(invoice(po="99999999"), rows=both("13000001", "38091", q2="1"))
+    by_kind = {e["Engine Type"]: (e["Exception Type"], e["Check ID"]) for e in result["exceptions"]}
+    assert by_kind["Missing PO"] == ("Missing/Ambiguous PO", "C-12")
+    assert fr.FAILURE_STATUS["Value Mismatch"] == ("Value Mismatch", "C-16")
+    assert fr.FAILURE_STATUS["Quantity Mismatch"] == ("Quantity Mismatch", "C-15")
+    assert fr.FAILURE_STATUS["Malformed Source Row"] == ("Audit Exception", "C-17")

@@ -9,6 +9,107 @@ const make = (tag, className, text) => {
   return node;
 };
 
+// Derived from owner sheets by the fine rules; on fine-rules jobs they are shown with evidence, not typed.
+const RULES_DERIVED_FIELDS = new Set(["seller", "site", "buyer", "location", "origin", "market", "taxCode"]);
+
+function rulesJob(job) {
+  return job?.validation?.source === "fine_rules";
+}
+
+function evidenceText(evidence) {
+  return (evidence || []).map((entry) => {
+    const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
+      : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
+        : entry.kind === "owner_rule" ? `owner rule · ${entry.reference}`
+        : entry.kind === "owner_entry" ? `entered by reviewer${entry.original ? ` · ${entry.original}` : ""}`
+        : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
+          : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
+    return `${where}${entry.rule ? ` (${entry.rule})` : ""}`;
+  }).join("; ");
+}
+
+// Target cells the download cannot be written without; when the rules leave one empty the reviewer may enter it.
+const RULES_REQUIRED_HEADER = new Set(["number", "site", "po", "location", "location_type", "date", "net", "tax", "taxCode"]);
+const RULES_REQUIRED_LINE = new Set(["Item", "Unit Cost", "Quantity", "Unit Tax Code"]);
+const RULES_ENTRY_HINT = { location_type: "Store (S) or Warehouse (W)", date: "YYYY-MM-DD" };
+
+function enteredByReviewer(cell) {
+  return (cell?.evidence || []).some((entry) => entry.kind === "owner_entry");
+}
+
+function rulesEntry(cell, label, scope, name, line) {
+  const input = make("input", "rules-entry");
+  input.dataset.scope = scope;
+  input.dataset.name = name;
+  if (line) input.dataset.line = String(line);
+  input.value = enteredByReviewer(cell) ? cell.value : "";
+  input.placeholder = RULES_ENTRY_HINT[name] || "Enter if you have it";
+  input.setAttribute("aria-label", `${label}${line ? ` line ${line}` : ""}, entered by reviewer`);
+  input.disabled = app.currentJob?.status === "exported";
+  return input;
+}
+
+function rulesCell(cell, name, line) {
+  const td = make("td");
+  const empty = !cell || cell.value === null || cell.value === undefined;
+  if (empty) td.append(make("span", "rules-flagged", cell?.reason === "No evidence" ? "Empty · no evidence" : "Not found"));
+  else td.append(make("span", "", cell.value), make("small", "", evidenceText(cell.evidence)));
+  if ((empty && RULES_REQUIRED_LINE.has(name)) || enteredByReviewer(cell)) td.append(rulesEntry(cell, name, "line", name, line));
+  return td;
+}
+
+function collectEntries() {
+  const entries = { header: {}, lines: {} };
+  document.querySelectorAll(".rules-entry").forEach((input) => {
+    const value = input.value.trim();
+    if (!value) return;
+    if (input.dataset.scope === "header") entries.header[input.dataset.name] = value;
+    else (entries.lines[input.dataset.line] ||= {})[input.dataset.name] = value;
+  });
+  return entries;
+}
+
+function renderRulesResult(job) {
+  const rules = job.rules;
+  const show = rulesJob(job) && Boolean(rules);
+  $("#rules-fieldset").hidden = !show;
+  if (!show) return;
+  const rate = rules.item_lines || {};
+  const percent = rate.rate === null || rate.rate === undefined ? "—" : `${(Number(rate.rate) * 100).toFixed(1)}%`;
+  const itemRate = $("#rules-item-rate");
+  itemRate.textContent = `Item lines resolved ${rate.resolved ?? 0}/${rate.total ?? 0} (${percent})`
+    + (rate.owner_review ? " — below 95%: this invoice goes to owner review." : "");
+  itemRate.title = rate.definition || "";
+  itemRate.classList.toggle("owner-review", Boolean(rate.owner_review));
+  const list = $("#rules-fields");
+  list.replaceChildren();
+  Object.entries(rules.fields || {}).forEach(([key, field]) => {
+    const dd = make("dd");
+    const empty = field.value === null || field.value === undefined;
+    if (empty) {
+      dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence" : "Not found in owner sheets or on the invoice"));
+    } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
+    if ((empty && RULES_REQUIRED_HEADER.has(key)) || enteredByReviewer(field)) dd.append(rulesEntry(field, field.label, "header", key));
+    if (field.target === "Order No" && Number(rules.po_candidates) > 1) {
+      dd.append(make("small", "rules-flagged", `Ambiguous: ${rules.po_candidates} candidate orders — owner review`));
+    }
+    list.append(make("dt", "", field.label), dd);
+  });
+  const body = $("#rules-lines");
+  body.replaceChildren();
+  (rules.lines || []).forEach((line) => {
+    const tr = make("tr");
+    tr.append(make("td", "", String(line.line)));
+    ["Item", "UPC", "Unit Cost", "Quantity", "Unit Tax Code"].forEach((name) => tr.append(rulesCell(line.cells?.[name], name, line.line)));
+    body.append(tr);
+  });
+}
+
+function draftValue(job, field, fallback) {
+  if (!rulesJob(job)) return fallback;
+  return job.rules?.fields?.[field]?.value ?? "";
+}
+
 const HEADER_FIELDS = [
   ["number", "Invoice number", "text"],
   ["supplier_name", "Supplier name", "text"],
@@ -338,20 +439,20 @@ function initializeManualDraft(job) {
   const matches = job.validation?.matches || [];
   setDraftField("Header", "Transaction Number", 1);
   setDraftField("Header", "Document", invoice.number);
-  setDraftField("Header", "Supplier Site", invoice.site);
-  setDraftField("Header", "Order No", invoice.po);
-  setDraftField("Header", "Location", invoice.location);
+  setDraftField("Header", "Supplier Site", draftValue(job, "site", invoice.site));
+  setDraftField("Header", "Order No", draftValue(job, "po", invoice.po));
+  setDraftField("Header", "Location", draftValue(job, "location", invoice.location));
   setDraftField("Header", "Location Type", job.validation?.location_type);
-  setDraftField("Header", "Document Date", invoice.date);
-  setDraftField("Header", "Total Cost Ex Tax", invoice.net);
-  setDraftField("Header", "Tax Amount", invoice.tax);
+  setDraftField("Header", "Document Date", draftValue(job, "date", invoice.date));
+  setDraftField("Header", "Total Cost Ex Tax", draftValue(job, "net", invoice.net));
+  setDraftField("Header", "Tax Amount", draftValue(job, "tax", invoice.tax));
   setDraftField("Header", "Ref No. 1", "");
   setDraftField("Header", "Ref No. 2", "");
   setDraftField("Header", "Ref No. 3", "");
   setDraftField("Header", "Comment", "DRAFT UNVALIDATED — manual entry");
   setDraftField("Tax_Breakdown", "Transaction Number", 1);
-  setDraftField("Tax_Breakdown", "Tax Code", invoice.taxCode);
-  setDraftField("Tax_Breakdown", "Tax Basis", invoice.net);
+  setDraftField("Tax_Breakdown", "Tax Code", draftValue(job, "taxCode", invoice.taxCode));
+  setDraftField("Tax_Breakdown", "Tax Basis", draftValue(job, "net", invoice.net));
   $("#manual-draft-lines").replaceChildren();
   (invoice.lines?.length ? invoice.lines : [{}]).forEach((line, index) => addManualDraftLine({
     "Transaction Number": 1,
@@ -359,7 +460,7 @@ function initializeManualDraft(job) {
     UPC: matches[index]?.gtin || line.gtin || "",
     "Unit Cost": line.price ?? "",
     Quantity: line.qty ?? "",
-    "Unit Tax Code": invoice.taxCode || "",
+    "Unit Tax Code": draftValue(job, "taxCode", invoice.taxCode) || "",
     _description: line.description || "",
   }));
   $("#manual-draft-acknowledge").checked = false;
@@ -889,6 +990,7 @@ function renderInvoiceForm(job) {
   const fields = $("#header-fields");
   fields.replaceChildren();
   HEADER_FIELDS.forEach(([name, label, type, options = {}]) => {
+    if (rulesJob(job) && RULES_DERIVED_FIELDS.has(name)) return;
     const wrapper = make("label", "field-wrap");
     wrapper.append(make("span", "", label));
     const input = make("input");
@@ -916,6 +1018,7 @@ function renderInvoiceForm(job) {
   (invoice.lines || []).forEach((line) => addLine(line, ["queued", "processing", "exported"].includes(job.status)));
   $("#no-lines").hidden = Boolean(invoice.lines?.length);
   $("#add-line").disabled = ["queued", "processing", "exported"].includes(job.status);
+  renderRulesResult(job);
   const raw = Number(job.completeness);
   const percent = Number.isFinite(raw) ? Math.round(Math.max(0, Math.min(1, raw)) * 100) : null;
   $("#completeness strong").textContent = percent === null ? "—" : `${percent}%`;
@@ -1019,7 +1122,7 @@ function renderValidation(job) {
     return;
   }
   summary.hidden = false;
-  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW") ? " error" : ""}`;
+  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
   const details = make("details", "validation-details");
   const heading = make("summary");
   heading.append(make("strong", "", `${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve`), make("span", "", "Show all"));
@@ -1027,7 +1130,12 @@ function renderValidation(job) {
   issues.forEach((issue) => {
     const line = issue.line ? `Line ${issue.line}: ` : "";
     const owner = issue.owner ? ` · ${issue.owner}` : "";
-    list.append(make("li", "", `${line}${issue.message}${owner}`));
+    // Fine-rules issues carry the owner's Failure Status name; non-blocking ones are warnings.
+    // Owner's Failure Status first, then its checklist id and the engine's exception type when they differ.
+    const detail = [issue.check, issue.type && issue.type !== issue.code ? issue.type : ""].filter(Boolean).join(" · ");
+    const status = rulesJob(job) && issue.code !== "REVIEW" ? `${issue.code}${detail ? ` [${detail}]` : ""}: ` : "";
+    const warning = issue.accepted ? " (accepted at review)" : issue.blocking === false ? " (warning)" : "";
+    list.append(make("li", "", `${line}${status}${issue.message}${owner}${warning}`));
   });
   details.append(heading, list);
   summary.append(details);
@@ -1082,7 +1190,9 @@ function renderTrace(job) {
 
   const provenance = $("#provenance-list");
   provenance.replaceChildren();
-  const entries = Array.isArray(job.provenance) ? job.provenance : Object.entries(job.provenance || {}).map(([field, source]) => ({ field, source }));
+  const entries = rulesJob(job) && job.rules
+    ? Object.entries(job.rules.fields || {}).filter(([, f]) => f.value !== null && f.value !== undefined).map(([field, f]) => ({ field, source: evidenceText(f.evidence), value: f.value }))
+    : Array.isArray(job.provenance) ? job.provenance : Object.entries(job.provenance || {}).map(([field, source]) => ({ field, source }));
   if (!entries.length) {
     provenance.append(make("dt", "", "None"), make("dd", "", "No reference-derived fields recorded."));
   } else entries.forEach((entry) => {
@@ -1105,7 +1215,13 @@ function renderReviewActions(job) {
 function collectInvoice() {
   const invoice = {};
   HEADER_FIELDS.forEach(([name, , type]) => {
-    const value = $(`#header-fields [name="${name}"]`).value.trim();
+    const input = $(`#header-fields [name="${name}"]`);
+    // Rules jobs show derived fields (seller, site, ...) in the rules panel instead; keep the stored value.
+    if (!input) {
+      invoice[name] = app.currentJob?.invoice?.[name] ?? null;
+      return;
+    }
+    const value = input.value.trim();
     invoice[name] = value === "" ? null : value;
     if (type === "number" && value !== "") invoice[name] = value;
   });
@@ -1128,7 +1244,12 @@ async function saveReview() {
   try {
     const job = await api(`/api/jobs/${encodeURIComponent(app.currentJob.id)}/review`, {
       method: "POST",
-      body: { invoice: collectInvoice(), revision: app.currentJob.revision, confirm: $("#confirm-review").checked },
+      body: {
+        invoice: collectInvoice(),
+        revision: app.currentJob.revision,
+        confirm: $("#confirm-review").checked,
+        ...(rulesJob(app.currentJob) ? { entries: collectEntries() } : {}),
+      },
     });
     app.currentJob = job;
     replaceJobSummary(job);
