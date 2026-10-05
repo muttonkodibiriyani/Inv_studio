@@ -61,17 +61,21 @@ EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
 
 # Exception types whose presence still allows approval (warnings only).
-NON_BLOCKING = {"Data Quality", "Entity Hint", "Description Check", "Totals Audit"}
+# GRN quantity differences are warnings (owner form 01a10c4d qty_cost_tolerance = invoice_flag).
+NON_BLOCKING = {"Data Quality", "Entity Hint", "Description Check", "Totals Audit", "Quantity Mismatch",
+                "Item Quantity Mismatch"}
 
 # Owner form 01a10c4f (2026-10-05): item-line check; below the threshold the owner validates.
 ITEM_LINE_THRESHOLD = Decimal("0.95")
 ITEM_LINE_DEFINITION = ("lines resolved to exactly one Item Master ITEM_PARENT whose quantity agrees with the "
                         "accepted PO/GRN, divided by all invoice lines")
-# Owner form 01a10c4f: pre-tax value tolerance per currency, compared at two decimals. The owner sheets name the
-# check (02_Supplier_POGRN_Target POG-007, 03_Mandatory_Checklist C-16) but not the amounts, so a non-zero
-# variance inside the tolerance is still raised for the owner to verify, never passed silently.
+# Owner form 01a10c4f (answered 2026-10-05 13:48Z): pre-tax value tolerance per currency, compared at two decimals.
+# The owner sheets name the check (POG-007, C-16); the amounts are this form answer, cited as the evidence.
 VALUE_TOLERANCE_BY_CURRENCY = {"KWD": Decimal("1"), "AED": Decimal("2")}
 VALUE_DECIMALS = 2
+VALUE_TOLERANCE_SOURCE = "owner form 01a10c4f (2026-10-05 13:48Z): up to 1 KWD or 2 AED, rounded to 2 digits"
+# Owner form 01a10c4c (2026-10-05 13:43Z): the loaded POGRN report is the owner's complete 25 Sep report.
+POGRN_REPORT = "POGRN report of 25 Sep, confirmed complete by the owner (form 01a10c4c, 2026-10-05 13:43Z)"
 
 TARGET_HEADER = ["Document", "Supplier Site", "Order No", "Location", "Location Type", "Document Date",
                  "Currency", "Gross Amount", "Tax Amount", "Net Amount", "Market", "Validation Status"]
@@ -881,7 +885,8 @@ def evaluate_pogrn(run, rows, keys, invoice_qty, invoice_value, invoice_currency
             reasons.append("Invoice value before tax unavailable")
         elif not value_ok:
             reasons.append(f"Value variance {value_variance}")
-        passed = all((supplier_ok, order_ok, items_ok, location_ok, type_ok, market_ok, qty_ok, value_ok))
+        # Quantity is reported (warning, owner form 01a10c4d) but does not decide the pass.
+        passed = all((supplier_ok, order_ok, items_ok, location_ok, type_ok, market_ok, value_ok))
         receipt_dates = sorted({text(r.get("RECEIPT_DATE"))[:10] for r in group if text(r.get("RECEIPT_DATE"))})
         evaluated.append({
             "Invoice Number": text(run.invoice.number), "Supplier Name Raw": name_raw or "",
@@ -896,6 +901,7 @@ def evaluate_pogrn(run, rows, keys, invoice_qty, invoice_value, invoice_currency
             "POGRN Location ID": location, "Location Type": kind["type"] or "", "Market": market or "",
             "Aggregated QTY_RECEIVED": qty, "Quantity Variance": qty_variance, "Quantity Result": "Pass" if qty_ok else "Fail",
             "Aggregated TOTAL COST": cost, "Value Variance": value_variance, "Value Result": "Pass" if value_ok else "Fail",
+            "Value Tolerance Source": VALUE_TOLERANCE_SOURCE if value_variance is not None else "",
             "Receipt Dates": ", ".join(receipt_dates), "Supplier Check": "Pass" if supplier_ok else "Fail",
             "Items Check": "Pass" if items_ok else "Fail",
             "Location Check": "Pass" if location_ok and type_ok else "Fail", "Market Check": "Pass" if market_ok else "Fail",
@@ -910,20 +916,17 @@ def evaluate_pogrn(run, rows, keys, invoice_qty, invoice_value, invoice_currency
 
 
 def _validate_accepted(run, group):
-    """POG-006 / POG-007 on the accepted order: a failed check asks the owner to verify (owner form 01a10c4f)."""
+    """POG-006 / POG-007 on the accepted order: a GRN quantity difference is a warning with the invoice quantity
+    used (owner form 01a10c4d); a value outside tolerance asks the owner to verify (owner form 01a10c4f)."""
     order = group["POGRN RMS Order No"]
     if not group["_checks"]["qty"]:
         run.exception("Quantity Mismatch", f"Order {order}: invoice quantity does not agree with aggregated "
-                      "QTY_RECEIVED; please verify", "POG-006", evidence=group["Exception Reason"], owner="Buyer")
+                      "QTY_RECEIVED; warning, the invoice quantity is used", "POG-006",
+                      evidence=group["Exception Reason"], owner="Buyer")
     if not group["_checks"]["value"]:
         run.exception("Value Mismatch", f"Order {order}: invoice value before tax does not agree with aggregated "
-                      "TOTAL COST within tolerance; please verify", "POG-007", evidence=group["Exception Reason"],
-                      owner="Buyer")
-    elif group["Value Variance"]:
-        run.exception("Value Mismatch", f"Order {order}: invoice value before tax differs from aggregated TOTAL COST "
-                      f"by {group['Value Variance']}, inside the owner form 01a10c4f tolerance that the owner sheets "
-                      "do not state; please verify", "POG-007", evidence=f"Value variance {group['Value Variance']}",
-                      owner="Buyer")
+                      "TOTAL COST within tolerance; please verify", "POG-007",
+                      evidence=f"{group['Exception Reason']}; tolerance {VALUE_TOLERANCE_SOURCE}", owner="Buyer")
 
 
 MALFORMED_REASON = "Source row malformed in extract"
@@ -953,19 +956,18 @@ def _well_formed(run, rows, outcome, touched):
     return [r for r in rows if not malformed_row(r)]
 
 
-def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=(),
-               barcodes=()):
-    """POG-001: the printed PO first (an exact RMS_ORDER_NO), else supplier + items against the POGRN.
+def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=()):
+    """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
-    Order No is filled only when exactly one RMS order of the supplier carries every resolved invoice item
-    (or is the printed one). Zero or several candidates leave it empty and flagged; never the closest.
+    Owner form 01a10c4d order_link = strict_6: Order No is the printed order under the supplier's 6-character EBS
+    code, or the only order under that code. Items, quantity and value validate the linked order, never find one.
+    Zero or several candidates leave it empty and flagged; never the closest.
     """
     invoice = run.invoice
     printed = text(invoice.po)
     currency = text(invoice.currency) or None
     outcome = {"order": None, "source": None, "group": None, "validation": [], "status": "Missing PO",
                "candidates": 0, "malformed": 0}
-    barcodes = {b for b in barcodes if b}
     common = (keys, invoice_qty, invoice_value, currency, supplier_site, name_raw, name_master, supplier_site,
               parents)
     if printed:
@@ -973,23 +975,26 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         rows = _well_formed(run, rows, outcome, lambda r: True)
         if not rows:
             run.exception("Missing PO", "Printed PO is not an RMS_ORDER_NO in the POGRN report (order not found)",
-                          "POG-001", owner="Buyer")
+                          "POG-001", evidence=POGRN_REPORT, owner="Buyer")
             run.trace("Order No", printed, "R-024", "Invoice PO (not in POGRN)", confidence="Unvalidated")
             outcome.update(order=printed, source=FROM_INVOICE, status="Order not found")
             return outcome
         evaluated, _ = evaluate_pogrn(run, rows, *common)
         outcome["validation"] = evaluated
         mine = [g for g in evaluated if g["Supplier Check"] == "Pass"]
-        run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO",
-                  reference=_refs(rows), confidence="Exact" if mine else "Unvalidated")
-        outcome.update(order=printed, source=FROM_INVOICE, candidates=1)
         if not mine:
-            run.exception("POGRN Supplier Exception", "The printed order's EBS_SUPPLIER_CODE is not the invoice "
-                          "supplier's" if keys else "Supplier unresolved, so the printed order's EBS code cannot "
-                          "be checked", "SUP-002", evidence="/".join(sorted({g["EBS Code"] for g in evaluated})),
-                          owner="Supplier operations")
-            outcome["status"] = "Printed PO not validated"
+            # Owner form 01a10c4d order_link = strict_6: an order is linked only through the supplier's 6-character
+            # EBS code (SUP-002), so a printed order of another code is not filled.
+            run.exception("POGRN Supplier Exception", f"Printed PO {printed}: its EBS_SUPPLIER_CODE is not the "
+                          "invoice supplier's 6-character code; Order No left empty" if keys else
+                          f"Printed PO {printed}: supplier unresolved, so the order's EBS code cannot be checked; "
+                          "Order No left empty", "SUP-002",
+                          evidence="/".join(sorted({g["EBS Code"] for g in evaluated})), owner="Supplier operations")
+            outcome.update(order=None, source=None, candidates=0, status="Printed PO not validated")
             return outcome
+        run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO of the supplier's "
+                  "6-character EBS code", reference=_refs(rows))
+        outcome.update(order=printed, source=FROM_INVOICE, candidates=1)
         if len(mine) > 1:
             run.exception("Location ID", "Printed order has several locations; no approved multi-location rule",
                           "POG-002", evidence=f"{len(mine)} locations", owner="Buyer")
@@ -1006,35 +1011,27 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         return outcome
     rows = [r for key in sorted(keys) for r in source.pogrn_by_ebs(key)
             if text(r.get("EBS_SUPPLIER_CODE")).upper() in {k.upper() for k in keys}]
-    good_orders = {text(r.get("RMS_ORDER_NO")) for r in rows if not malformed_row(r) and
-                   parents and text(r.get("RMS_ITEM_ID")) in parents}
-    rows = _well_formed(run, rows, outcome, lambda r: strip_ult(r.get("BARCODE")) in barcodes or
-                        text(r.get("RMS_ORDER_NO")) in good_orders)
+    rows = _well_formed(run, rows, outcome, lambda r: True)
     if not rows:
         run.exception("POGRN Supplier Exception", "No POGRN rows for the supplier's EBS code", "SUP-002",
                       evidence="/".join(sorted(keys)), owner="Buyer")
         return outcome
-    if not parents:
-        run.exception("Missing PO", "No printed PO and no resolved item to identify the order", "POG-001",
-                      owner="Buyer")
-        return outcome
+    # Owner form 01a10c4d order_link = strict_6: the candidates are the orders of the 6-character EBS code only;
+    # items never find an order. Exactly one order is linked; several are ambiguous (POG-001).
     evaluated, _ = evaluate_pogrn(run, rows, *common)
-    identified = [g for g in evaluated if g["_identity"]]
-    outcome["validation"] = identified
-    orders = sorted({g["POGRN RMS Order No"] for g in identified})
+    outcome["validation"] = evaluated
+    orders = sorted({g["POGRN RMS Order No"] for g in evaluated})
     outcome["candidates"] = len(orders)
-    if not orders:
-        run.exception("Missing PO", "No POGRN order of the supplier carries every resolved invoice item "
-                      "(order not found)", "POG-001", owner="Buyer")
-        return outcome
     if len(orders) > 1:
-        run.exception("Ambiguous PO", f"{len(orders)} POGRN orders of the supplier carry every resolved invoice "
-                      "item; owner review", "POG-001", evidence=", ".join(orders[:20]), owner="Buyer")
+        run.exception("Ambiguous PO", f"No printed PO and {len(orders)} POGRN orders under the supplier's "
+                      "6-character EBS code; owner review", "POG-001", evidence=", ".join(orders[:20]), owner="Buyer")
         outcome["status"] = "Ambiguous PO"
         return outcome
     derived = orders[0]
-    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO (only order of the supplier with every invoice "
-              "item)", reference=_refs([r for g in identified for r in g["_rows"]]), confidence=DERIVED_FROM_POGRN)
+    identified = evaluated
+    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO (only order under the supplier's 6-character EBS "
+              "code, SUP-002)", reference=_refs([r for g in identified for r in g["_rows"]]),
+              confidence=DERIVED_FROM_POGRN)
     outcome.update(order=derived, source=DERIVED_FROM_POGRN)
     if len(identified) > 1:
         run.exception("Location ID", "Derived order has several locations; no approved multi-location rule",
@@ -1232,7 +1229,8 @@ def item_resolution(run, matches, group):
             mismatched.append(m["line"])
     if mismatched:
         run.exception("Item Quantity Mismatch", f"{len(mismatched)} line(s) whose item quantity does not agree "
-                      "with the accepted order's QTY_RECEIVED for that item; please verify", "C-11",
+                      "with the accepted order's QTY_RECEIVED for that item; warning, the invoice quantity is used",
+                      "C-11",
                       evidence="lines " + ", ".join(map(str, mismatched[:30])), owner="Buyer")
     total = len(matches)
     rate = (Decimal(resolved) / total).quantize(Decimal("0.0001")) if total else Decimal(0)
@@ -1315,10 +1313,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     invoice_value, value_source = _line_value(invoice)
     raw_name = candidates[0]["name"] if candidates else None
     parents = {m["parent"] for m in matches if m["status"] == "Matched"}
-    barcodes = {strip_ult(r.get("ITEM")) for m in matches if m["status"] == "Matched" for r in m["rows"]}
-    barcodes |= {c["value"] for line in invoice.lines for c in barcode_candidates(line)}
-    po = resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, raw_name, master_name, parents,
-                    barcodes)
+    po = resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, raw_name, master_name, parents)
     group = po["group"]
     if family and not supplier_site:
         if group:

@@ -43,7 +43,7 @@ POGRN = [
     pogrn("13000001", "38091", "3", "30", ref=2),
     pogrn("13000001", "38091", "2", "40", ref=3, barcode="0098765432109"),
     pogrn("13000001", "38091", None, None, ref=4),
-    pogrn("13000002", "800901", "99", "990", ref=5),
+    pogrn("13000002", "800901", "99", "990", ref=5, ebs="XYZ002"),  # another 6-character code: never a candidate
 ]
 CONFIG = {"location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"},
                               "800901": {"type": fr.WAREHOUSE, "market": "Kuwait"}},
@@ -260,10 +260,16 @@ def test_R_020_no_pogrn_rows_for_ebs_code_is_missing_po():
     assert result["header"]["Order No"] == "" and "POGRN Supplier Exception" in types(result, "SUP-002")
 
 
-def test_R_021_quantity_mismatch_keeps_the_identified_order_but_is_never_auto_approved():
+def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
+    # Owner form 01a10c4d qty_cost_tolerance = invoice_flag: POG-006 and C-11 warn, they do not block.
     result = run(rows=both("13000001", "38091", q2="1"))
     assert result["header"]["Order No"] == "13000001" and result["pogrn_validation"][0]["Qty Match"] == "Fail"
-    assert "Quantity Mismatch" in types(result, "POG-006") and result["status"] == "Review"
+    assert result["pogrn_validation"][0]["Validation Status"] == "Pass"
+    assert [line["Quantity"] for line in result["lines"]] == [D(3), D(2)]  # the invoice figures
+    warnings = [e for e in result["exceptions"] if e["Engine Type"] in ("Quantity Mismatch", "Item Quantity Mismatch")]
+    assert {e["Rule ID"] for e in warnings} == {"POG-006", "C-11"} and not any(e["blocking"] for e in warnings)
+    # Still Review only through the owner's item-line check (as defined: lines whose quantity agrees).
+    assert {e["Rule ID"] for e in result["exceptions"] if e["blocking"]} == {"ITEM-LINE-95"}
 
 
 def test_R_022_value_mismatch_beyond_tolerance_is_never_auto_approved():
@@ -274,11 +280,8 @@ def test_R_022_value_mismatch_beyond_tolerance_is_never_auto_approved():
 
 def test_POG_007_owner_tolerance_is_one_kwd_or_two_aed_at_two_decimals():
     within = run(rows=both("13000001", "38091", c2="40.9990000001"))
-    assert within["pogrn_validation"][0]["Value Result"] == "Pass" and within["header"]["Order No"] == "13000001"
-    # The amounts come from the owner form, not the owner sheets: a difference inside them is still verified.
-    assert within["status"] == "Review" and "Value Mismatch" in types(within, "POG-007")
-    assert "01a10c4f" in next(e["Description"] for e in within["exceptions"] if e["Rule ID"] == "POG-007")
-    assert run(rows=both("13000001", "38091", c2="40.004"))["status"] == "Approved"
+    assert within["pogrn_validation"][0]["Value Result"] == "Pass" and within["status"] == "Approved"
+    assert "01a10c4f" in within["pogrn_validation"][0]["Value Tolerance Source"]
     aed = both("13000001", "38091", c2="41.99", currency="AED")
     assert run(invoice(currency="AED"), rows=aed)["pogrn_validation"][0]["Value Result"] == "Pass"
     assert run(rows=both("13000001", "38091", c2="41.01"))["pogrn_validation"][0]["Value Result"] == "Fail"
@@ -296,6 +299,7 @@ def test_R_023_several_orders_carrying_every_item_is_ambiguous_po():
 def test_R_024_printed_po_is_kept_and_flagged_when_not_in_pogrn():
     result = run(invoice(po="99999999"))
     assert result["header"]["Order No"] == "99999999" and "Missing PO" in types(result, "POG-001")
+    assert "25 Sep" in next(e["Candidates / Evidence"] for e in result["exceptions"] if e["Rule ID"] == "POG-001")
     assert result["status"] != "Approved" and result["header"]["Location"] == ""
 
 
@@ -304,14 +308,21 @@ def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
     result = run(invoice(po="13000001"), rows=rows)
     assert result["header"]["Order No"] == "13000001" and result["po"]["source"] == fr.FROM_INVOICE
     assert result["status"] == "Approved", result["exceptions"]
+    # strict_6 (owner form 01a10c4d): a printed order of another 6-character EBS code is not filled.
     other = run(invoice(po="13000077"), rows=rows)
-    assert other["header"]["Order No"] == "13000077" and other["header"]["Location"] == ""
-    assert "POGRN Supplier Exception" in types(other, "SUP-002")
+    assert other["header"]["Order No"] == "" and other["header"]["Location"] == ""
+    assert "POGRN Supplier Exception" in types(other, "SUP-002") and other["status"] == "Review"
 
 
-def test_POG_001_order_must_carry_every_resolved_item():
-    result = run(rows=[pogrn("13000001", "38091", "5", "70")])
-    assert result["header"]["Order No"] == "" and "Missing PO" in types(result, "POG-001")
+def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
+    # The only order under the code is linked even without the invoice items; the item check then fails it.
+    lone = run(rows=[pogrn("13000001", "38091", "5", "70")])
+    assert lone["header"]["Order No"] == "13000001" and lone["status"] == "Review"
+    assert lone["pogrn_validation"][0]["Items Check"] == "Fail"
+    # Two orders under the code are ambiguous even when only one carries the items.
+    two = run(rows=POGRN + [pogrn("13000003", "38091", "1", "1", item="345000099")])
+    assert two["header"]["Order No"] == "" and "Ambiguous PO" in types(two, "POG-001")
+    assert two["po_candidates"] == 2
 
 
 # --------------------------------------------------------------------------- owner POGRN rules
@@ -672,7 +683,7 @@ def test_shifted_pogrn_rows_are_never_lookup_keys_or_evidence_and_flag_the_invoi
     assert printed["exceptions"][0]["Exception Type"] == "Audit Exception"
     derived = run(rows=POGRN + [shifted])
     assert derived["header"]["Order No"] == "13000001" and "Malformed Source Row" in types(derived)
-    elsewhere = {**shifted, "RMS_ORDER_NO": "13000077", "BARCODE": "ULT_4440001112223"}
+    elsewhere = {**shifted, "RMS_ORDER_NO": "13000077", "EBS_SUPPLIER_CODE": "XYZ002"}
     assert "Malformed Source Row" not in types(run(rows=POGRN + [elsewhere]))
 
 
