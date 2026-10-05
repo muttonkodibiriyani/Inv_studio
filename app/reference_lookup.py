@@ -36,16 +36,15 @@ def normalize_identifier(value):
 def _header_roles(header, kind, configured):
     normalized = normalize_name(header)
     roles = []
-    for role, headers in configured.get(kind, {}).items():
+    declared = configured.get(kind, {})
+    for role, headers in declared.items():
         if normalized in headers:
-            # Some source manifests group all PO-row identity columns under
-            # ``po``. Only order-number columns are safe PO filter values.
-            if role == "po" and "order" not in normalized.split() and normalized not in {
-                "po", "po no", "po number", "purchase order", "purchase order no",
-                "purchase order number", "purchasing document",
-            }:
-                continue
             roles.append(role)
+    # A manifest mapping is the source contract. Do not add semantic roles
+    # from column-name guesses (for example, this catalog's ITEM is a barcode,
+    # while ITEM_PARENT is its internal item identifier).
+    if declared:
+        return list(dict.fromkeys(roles))
     words = set(normalized.split())
     if normalized in {"item", "item id", "item code", "item number", "rms item id"}:
         roles.append("internal_item")
@@ -265,10 +264,28 @@ def _cursor_decode(value, signature):
         raise ValueError("Invalid or stale page cursor") from None
 
 
+
 class ReferenceLookup:
     def __init__(self, store):
         self.store = store
         with store.connection() as connection:
+            postgres = hasattr(connection, "connection") and hasattr(
+                connection.connection, "cursor"
+            )
+            if postgres:
+                existing = connection.execute(
+                    """SELECT to_regclass('public.lookup_sources'),
+                              to_regclass('public.lookup_rows'),
+                              to_regclass('public.lookup_terms'),
+                              to_regclass('public.lookup_rows_kind_id'),
+                              to_regclass('public.lookup_rows_source_row')"""
+                ).fetchone()
+                # CREATE INDEX IF NOT EXISTS still takes a table lock in
+                # PostgreSQL. Avoid startup DDL when the complete schema is
+                # already present so an atomic catalog import cannot stall new
+                # application instances.
+                if existing is not None and all(value is not None for value in existing):
+                    return
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS lookup_sources(id TEXT PRIMARY KEY,payload TEXT NOT NULL)"
             )
@@ -350,31 +367,36 @@ class ReferenceLookup:
                            JOIN lookup_terms po_key ON po_key.kind='po' AND po_key.term=item_key.term
                            JOIN lookup_terms po_filter ON po_filter.kind='po'
                                 AND po_filter.row_id=po_key.row_id AND po_filter.term=?
-                           WHERE item_key.kind='item' AND item_key.row_id=r.id
+                           WHERE item_key.kind='item' AND item_key.row_id=t.row_id
                                 AND item_key.term>=? AND item_key.term<?)"""
                     )
                     constraint_params.extend((f"f:po:{value}", "x:", "x;"))
                 else:
                     constraints.append(
-                        "EXISTS (SELECT 1 FROM lookup_terms ft WHERE ft.kind=r.kind "
-                        "AND ft.row_id=r.id AND ft.term=?)"
+                        "EXISTS (SELECT 1 FROM lookup_terms ft WHERE ft.kind=t.kind "
+                        "AND ft.row_id=t.row_id AND ft.term=?)"
                     )
                     constraint_params.append(f"f:{role}:{value}")
         inner = (
-            "SELECT r.id,r.payload,(" + "+".join(score_parts) + ") AS score "
-            "FROM lookup_terms t JOIN lookup_rows r ON r.id=t.row_id "
+            "SELECT t.row_id AS id,(" + "+".join(score_parts) + ") AS score "
+            "FROM lookup_terms t "
             "WHERE t.kind=? AND (" + " OR ".join(match_sql) + ")"
         )
         if constraints:
             inner += " AND " + " AND ".join(constraints)
-        inner += " GROUP BY r.id,r.payload"
-        sql = "SELECT id,payload,score FROM (" + inner + ") ranked"
+        inner += " GROUP BY t.row_id"
+        ranked = "SELECT id,score FROM (" + inner + ") scored"
         params = [*score_params, kind, *match_params, *constraint_params]
         if cursor_score is not None:
-            sql += " WHERE score<? OR (score=? AND id>?)"
+            ranked += " WHERE score<? OR (score=? AND id>?)"
             params.extend((cursor_score, cursor_score, cursor_id))
-        sql += " ORDER BY score DESC,id ASC LIMIT ?"
+        ranked += " ORDER BY score DESC,id ASC LIMIT ?"
         params.append(limit + 1)
+        sql = (
+            "SELECT ranked.id,r.payload,ranked.score FROM (" + ranked + ") ranked "
+            "JOIN lookup_rows r ON r.id=ranked.id "
+            "ORDER BY ranked.score DESC,ranked.id ASC"
+        )
         with self.store.connection() as connection:
             rows = connection.execute(sql, tuple(params)).fetchall()
         more = len(rows) > limit
@@ -526,8 +548,8 @@ class ReferenceLookup:
                 if postgres:
                     connection.execute(
                         """CREATE TEMP TABLE lookup_terms_stage(
-                            kind TEXT NOT NULL,term TEXT NOT NULL,row_id TEXT NOT NULL,
-                            PRIMARY KEY(kind,term,row_id)) ON COMMIT DROP"""
+                            kind TEXT NOT NULL,term TEXT NOT NULL,row_id TEXT NOT NULL)
+                           ON COMMIT DROP"""
                     )
                     connection.execute(
                         """INSERT INTO lookup_terms_stage(kind,term,row_id)
@@ -547,10 +569,21 @@ class ReferenceLookup:
                         """INSERT INTO lookup_rows(id,kind,source_hash,sheet,row_number,payload)
                            SELECT id,kind,source_hash,sheet,row_number,payload FROM lookup_rows_stage"""
                     )
-                connection.execute(
-                    """INSERT INTO lookup_terms(kind,term,row_id)
-                       SELECT kind,term,row_id FROM lookup_terms_stage"""
-                )
+                if postgres:
+                    # Terms are de-duplicated within every validated record and
+                    # source provenance is unique, so an indexed staging table
+                    # only adds random writes. Sort once while loading the real
+                    # primary key to make the bulk B-tree build sequential.
+                    connection.execute(
+                        """INSERT INTO lookup_terms(kind,term,row_id)
+                           SELECT kind,term,row_id FROM lookup_terms_stage
+                           ORDER BY kind,term,row_id"""
+                    )
+                else:
+                    connection.execute(
+                        """INSERT INTO lookup_terms(kind,term,row_id)
+                           SELECT kind,term,row_id FROM lookup_terms_stage"""
+                    )
                 imported_at = datetime.now(timezone.utc).isoformat()
                 source = {"id": "dataset:" + ndjson_digest,
                           "version": manifest.get("version", manifest.get("manifest_version")),
@@ -565,5 +598,11 @@ class ReferenceLookup:
                 if copy_context:
                     copy_context.__exit__(type(error), error, error.__traceback__)
                 raise
+        # Bulk replacement invalidates planner estimates. Run this only after
+        # the import transaction commits so readers keep seeing one complete
+        # catalog while the database refreshes its lookup-table statistics.
+        with self.store.connection() as connection:
+            connection.execute("ANALYZE lookup_rows")
+            connection.execute("ANALYZE lookup_terms")
         return {"imported": True, "approved_for_matching": False,
                 "requires_confirmation": True, "source": source}

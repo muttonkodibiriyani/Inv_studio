@@ -24,6 +24,7 @@ from starlette.concurrency import run_in_threadpool
 from .authentication import CloudIdentity, actor
 from .engines import capabilities, process
 from .excel import workbook, batch_workbook
+from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
 from .reference_lookup import ReferenceLookup
 from .matching import enrich, key, validate
@@ -48,12 +49,20 @@ class Revision(StrictModel):
     revision: int
 
 
+class ExtractionDraftRequest(Revision):
+    acknowledge_unvalidated: bool = Field(default=False,strict=True)
+
+
 class BatchItem(Revision):
     id: str
 
 
 class Batch(StrictModel):
     jobs: list[BatchItem] = Field(min_length=1,max_length=100)
+
+
+class ExtractionBatch(Batch):
+    acknowledge_unvalidated: bool = Field(default=False,strict=True)
 
 
 class Retry(StrictModel):
@@ -190,13 +199,16 @@ def create_app(data_dir=None):
     def assert_editable(j):
         if j.get("export_id"):raise HTTPException(409,"This invoice was exported. Download its existing export.")
         if j["status"] in ("queued","processing"):raise HTTPException(409,"Wait for extraction to finish")
-    def evaluate(j,c=None):
+    def evaluate(j,c=None,validation_context=None):
         inv=Invoice.model_validate(j["invoice"])
-        led=store.ledger(c) if c else None
-        if led is None:
-            with store.connection() as conn:led=store.ledger(conn)
+        if validation_context is None:
+            refs=references(c);rules=policy(c)
+            if c:led=store.ledger(c)
+            else:
+                with store.connection() as conn:led=store.ledger(conn)
+        else:refs,rules,led=validation_context
         if j.get("export_id"):led=[x for x in led if x.get("job_id")!=j["id"]]
-        j["validation"]=validate(inv,references(c),policy(c),led,j.get("reviewed",False))
+        j["validation"]=validate(inv,refs,rules,led,j.get("reviewed",False))
         if not j.get("export_id") and j["status"] not in ("queued","processing","error"):
             j["status"]="ready" if j["validation"]["ready"] else "review"
         return j
@@ -219,19 +231,27 @@ def create_app(data_dir=None):
                 store.job(jid,j)
             if identity.cloud:store.ensure_blob(Path(job["path"]))
             result=process(Path(job["path"]),opts,store,providers.extract,progress)
-            with plans_lock:
-                job=job_or_404(jid)
+            with plans_lock,store.connection(True) as c:
+                job=job_or_404(jid,c)
                 unchanged=job.get("confirmed_signature")==rule_signature(opts)
                 raw=Invoice.model_validate(result["invoice"])
-                inv,provenance=enrich(raw,references()) if unchanged else (raw,[])
+                header_fields=sum(getattr(raw,name) not in (None,"") for name in Invoice.model_fields if name!="lines")
+                extracted_lines=sum(any(value not in (None,"") for value in line.model_dump().values()) for line in raw.lines)
+                outcome="fields_extracted" if header_fields or extracted_lines else "text_read" if result.get("text","").strip() else "extraction_failed"
+                inv,provenance=enrich(raw,references(c)) if unchanged else (raw,[])
                 job.update(result);job.update(invoice=inv.model_dump(mode="json"),provenance=provenance,
+                            extraction_status=outcome,
                             status="review" if unchanged else "error",reviewed=False,progress=None,revision=job["revision"]+1,
                             error=None if unchanged else "Rules or references changed during extraction. Review a new processing plan and retry.")
-                evaluate(job);store.job(jid,job)
-                store.audit("extracted",{"job_id":jid,"engine":job["selected_engine"],"trace":job["trace"],"confirmed_rules_unchanged":unchanged})
+                evaluate(job,c);store.job(jid,job,c)
+                store.audit(outcome,{"job_id":jid,"engine":job["selected_engine"],"trace":job["trace"],
+                            "header_fields":header_fields,"line_items":extracted_lines,
+                            "text_characters":len(result.get("text","")),"approved":False,
+                            "confirmed_rules_unchanged":unchanged},c)
         except Exception as exc:
             job=job_or_404(jid);job.update(status="error",error=f"Processing failed ({type(exc).__name__}). Retry with another engine or review the document.",progress=None)
             store.job(jid,job)
+            store.audit("extraction_failed",{"job_id":jid,"error_type":type(exc).__name__,"approved":False})
         finally:slots.release()
 
     def submit(content,filename,opts,token):
@@ -300,14 +320,23 @@ def create_app(data_dir=None):
 
     @app.get("/api/state")
     def state():
-        refs=references();accounts=auth.accounts()
+        vertex_configured=bool(os.getenv("VERTEX_PROJECT_ID"))
         with store.connection() as c:
+            accounts=store.get("chatgpt_accounts",[],c)
+            active_account=store.get("chatgpt_active",c=c)
+            settings=store.get("settings",Settings().model_dump(),c)
+            if vertex_configured and not settings.get("model"):
+                settings={**settings,"provider":"vertex","model":os.getenv("VERTEX_MODEL","gemini-3.7-flash")}
+            connections={"openai":bool(store.secret("openai",c=c)),"anthropic":bool(store.secret("anthropic",c=c)),
+                "chatgpt":any(a["id"]==active_account and a["connected"] for a in accounts),
+                "claude_local":providers.claude_subscription.connected(c=c) and bool(shutil.which("claude")),"vertex":vertex_configured}
+            jobs=store.jobs(c)
+            refs=references(c);rules=policy(c);ledger=store.ledger(c)
             exports=[{"id":r["id"],"job_id":r["job_id"],**{k:v for k,v in json.loads(r["payload"]).items() if k in ("number","created_at")}} for r in c.execute("SELECT id,job_id,payload FROM exports ORDER BY rowid DESC")]
-        return {"engines":capabilities(),"connections":{"openai":bool(store.secret("openai")),"anthropic":bool(store.secret("anthropic")),
-                "chatgpt":any(a["id"]==store.get("chatgpt_active") and a["connected"] for a in accounts),"claude_local":providers.claude_subscription.connected() and bool(shutil.which("claude"))},
-                "accounts":accounts,"active_account":store.get("chatgpt_active"),"settings":store.get("settings",Settings().model_dump()),
-                "policy":policy().model_dump(mode="json"),"references":{"version":refs.get("version"),"imported_at":refs.get("imported_at"),"counts":{k:len(refs.get(k,[])) for k in ("sites","routes","items","orders","receipts","taxRules")}} if refs else None,
-                "jobs":[public(evaluate(j),False) for j in store.jobs()],"exports":exports,
+        return {"engines":capabilities(),"connections":connections,
+                "accounts":accounts,"active_account":active_account,"settings":settings,
+                "policy":rules.model_dump(mode="json"),"references":{"version":refs.get("version"),"imported_at":refs.get("imported_at"),"counts":{k:len(refs.get(k,[])) for k in ("sites","routes","items","orders","receipts","taxRules")}} if refs else None,
+                "jobs":[public(evaluate(j,validation_context=(refs,rules,ledger)),False) for j in jobs],"exports":exports,
                 "samples":{"demo":{"name":"SYNTHETIC-demo-invoice.pdf","size":(ROOT/"samples/invoice.pdf").stat().st_size}}}
 
     @app.post("/api/preflight")
@@ -350,6 +379,18 @@ def create_app(data_dir=None):
         j=job_or_404(jid)
         if identity.cloud:store.ensure_blob(Path(j["path"]))
         return FileResponse(j["path"],filename=j["filename"],content_disposition_type="inline")
+
+    @app.post("/api/jobs/{jid}/extraction-draft")
+    def download_extraction(jid:str,body:ExtractionDraftRequest):
+        if not body.acknowledge_unvalidated:raise HTTPException(400,"Acknowledge that this is an unvalidated review copy")
+        j=job_or_404(jid)
+        if j["status"] in ("queued","processing"):raise HTTPException(409,"Wait for extraction to finish")
+        if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before downloading.")
+        invoice=Invoice.model_validate(j["invoice"])
+        if not invoice.number and not invoice.lines:raise HTTPException(409,"No extracted invoice fields are available")
+        content=extraction_workbook(invoice,j["filename"],j["revision"])
+        store.audit("extraction_draft_downloaded",{"job_id":jid,"revision":j["revision"],"approved":False,"line_items":len(invoice.lines)})
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="EXTRACTION_REVIEW_ONLY_{jid[:8]}.xlsx"'})
 
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
@@ -406,6 +447,24 @@ def create_app(data_dir=None):
         with store.connection() as c:r=c.execute("SELECT workbook FROM exports WHERE id=?",(eid,)).fetchone()
         if not r:raise HTTPException(404,"Export not found")
         return Response(bytes(r[0]),media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="Merch_Inv_{eid[:8]}.xlsx"'})
+
+    @app.post("/api/exports/extraction-batch")
+    def download_extraction_batch(body:ExtractionBatch):
+        if not body.acknowledge_unvalidated:raise HTTPException(400,"Acknowledge that this is an unvalidated review copy")
+        if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")
+        entries=[];snapshots=[]
+        with store.connection() as c:
+            for request in body.jobs:
+                j=job_or_404(request.id,c)
+                if j["status"] in ("queued","processing"):raise HTTPException(409,"Wait for selected invoices to finish processing")
+                if j["revision"]!=request.revision:raise HTTPException(409,"A selected invoice changed. Refresh before downloading.")
+                invoice=Invoice.model_validate(j["invoice"])
+                if not invoice.number and not invoice.lines:raise HTTPException(409,"A selected invoice has no extracted fields. Complete it before downloading.")
+                entries.append((invoice,j["filename"],j["revision"]))
+                snapshots.append({"job_id":j["id"],"revision":j["revision"],"transaction_number":len(entries),"line_items":len(invoice.lines)})
+        content=extraction_batch_workbook(entries)
+        store.audit("extraction_batch_downloaded",{"invoices":snapshots,"approved":False,"count":len(entries)})
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":'attachment; filename="EXTRACTION_REVIEW_ONLY_BATCH.xlsx"'})
 
     @app.post("/api/exports/batch")
     def export_batch(body:Batch):
@@ -558,14 +617,14 @@ def create_app(data_dir=None):
 
     @app.get("/api/connections/{provider}/models")
     def model_list(provider:str):
-        if provider not in ("openai","anthropic","chatgpt","claude_local"):raise ValueError("Unknown provider")
+        if provider not in ("openai","anthropic","chatgpt","claude_local","vertex"):raise ValueError("Unknown provider")
         try:return {"models":providers.models(provider)}
         except ValueError:raise
         except Exception:raise ValueError("Could not retrieve models. Check the connection and try again.") from None
 
     @app.post("/api/settings")
     def save_settings(body:Settings):
-        if body.provider not in ("openai","anthropic","chatgpt","claude_local"):raise ValueError("Unknown provider")
+        if body.provider not in ("openai","anthropic","chatgpt","claude_local","vertex"):raise ValueError("Unknown provider")
         store.set("settings",body.model_dump());return body
 
     @app.post("/api/chatgpt/start")

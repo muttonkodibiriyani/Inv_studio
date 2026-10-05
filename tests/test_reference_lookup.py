@@ -3,6 +3,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ COLUMNS = {
         "description": ["ITEM_DESC", "SHORT_DESC"],
         "sku": ["VPN"],
         "gtin": ["ITEM"],
+        "internal_item": ["ITEM_PARENT"],
         "uom": ["STANDARD_UOM"],
         "pack": ["SUPP_PACK_SIZE"],
         "supplier": ["SUPPLIER_NAME"],
@@ -29,11 +31,12 @@ COLUMNS = {
         "description": [],
         "sku": ["RMS_ITEM_ID"],
         "gtin": ["BARCODE"],
+        "internal_item": ["RMS_ITEM_ID"],
         "uom": [],
         "pack": [],
         "supplier": ["EBS_SUPPLIER_CODE", "SUP_NAME"],
         "site": ["EBS_SUPPLIER_CODE", "LOCATION"],
-        "po": ["RMS_ORDER_NO", "EXT_ORDER_NO", "RMS_ITEM_ID", "LOCATION"],
+        "po": ["RMS_ORDER_NO", "EXT_ORDER_NO"],
     },
 }
 
@@ -46,7 +49,8 @@ def item(row, *, description="تفاح عضوي أحمر", site="SITE-1", sku="S
         "source_row": row,
         "keys": ["ITEM-100", sku, description],
         "data": {
-            "ITEM": "ITEM-100",
+            "ITEM": "GTIN-100",
+            "ITEM_PARENT": "ITEM-100",
             "VPN": sku,
             "ITEM_DESC": description,
             "SHORT_DESC": description,
@@ -111,6 +115,57 @@ def lookup(tmp_path):
     return ReferenceLookup(Store(tmp_path / "data"))
 
 
+class _CatalogCursor:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class _CatalogConnection:
+    def __init__(self, existing):
+        self.connection = type("RawConnection", (), {"cursor": lambda self: None})()
+        self.existing = existing
+        self.statements = []
+
+    def execute(self, sql, params=()):
+        del params
+        self.statements.append(" ".join(sql.split()))
+        if "to_regclass" in sql:
+            return _CatalogCursor(self.existing)
+        return _CatalogCursor(None)
+
+
+class _CatalogStore:
+    def __init__(self, existing):
+        self.connection_value = _CatalogConnection(existing)
+
+    @contextmanager
+    def connection(self):
+        yield self.connection_value
+
+
+def test_existing_postgres_lookup_schema_skips_startup_ddl():
+    store = _CatalogStore(("lookup_sources", "lookup_rows", "lookup_terms",
+                           "lookup_rows_kind_id", "lookup_rows_source_row"))
+
+    ReferenceLookup(store)
+
+    assert len(store.connection_value.statements) == 1
+    assert "to_regclass" in store.connection_value.statements[0]
+
+
+def test_incomplete_postgres_lookup_schema_runs_creation_ddl():
+    store = _CatalogStore(("lookup_sources", "lookup_rows", "lookup_terms", None, None))
+
+    ReferenceLookup(store)
+
+    assert len(store.connection_value.statements) == 6
+    assert any("CREATE INDEX IF NOT EXISTS lookup_rows_kind_id" in statement
+               for statement in store.connection_value.statements)
+
+
 def test_import_and_search_preserve_ambiguity_provenance_and_manual_confirmation(tmp_path, lookup):
     archive, manifest = catalog(tmp_path, [
         item(2, site="SITE-1", pack="1"),
@@ -129,8 +184,9 @@ def test_import_and_search_preserve_ambiguity_provenance_and_manual_confirmation
     assert {row["candidate_fields"]["pack"][0] for row in found["records"]} == {"1", "6"}
     first = found["records"][0]
     assert first["candidate_fields"]["sku"] == ["SKU-A"]
-    assert first["candidate_fields"]["gtin"] == ["ITEM-100"]
+    assert first["candidate_fields"]["gtin"] == ["GTIN-100"]
     assert first["candidate_fields"]["internal_item"] == ["ITEM-100"]
+    assert first["candidate_fields"]["gtin"] != first["candidate_fields"]["internal_item"]
     assert first["candidate_field_sources"]["description"][0]["column"] == "ITEM_DESC"
     assert first["source_hash"] == ITEM_HASH
     assert first["source_sheet"] == "Item Master"

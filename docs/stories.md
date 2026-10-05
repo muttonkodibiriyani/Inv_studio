@@ -11,15 +11,16 @@ As an **AP operator**, I want to choose several invoices and confirm the process
 - Cancel sends no invoice-processing request.
 - A confirmed plan is bound to filenames/sizes, engine/model, reference version and tolerances.
 - Changed rules require a fresh confirmation.
+- Each file becomes one invoice job; up to two run concurrently and the rest remain visibly queued.
 
 ## INV-02 · Read digital invoices and scans
 
 As an **AP operator**, I want to extract headers and every item line from supported files, so I avoid retyping supplier documents.
 
-**Status:** Prior three-reader baseline verified; readable-PDF fast path and visible-stage release validation pending.
+**Status:** Local paths measured; broad 95% quality and current hosted deployment remain pending.
 
-- Digital invoice2data, PaddleOCR scan and Docling reader paths produce structured synthetic results.
-- A readable PDF with no matching supplier template keeps native text and skips expensive image OCR; a confirmed AI fallback can use that text.
+- Native AI-off conversion recovered 570/570 lines and 3,990/3,990 tested line facts on one 15-PDF layout family. Paddle's conservative floor is 60/66 (90.91%) with descriptions unproven. Docling works on bounded native tables but failed the ten-page and scan cases recorded in validation.
+- A readable PDF with no matching supplier template keeps native text and skips expensive image OCR. Conservative layout rules require an invoice heading, reject purchase orders, extract only explicit labels/spatial rows and never infer internal business codes or header totals.
 - The job view names the active stage rather than presenting extraction as one opaque wait.
 - Unread or incomplete output records an explainable reader trace.
 - Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction.
@@ -28,18 +29,19 @@ As an **AP operator**, I want to extract headers and every item line from suppor
 
 As an **AP operator**, I want to select a provider/model and enable automatic fallback, so unfamiliar layouts can be proposed for review.
 
-**Status:** Adapters verified with mocked provider responses; live account evaluation pending.
+**Status:** Adapter contracts and a narrow 15-document/570-line source check passed; representative accuracy and current hosted deployment remain pending.
 
-- AI is called after explicit selection/confirmed fallback and local extraction failure or incompleteness.
+- Managed Vertex uses the hosted workspace service identity and project billing; API/subscription options remain selectable. AI is called only after explicit selection/confirmed fallback and local extraction failure or incompleteness.
 - Provider output must pass the strict invoice schema; missing facts remain missing.
 - Credentials never appear in browser storage, exported files or ordinary API errors.
 - Claude setup-token and move-only ChatGPT owner-transfer paths remain subject to live account eligibility and release validation; mocked adapters do not prove subscription inference.
+- The measured one-layout result cannot establish the expected 95% across suppliers, scans, languages and lengths. Frozen held-out gold still governs acceptance.
 
 ## INV-04 · Map and approve business reference extracts
 
 As an **data steward**, I want to profile the whole item and PO/GRN files and approve explicit mappings, so the validator uses evidence with known meaning.
 
-**Status:** Actual-source lookup indexes 114,940 item rows and 297,199 PO rows; release validation and business approval remain pending.
+**Status:** The private source profile contains 412,139 rows; hosted import is paused/cancelling and live lookup availability is unconfirmed.
 
 - Preserve original bytes, hashes and row/column provenance; inspect all populated cells.
 - Separate unique matches, duplicates, ambiguous joins and missing fields.
@@ -76,15 +78,17 @@ As an **AP reviewer**, I want to compare the source with editable fields and rec
 - Concurrent edits with stale revisions are rejected.
 - Rules changing during extraction prevent stale approval and require a new processing plan.
 - A manual draft created from an active job cannot alter the job revision, extracted invoice or review status.
+- Printed line net/tax amounts survive edits without changing printed unit price; there is no automatic repricing.
 
-## INV-08 · Export one joined three-sheet workbook
+## INV-08 · Download combined review or approved workbooks
 
-As an **AP operator**, I want to download all selected ready invoices into the exact target, so the receiving team can import without manual Excel assembly.
+As an **AP operator**, I want one combined workbook for saved processed invoices and a separate approved export, so review can move quickly without weakening controls.
 
 **Status:** Implemented and browser/workbook verified.
 
 - Header/Tax_Breakdown/Details have exactly 13/3/6 columns and no helper formulas.
 - Invoice transaction IDs are 1..N and consistent across all three sheets.
+- `EXTRACTION_REVIEW_ONLY` accepts saved processed records, keeps unknown codes blank and changes no job, approval, ledger or allocation.
 - Export rechecks and reserves quantities atomically; repeat download does not duplicate an allocation.
 
 ## INV-09 · Recover and audit local operations
@@ -94,6 +98,7 @@ As a **service owner**, I want to retain sources, rule versions, edits and expor
 **Status:** Instance-replacement persistence verified; database backup restoration remains a production gate.
 
 - Restarted in-flight jobs visibly require retry; completed exports remain downloadable.
+- New audit events distinguish text read, fields extracted and extraction failed. The legacy `extracted` label says only that a reader run finished.
 - Export records include reference version, policy and allocations.
 - Recovery procedure preserves the database plus the corresponding encryption key.
 
@@ -106,7 +111,7 @@ As a **workspace owner**, I want to sign in to a Firebase frontend backed by dur
 - Unauthenticated and non-allowlisted accounts cannot access invoices, references or connections.
 - Database and document evidence survive a replacement application instance.
 - Live UI, auth rejection, synthetic extraction/export and persistence smoke checks pass before operational handoff.
-- Current source additions require a fresh authenticated deployment smoke; prior hosted results are not evidence that those additions are deployed.
+- Access hotfix `00005-zdk` passed login, 31 retained jobs and sign-out; the complete current feature bundle still needs hosted verification.
 
 ## INV-11 · Qualify suppliers for a new store or market
 
@@ -132,7 +137,7 @@ As an **item-data steward**, I want to turn varied supplier files into approved 
 
 As an **AP operator**, I want to edit every target workbook field and download a draft while OCR is still running, so urgent manual work is not blocked by a slow reader.
 
-**Status:** Implemented in the current source; integrated release and hosted validation pending.
+**Status:** Implemented and locally browser/workbook verified; hosted release validation pending.
 
 - Header/Tax_Breakdown/Details expose exactly 13/3/6 editable fields with one joined transaction, leading-zero-safe identifiers and Decimal arithmetic.
 - Download requires an explicit unvalidated acknowledgement and the filename, workbook properties and cell comments say `DRAFT_UNVALIDATED` and no receipt reservation.
@@ -142,7 +147,7 @@ As an **AP operator**, I want to edit every target workbook field and download a
 
 As a **data steward**, I want to search actual item and PO sources by identifier or product name, so I can find evidence without loading unapproved rows into canonical matching.
 
-**Status:** Current source indexes 114,940 item rows and 297,199 PO rows; integrated release validation pending.
+**Status:** The 412,139-row private source profile is known, but hosted import is paused/cancelling and live lookup reports zero rows.
 
 - Results retain source row and conflict/duplicate context, with filters and bounded pagination.
 - The operator explicitly confirms a selected result before it can populate the manual workspace.

@@ -228,6 +228,8 @@ def test_store_api_uses_upserts_encryption_and_global_mutation_lock(tmp_path,clo
     store.secret("openai",secret)
     assert secret.encode() not in database.credentials["openai"]
     assert store.secret("openai") == secret
+    read_connection=database.connections[-1]
+    assert not any("pg_advisory_xact_lock" in sql for sql,_ in read_connection.calls)
     store.job("job-1",{"id":"job-1","status":"review"})
     store.job("job-2",{"id":"job-2","status":"ready"})
     assert store.job("job-1")["status"] == "review"

@@ -91,6 +91,14 @@
             </div>
           </div>
 
+          <ol id="batch-workflow" class="batch-workflow" aria-label="Batch invoice workflow">
+            <li><span>1</span><div><strong>Add files</strong><small id="workflow-upload-count">0 invoices</small></div></li>
+            <li><span>2</span><div><strong>Process</strong><small id="workflow-process-count">0 active</small></div></li>
+            <li><span>3</span><div><strong>Review &amp; save</strong><small id="workflow-review-count">0 processed</small></div></li>
+            <li><span>4</span><div><strong>Download Excel</strong><small id="workflow-download-count">0 selected</small></div></li>
+          </ol>
+          <p class="batch-workflow-note">Upload several files together. Each file must contain one invoice; PDFs are not split into separate invoices. Up to two jobs process at once and the rest stay queued.</p>
+
           <div class="workspace-grid">
             <aside class="card inbox-card" aria-labelledby="inbox-title">
               <div class="card-header compact">
@@ -108,8 +116,15 @@
                 <input id="job-search" type="search" placeholder="Search filename or supplier">
               </div>
               <div id="batch-controls" class="batch-controls" hidden>
-                <div><button id="select-ready" class="link-button" type="button">Select ready</button><span id="selected-count">0 selected</span></div>
-                <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export selected</button>
+                <div class="batch-selection">
+                  <div><button id="select-processed" class="link-button" type="button">Select processed</button><button id="select-ready" class="link-button" type="button">Select approved</button></div>
+                  <span id="selected-count">0 selected</span>
+                  <small id="selected-detail">Select processed invoices for one review workbook.</small>
+                </div>
+                <div class="batch-actions">
+                  <button id="batch-review" class="button button-secondary button-small" type="button" disabled>Download review workbook</button>
+                  <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export approved</button>
+                </div>
               </div>
               <div id="job-list" class="job-list" aria-live="polite"></div>
               <div id="job-empty" class="empty-mini">
@@ -196,8 +211,8 @@
                   <article class="card fields-card" aria-labelledby="fields-title">
                     <div class="card-header compact fields-heading">
                       <div><p class="eyebrow">Structured result</p><h2 id="fields-title">Invoice details</h2></div>
-                      <div id="completeness" class="completeness" aria-label="Extraction completeness">
-                        <span>Completeness</span><strong>—</strong>
+                      <div id="completeness" class="completeness" aria-label="Extraction coverage, not accuracy or approval" title="Checks for required extracted fields and consistent totals. This is not a measured accuracy score or approval.">
+                        <span>Read coverage</span><strong>—</strong>
                       </div>
                     </div>
                     <div id="processing-result" class="processing-result" aria-live="polite" hidden>
@@ -212,6 +227,19 @@
                       <p class="processing-guidance">The original stays available while Invoice Studio checks local readers. If they cannot produce complete fields, the confirmed AI fallback runs only when a provider and model are configured.</p>
                       <button class="button button-secondary" type="button" data-open-manual-draft>Enter manually / create draft</button>
                     </div>
+                    <div id="empty-extraction" class="empty-extraction" role="status" hidden>
+                      <div>
+                        <p class="eyebrow">Needs another extraction step</p>
+                        <h3 id="empty-extraction-title">Text read, invoice fields not extracted</h3>
+                        <p id="empty-extraction-detail">The document text is available, but Invoice Studio could not turn it into invoice fields. Nothing is approved and export remains on hold.</p>
+                      </div>
+                      <div class="empty-extraction-actions">
+                        <button id="empty-configure-ai" class="button button-secondary" type="button">Set up AI fallback</button>
+                        <button id="empty-retry" class="button button-quiet" type="button">Retry extraction</button>
+                        <button class="button button-quiet" type="button" data-open-manual-draft>Enter manually / create draft</button>
+                        <button id="empty-show-text" class="button button-quiet" type="button">Show extracted text</button>
+                      </div>
+                    </div>
                     <form id="invoice-form">
                       <div id="validation-summary" class="validation-summary" hidden></div>
                       <fieldset>
@@ -225,7 +253,7 @@
                         </div>
                         <div class="table-scroll">
                           <table class="line-table">
-                            <thead><tr><th scope="col">SKU / GTIN</th><th scope="col">Description</th><th scope="col">Qty</th><th scope="col">UOM</th><th scope="col">Unit price</th><th scope="col">Evidence</th><th scope="col">Actions</th></tr></thead>
+                            <thead><tr><th scope="col">SKU / GTIN</th><th scope="col">Description</th><th scope="col">Qty</th><th scope="col">UOM</th><th scope="col">Unit price &amp; printed totals</th><th scope="col">Evidence</th><th scope="col">Actions</th></tr></thead>
                             <tbody id="line-items"></tbody>
                           </table>
                         </div>
@@ -234,8 +262,10 @@
                     </form>
                     <div class="review-controls">
                       <label class="review-check"><input id="confirm-review" type="checkbox"><span><strong>I checked this record against the evidence</strong><small>Required before export.</small></span></label>
+                      <p id="review-save-state" class="review-save-state">Saved</p>
                       <div class="review-buttons">
                         <button class="button button-quiet" type="button" data-open-manual-draft>Create unvalidated draft</button>
+                        <button id="export-extraction-draft" class="button button-quiet" type="button" hidden>Download extracted Excel</button>
                         <button id="save-review" class="button button-secondary" type="button">Save &amp; revalidate</button>
                         <button id="export-job" class="button button-primary" type="button" disabled>Export Excel</button>
                       </div>
@@ -350,12 +380,21 @@
                 <div><h2>AI provider settings</h2><p>Choose a connection and model. You will confirm AI use and data sharing before every run.</p></div>
               </div>
               <form id="provider-settings-form" class="settings-form provider-form">
-                <label>Provider<select id="settings-provider" name="provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label>
+                <label>Provider<select id="settings-provider" name="provider"><option value="vertex">Google Cloud AI (managed)</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label>
                 <label>Model<input id="settings-model" name="model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Enter a model ID"></label>
                 <label class="toggle-label full"><input id="settings-ai-fallback" name="ai_fallback" type="checkbox"><span class="toggle" aria-hidden="true"></span><span><strong>Default to AI fallback</strong><small>New uploads will start with fallback enabled.</small></span></label>
                 <div class="full model-actions"><button id="fetch-models" class="button button-quiet" type="button">Load available models</button><select id="model-list" aria-label="Available models" hidden><option value="">Select a model</option></select></div>
                 <button class="button button-secondary" type="submit">Save processing defaults</button>
               </form>
+            </article>
+
+            <article class="card settings-card connection-card" data-provider-card="vertex" data-mode-only="cloud" hidden>
+              <div class="connection-title"><span class="provider-logo google">G</span><div><h2>Google Cloud AI (Vertex AI)</h2><p>Use Gemini through the hosted workspace’s managed Google Cloud service identity.</p></div><span class="connection-state" data-connection-state="vertex">Not connected</span></div>
+              <div class="managed-connection-copy">
+                <strong>No additional API key is needed</strong>
+                <p>When connected by the workspace administrator, invoice content can be sent to Vertex AI after you confirm the processing plan. Model usage is charged to this workspace’s Google Cloud project.</p>
+                <p class="disclosure small">The managed connection does not grant access to your personal Google account. Invoice Studio uses only the configured project, region and model.</p>
+              </div>
             </article>
 
             <article class="card settings-card connection-card" data-provider-card="openai">
@@ -400,7 +439,7 @@
     <dialog id="upload-dialog" aria-labelledby="upload-title">
       <form method="dialog" class="dialog-shell" id="upload-form">
         <div class="dialog-header">
-          <div><p class="eyebrow">New processing job</p><h2 id="upload-title">Add invoices</h2><p>Files are processed one at a time in the order shown.</p></div>
+          <div><p class="eyebrow">New processing jobs</p><h2 id="upload-title">Add invoices</h2><p>Each file becomes one invoice job. Up to two jobs process at once; the rest stay queued.</p></div>
           <button class="icon-button" value="cancel" aria-label="Close upload panel"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button>
         </div>
         <label id="drop-zone" class="drop-zone" for="invoice-files">
@@ -416,8 +455,8 @@
         </div>
         <label class="toggle-label ai-toggle"><input id="upload-ai-fallback" type="checkbox" checked><span class="toggle" aria-hidden="true"></span><span><strong>Allow AI fallback</strong><small>If local extraction cannot finish, send this invoice to your chosen provider.</small></span></label>
         <div id="upload-ai-options" class="ai-options" hidden>
-          <div class="option-grid"><label>Provider<select id="upload-provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label><label>Model<input id="upload-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID from settings"></label></div>
-          <p class="disclosure"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 2.5 18 17H2zM10 7v4M10 14v.1"/></svg><span>Enabling AI permits Invoice Studio to send invoice content to the selected provider for extraction. The provider’s privacy terms and usage limits apply.</span></p>
+          <div class="option-grid"><label>Provider<select id="upload-provider"><option value="vertex">Google Cloud AI (managed)</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label><label>Model<input id="upload-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID from settings"></label></div>
+          <p class="disclosure"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="M10 2.5 18 17H2zM10 7v4M10 14v.1"/></svg><span>Enabling AI permits Invoice Studio to send invoice content to the selected provider for extraction. Provider terms and usage limits apply; managed Google Cloud AI usage is charged to the workspace project.</span></p>
           <p id="upload-ai-readiness" class="connection-prompt" hidden></p>
         </div>
         <div id="upload-progress" class="upload-progress" aria-live="polite" hidden></div>
@@ -430,7 +469,7 @@
         <div class="dialog-header"><div><p class="eyebrow">Start over</p><h2 id="retry-title">Reprocess invoice</h2><p>This replaces the current extraction and review state.</p></div><button class="icon-button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
         <div class="option-grid"><label>Engine<select id="retry-engine"><option value="auto">Auto</option><option value="invoice2data">invoice2data</option><option value="paddleocr">PaddleOCR</option><option value="docling">Docling</option><option value="ai">AI provider</option></select></label><label>Language<select id="retry-language"><option value="en">English</option><option value="ar">Arabic</option><option value="ch">Chinese</option><option value="fr">French</option><option value="de">German</option></select></label></div>
         <label class="toggle-label"><input id="retry-ai-fallback" type="checkbox"><span class="toggle" aria-hidden="true"></span><span><strong>Allow AI fallback</strong><small>Invoice content may be sent to the selected provider.</small></span></label>
-        <div class="option-grid"><label>Provider<select id="retry-provider"><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label><label>Model<input id="retry-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID"></label></div>
+        <div class="option-grid"><label>Provider<select id="retry-provider"><option value="vertex">Google Cloud AI (managed)</option><option value="openai">OpenAI API</option><option value="anthropic">Anthropic API</option><option value="chatgpt">ChatGPT subscription</option><option value="claude_local">Claude subscription (CLI)</option></select></label><label>Model<input id="retry-model" maxlength="150" pattern="[A-Za-z0-9._:/-]*" placeholder="Model ID"></label></div>
         <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button class="button button-primary" type="submit" value="default">Reprocess</button></div>
       </form>
     </dialog>
@@ -515,6 +554,22 @@
         <label class="review-check draft-acknowledgement"><input id="manual-draft-acknowledge" type="checkbox" required><span><strong>I understand this download is an unvalidated draft</strong><small>It has no matching, approval, allocation or duplicate protection.</small></span></label>
         <div id="manual-draft-error" class="inline-alert error" role="alert" hidden></div>
         <div class="dialog-actions"><button id="cancel-manual-draft" class="button button-quiet" type="button">Keep working</button><button id="download-manual-draft" class="button button-primary" type="submit">Download DRAFT_UNVALIDATED.xlsx</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="extraction-draft-dialog" aria-labelledby="extraction-draft-title">
+      <form method="dialog" class="dialog-shell small-dialog">
+        <div class="dialog-header"><div><p class="eyebrow">Extracted facts only</p><h2 id="extraction-draft-title">Download extracted Excel?</h2><p>This creates an unvalidated copy of the currently extracted fields and lines.</p></div><button class="icon-button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5 5 15"/></svg></button></div>
+        <div class="draft-warning" role="note"><strong>EXTRACTION · REVIEW ONLY</strong><span>Unknown internal or reference fields stay blank. This download does not approve the invoice, reserve receipts or write to the approved export ledger.</span></div>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button id="confirm-extraction-draft" class="button button-primary" type="button">Download EXTRACTION_REVIEW_ONLY.xlsx</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="batch-review-dialog" aria-labelledby="batch-review-title">
+      <form method="dialog" class="dialog-shell small-dialog">
+        <div class="dialog-header"><div><p class="eyebrow">Combined extracted facts</p><h2 id="batch-review-title">Download one review workbook?</h2><p><span id="batch-review-count">0</span> saved invoice records will be combined into one Excel file.</p></div><button class="icon-button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5l-10 10"/></svg></button></div>
+        <div class="draft-warning" role="note"><strong>EXTRACTION · REVIEW ONLY</strong><span>Blank or unmatched fields stay blank. This download does not approve invoices, reserve receipts or write to the approved export ledger. Save each edited invoice before continuing.</span></div>
+        <div class="dialog-actions"><button class="button button-quiet" value="cancel">Cancel</button><button id="confirm-batch-review" class="button button-primary" type="button">Download combined review Excel</button></div>
       </form>
     </dialog>
 

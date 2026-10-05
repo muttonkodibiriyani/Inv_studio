@@ -3,6 +3,7 @@ import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
@@ -104,13 +105,16 @@ def options(provider="openai"):
 
 
 def test_openai_mocked_success_uses_strict_schema_and_disables_storage(tmp_path, store, monkeypatch):
+    extracted = sample_invoice()
+    extracted["lines"][0]["net_amount"] = "599.99"
+    extracted["lines"][0]["tax_amount"] = "30.00"
     store.secret("openai", "sk-test-provider-secret")
     payload = {
         "status": "completed",
         "output": [
             {
                 "content": [
-                    {"type": "output_text", "text": json.dumps(sample_invoice())}
+                    {"type": "output_text", "text": json.dumps(extracted)}
                 ]
             }
         ],
@@ -127,13 +131,19 @@ def test_openai_mocked_success_uses_strict_schema_and_disables_storage(tmp_path,
 
     assert invoice.number == "DEMO-2026-001"
     assert invoice.lines[0].gtin == "00012345678905"
+    assert invoice.lines[0].price == Decimal("60")
+    assert invoice.lines[0].net_amount == Decimal("599.99")
+    assert invoice.lines[0].tax_amount == Decimal("30.00")
     assert usage == {"input_tokens": 7, "output_tokens": 11}
     _, url, request = fake.calls[0]
     assert url == "https://api.openai.com/v1/responses"
     assert request["headers"] == {"Authorization": "Bearer sk-test-provider-secret"}
     assert request["json"]["store"] is False
+    assert "must never be back-calculated or altered" in request["json"]["instructions"]
     assert request["json"]["text"]["format"]["strict"] is True
     assert request["json"]["text"]["format"]["schema"]["additionalProperties"] is False
+    line_schema = request["json"]["text"]["format"]["schema"]["properties"]["lines"]["items"]
+    assert {"net_amount", "tax_amount"}.issubset(line_schema["properties"])
 
 
 def test_chatgpt_mocked_stream_requires_a_completed_response(tmp_path, store, monkeypatch):

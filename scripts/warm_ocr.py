@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 ROOT=Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 CASES=(
     ("invoice2data",ROOT/"samples/invoice.pdf"),
     ("paddleocr",ROOT/"samples/invoice-scan.png"),
@@ -44,10 +45,21 @@ def warm(engine,source,work):
     return {"engine":engine,"characters":len(payload["text"]),"lines":len(invoice["lines"])}
 
 
+def warm_additional_paddle_models():
+    # English also covers Chinese; one Latin model covers French and German.
+    # Instantiate the two remaining recognition models so runtime OCR never
+    # needs to download code or weights for a supported UI language.
+    from app.ocr_worker import paddle_reader
+    for language in ("ar", "fr"):
+        reader = paddle_reader(language)
+        del reader
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="inv-studio-warm-") as directory:
         work=Path(directory)
         results=[warm(engine,source,work) for engine,source in CASES]
+        warm_additional_paddle_models()
     print("OCR model warm-up complete: "+", ".join(f"{x['engine']} ({x['lines']} lines)" for x in results))
 
 

@@ -31,6 +31,27 @@ def sample(name):
     return json.loads((ROOT / "samples" / name).read_text())
 
 
+def test_inbox_load_uses_one_database_connection_for_many_invoices(tmp_path,monkeypatch):
+    from contextlib import contextmanager
+    monkeypatch.setenv('INV_STUDIO_DATA',str(tmp_path/'module-default'))
+    from app.main import create_app
+    app=create_app(tmp_path/'inbox');store=app.state.store
+    for index in range(40):
+        store.job(str(index),{'id':str(index),'status':'review','reviewed':False,'revision':1,
+                             'invoice':Invoice(number=f'SYNTHETIC-{index}').model_dump(mode='json')})
+    original=store.connection;calls=[]
+    @contextmanager
+    def counted(transaction=False):
+        calls.append(transaction)
+        with original(transaction) as c:yield c
+    monkeypatch.setattr(store,'connection',counted)
+    with TestClient(app) as client:
+        response=client.get('/api/state')
+        assert response.status_code==200
+        assert len(response.json()['jobs'])==40
+    assert calls==[False]
+
+
 @pytest.fixture
 def refs():
     return import_references((ROOT / "samples" / "reference.json").read_bytes(), "reference.json")

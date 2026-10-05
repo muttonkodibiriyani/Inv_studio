@@ -14,6 +14,8 @@ class Line(StrictModel):
     qty: Decimal | None = None
     uom: str | None = None
     price: Decimal | None = None
+    net_amount: Decimal | None = None
+    tax_amount: Decimal | None = None
     evidence: str | None = None
     page: int | None = Field(default=None, ge=1, le=20)
 
@@ -45,7 +47,7 @@ class Policy(StrictModel):
 class ProcessingOptions(StrictModel):
     engine: Literal["auto", "invoice2data", "paddleocr", "docling", "ai"] = "auto"
     ai_fallback: bool = True
-    provider: Literal["openai", "anthropic", "chatgpt", "claude_local"] = "openai"
+    provider: Literal["openai", "anthropic", "chatgpt", "claude_local", "vertex"] = "openai"
     model: str = Field(default="", max_length=150, pattern=r"^[A-Za-z0-9._:/-]*$")
     language: Literal["en", "ar", "ch", "fr", "de"] = "en"
 

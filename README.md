@@ -2,7 +2,7 @@
 
 Read supplier invoices, check them against your reference data, resolve exceptions and download the three-sheet invoice workbook. Runs locally or in a restricted Firebase/GCP pilot. The repository contains synthetic examples only.
 
-**Hosted portal:** https://inv-studio-740495548022.web.app — sign in with the approved owner's existing Firebase email/password account. The initial workspace contains synthetic reference data. Real invoices can be tested for extraction; validated export requires approved business references. The URL is the previously verified pilot baseline; the manual-draft, large-reference lookup and subscription-transfer changes in the current source still require release validation and a new deployment.
+**Hosted portal:** https://inv-studio-740495548022.web.app — access hotfix revision `00005-zdk` is deployed after an availability incident. Authenticated verification and deployment of the current feature bundle remain pending, so the repository does not claim that the newest extraction and batch features are live. Validated export still requires approved business references.
 
 ## Start
 
@@ -22,17 +22,17 @@ The base install reads digital documents using invoice2data. To add the two loca
 ./scripts/install-ocr.sh
 ```
 
-The first image-OCR run downloads public model weights and takes longer. For a readable PDF with no matching supplier template, the automatic path keeps the native text and skips the expensive image-OCR pass; it can continue to the selected AI provider when the confirmed plan permits fallback. The job view shows the active stage instead of presenting the whole chain as one wait. No invoice is sent to an AI provider unless you enable fallback or select AI and confirm the processing plan. Credentials are encrypted on the server and never stored in browser storage.
+The first image-OCR run downloads public model weights and takes longer. For a readable PDF with no matching supplier template, the automatic path keeps the native text, applies conservative invoice-layout rules and skips the expensive image-OCR pass; it can continue to the selected AI provider when the confirmed plan permits fallback. The job view distinguishes text read from invoice fields extracted instead of presenting either as a generic success. No invoice is sent to an AI provider unless you enable fallback or select AI and confirm the processing plan. Credentials are encrypted on the server and never stored in browser storage.
 
 ## What works
 
 - Multiple files, each containing one invoice: PDF, PNG, JPEG, WebP, BMP, TIFF, DOCX, XLSX, CSV, TXT and structured invoice JSON.
 - Confirm the engine, fallback provider/model, reference version and tolerances before processing. Cancel makes no processing request.
-- Automatic reading through supplier templates, a readable-PDF fast path, PaddleOCR and Docling, with optional selected AI fallback for unread or incomplete invoices. You can select a particular reader or AI explicitly, and the UI reports each active stage.
-- OpenAI and Anthropic API connections. A Claude setup token can connect the restricted Claude CLI on the server where that CLI is installed. ChatGPT uses the application's own local OAuth registration; an explicit export/import moves its encrypted credentials from the local instance to the authenticated hosted owner workspace and disconnects the local copy. Provider/account eligibility, model access and usage limits apply. No live subscription inference is claimed by the automated tests.
-- Canonical reference import and strict matching remain the approval path. A separate, read-only product/PO lookup indexes the actual source extracts—**114,940 item rows and 297,199 PO rows**—for exact identifier or product-name evidence searches. Search results retain source/conflict context and require explicit operator confirmation; they do not become approved matching data.
+- Automatic reading through supplier templates, conservative native-layout rules, PaddleOCR and Docling, with optional selected AI fallback for unread or incomplete invoices. Native rules require an invoice heading, reject purchase orders, leave conflicting labels unset and never invent internal codes or totals. You can select a particular reader or AI explicitly, and the UI reports each active stage.
+- Managed Google Cloud AI through Vertex AI and the workspace service identity, plus OpenAI and Anthropic API connections. A Claude setup token can connect the restricted Claude CLI on the server where that CLI is installed. ChatGPT uses the application's own local OAuth registration; an explicit export/import moves its encrypted credentials from the local instance to the authenticated hosted owner workspace and disconnects the local copy. Provider/account eligibility, model access, project charges and usage limits apply. No live subscription inference is claimed by the automated tests.
+- Canonical reference import and strict matching remain the approval path. The private source profile contains **412,139 rows**—114,940 item rows and 297,199 PO/GRN rows—but the hosted lookup import is paused/cancelling during API recovery and is not confirmed available. When loaded, searches retain source/conflict context and require explicit operator confirmation; they do not become approved matching data. Supplier/site mappings and the accepted-receipt and prior-invoicing baseline also remain unresolved.
 - Editable evidence review, duplicate protection, cumulative receipt allocation and atomic approved export.
-- Exactly **Header (13 columns), Tax_Breakdown (3), Details (6)**. Approved single/batch exports revalidate and reserve receipts. A separate manual editor exposes every target field and can immediately download an explicitly acknowledged `DRAFT_UNVALIDATED` workbook while OCR is still running. That draft does not validate references, reserve receipts or change the job.
+- Exactly **Header (13 columns), Tax_Breakdown (3), Details (6)**. Printed line net and tax amounts are preserved separately from printed unit price; the application does not reprice a line to force arithmetic. A combined `EXTRACTION_REVIEW_ONLY` workbook can contain multiple saved processed invoices without approval or ledger changes. Approved single/batch exports remain separate, revalidate and reserve receipts. The manual editor can also download an acknowledged `DRAFT_UNVALIDATED` workbook while OCR is running.
 
 ## Your reference files
 
@@ -69,7 +69,7 @@ The browser test runs against the server on port 8765 and creates synthetic jobs
 INV_STUDIO_DATA=/tmp/inv-studio-test ./scripts/run.sh
 ```
 
-**Current extension release validation:** 101 backend tests pass, including the real local PostgreSQL contract, Ruff is clean, and the container's invoice2data/PaddleOCR/Docling warm checks each recovered both synthetic lines. Browser, final image publication, private catalog import and authenticated hosted-extension checks remain pending in [docs/validation.md](docs/validation.md).
+**Current release evidence:** 148 backend tests pass with PostgreSQL included and no skips; Ruff and the full Chromium workflow pass. All three Docker reader warmups passed in 63 seconds and recovered both synthetic lines. Native PDF tables recovered 570/570 rows and 3,990/3,990 tested line facts from one layout family. On three private scans, Paddle recovered 6/6 lines and 60/60 adjudicated header, identifier and numeric facts; treating all six descriptions as unproven gives a conservative 60/66 (90.91%) floor. Docling recovered bounded native examples, but a ten-page run exceeded 528 seconds and three scans returned no reliable lines after 103–170 seconds. A private Vertex check covered 15 documents and 570 lines from one layout family, with all source-tested fields exact. These narrow cohorts do not establish broad supplier accuracy. See [docs/validation.md](docs/validation.md) for denominators, limits, token usage and pending hosted verification.
 
 ## Operational boundaries
 

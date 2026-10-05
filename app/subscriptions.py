@@ -31,8 +31,8 @@ class ClaudeSubscription:
         )
         return {"connected": True, "provider": "claude_local"}
 
-    def connected(self):
-        saved = self.store.secret(CLAUDE_SECRET)
+    def connected(self,c=None):
+        saved = self.store.secret(CLAUDE_SECRET,c=c)
         return bool(isinstance(saved, dict) and _TOKEN.fullmatch(saved.get("token", "")))
 
     def token(self):

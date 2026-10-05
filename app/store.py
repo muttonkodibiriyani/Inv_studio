@@ -63,17 +63,19 @@ class Store:
                 return self.set(key, value, conn)
         c.execute("INSERT OR REPLACE INTO settings VALUES (?,?)", (key, json.dumps(value)))
 
-    def secret(self, key, value=None, delete=False):
-        with self.connection(True) as c:
-            if delete:
-                c.execute("DELETE FROM credentials WHERE key=?", (key,))
-                return None
-            if value is not None:
-                c.execute("INSERT OR REPLACE INTO credentials VALUES (?,?)",
-                          (key, self.cipher.encrypt(json.dumps(value).encode())))
-                return None
-            row = c.execute("SELECT value FROM credentials WHERE key=?", (key,)).fetchone()
-            return json.loads(self.cipher.decrypt(row[0])) if row else None
+    def secret(self, key, value=None, delete=False, c=None):
+        if c is None:
+            with self.connection(value is not None or delete) as connection:
+                return self.secret(key,value,delete,connection)
+        if delete:
+            c.execute("DELETE FROM credentials WHERE key=?", (key,))
+            return None
+        if value is not None:
+            c.execute("INSERT OR REPLACE INTO credentials VALUES (?,?)",
+                      (key, self.cipher.encrypt(json.dumps(value).encode())))
+            return None
+        row = c.execute("SELECT value FROM credentials WHERE key=?", (key,)).fetchone()
+        return json.loads(self.cipher.decrypt(row[0])) if row else None
 
     def job(self, job_id, value=None, c=None):
         if c is None:
@@ -85,9 +87,11 @@ class Store:
         row = c.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def jobs(self):
-        with self.connection() as c:
-            return [json.loads(r[0]) for r in c.execute("SELECT payload FROM jobs ORDER BY rowid DESC LIMIT 200")]
+    def jobs(self,c=None):
+        if c is None:
+            with self.connection() as connection:
+                return self.jobs(connection)
+        return [json.loads(r[0]) for r in c.execute("SELECT payload FROM jobs ORDER BY rowid DESC LIMIT 200")]
 
     def audit(self, event, payload, c=None):
         if c is None:

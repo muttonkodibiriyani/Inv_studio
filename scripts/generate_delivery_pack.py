@@ -26,17 +26,17 @@ for name in ('Title','Heading 1','Heading 2','Heading 3'):
     doc.styles[name].font.name='Aptos Display';doc.styles[name].font.color.rgb=DC.from_string('132C3B')
 doc.add_paragraph('INV STUDIO',style='Subtitle')
 doc.add_heading('From supplier invoice\nto checked Excel',0)
-doc.add_paragraph('Solution design • operating model • build stories',style='Subtitle')
-doc.add_paragraph('4 October 2026\nCurrent source candidate adds manual draft, large-source lookup, visible stages and owner connection transfer. 101 backend tests including real local PostgreSQL pass, Ruff is clean, and all three container readers recover both synthetic lines; browser, image publication, catalog import, hosted smoke and deployment remain pending. The hosted URL is the earlier verified baseline.')
+doc.add_paragraph('Solution design • operating model • verification record • build stories',style='Subtitle')
+doc.add_paragraph('5 October 2026\nAccess hotfix 00005-zdk passed authenticated state checks, browser login with 31 retained jobs and sign-out. The complete feature release is not yet live, and hosted lookup currently reports zero rows. 148 backend tests pass with PostgreSQL included and no skips; Ruff, the full Chromium workflow and all three Docker reader warmups pass. Measured native and Paddle results are bounded to their evaluated layouts, while Docling failures and the unresolved broad 95% expectation remain visible.')
 doc.add_paragraph('For senior leaders, product owners, AP operators and the engineering team. Read the decision and process first; use the data contract and stories when building or accepting a release.')
 doc.add_page_break()
-for file in ['solution-design.md','data-contract.md','operator-guide.md','stories.md']:
+for file in ['solution-design.md','data-contract.md','operator-guide.md','validation.md','stories.md']:
     lines=(ROOT/'docs'/file).read_text().splitlines();i=0;in_code=False
     while i<len(lines):
         line=lines[i]
         if line.startswith('```'):
             in_code=not in_code
-            if in_code:doc.add_paragraph('Flow: Upload → Confirm rules → Template or readable-PDF fast path / OCR / permitted AI → Match approved references → Review evidence → Approved export and receipt reservation. Separate path: all-field DRAFT_UNVALIDATED with no approval or reservation.')
+            if in_code and file == 'solution-design.md':doc.add_paragraph('Flow: Upload → Confirm rules → Template or conservative native layout / OCR / permitted managed Vertex or selected AI → Match approved references → Review evidence → approved export and receipt reservation. Separate outputs: combined EXTRACTION_REVIEW_ONLY and all-field DRAFT_UNVALIDATED, both without approval or reservation.')
             i+=1;continue
         if in_code or not line.strip():i+=1;continue
         if line.startswith('|'):
@@ -73,7 +73,7 @@ def box(slide,x,y,w,h,text,size=22,color=ink,bold=False,fill=None):
 def slide(title,kicker='INVOICE STUDIO / DECISION PACK'):
     s=prs.slides.add_slide(prs.slide_layouts[6]);s.background.fill.solid();s.background.fill.fore_color.rgb=RGBColor.from_string(bg)
     box(s,.6,.3,12,.3,kicker,11,teal,True);box(s,.6,.95,12,1.3,title,32,navy,True)
-    box(s,.6,7.02,11,.3,'4 OCT 2026  •  BUILD EVIDENCE AND PROPOSED NEXT STAGES',9,muted)
+    box(s,.6,7.02,11,.3,'5 OCT 2026  •  MEASURED EVIDENCE AND PROPOSED NEXT STAGES',9,muted)
     box(s,12,6.95,.6,.35,str(len(prs.slides)).zfill(2),12,teal,True)
     return s
 
@@ -87,48 +87,60 @@ def cards(title,items,footer=None):
 s=slide('From supplier invoice\nto checked Excel','INV STUDIO / SLT PROPOSAL AND WORKING MVP')
 box(s,.7,2.8,7.6,1.5,'Build the business controls in house.\nReuse local readers. Keep AI replaceable.',28,ink)
 box(s,9,2.65,3.5,2.6,'01\nProve the invoice workflow first',28,white,True,teal)
-box(s,.7,5.6,11.5,.8,'Hosted baseline verified with synthetic invoices. Current source additions await integrated validation and deployment.',18,muted)
+box(s,.7,5.45,11.5,1.05,'Access hotfix 00005-zdk is verified. 148 backend tests, Chromium and three Docker reader warmups pass. Full feature deployment and hosted catalog recovery remain pending.',17,muted)
 cards('The problem is bigger than reading text',[
  ('Identity','Which supplier site, buying company, market route and item does this invoice belong to?'),
  ('Evidence','Was the quantity accepted? Was it already invoiced? Does the unit price and tax match?'),
  ('Handoff','Can we generate the receiving workbook without assembling rows manually?')])
 s=slide('The to-be process in six clear steps')
-steps=[('01','Upload','One invoice per file; batch selection.'),('02','Confirm','Reader, AI fallback, references and rules.'),('03','Read','Template, native-PDF fast path, OCR or permitted AI.'),('04','Validate','Approved references; lookup remains evidence only.'),('05','Review','Visible stage, evidence and exceptions.'),('06','Export','Approved workbook or labelled manual draft.')]
+steps=[('01','Upload','One invoice per file; two workers, remaining files queued.'),('02','Confirm','Reader, AI fallback, references and rules.'),('03','Read','Template, native layout, OCR or permitted AI.'),('04','Validate','Approved references; lookup remains evidence only.'),('05','Review','Edit and save each invoice before batch selection.'),('06','Export','Review-only, approved or manual draft workbook.')]
 for i,(num,title,body) in enumerate(steps):
     x=.65+(i%3)*4.15;y=2.3+(i//3)*2.05
     box(s,x,y,3.95,1.8,'',fill=white);box(s,x+.1,y+.1,3.7,.45,num+'  '+title,22,teal,True);box(s,x+.1,y+.65,3.7,1,body,18)
 cards('Buy the readers. Build the decision layer.',[
  ('Local readers','invoice2data for repeatable layouts. PaddleOCR for scans. Docling for document structure.'),
- ('AI adapter','Selected OpenAI or Claude model proposes structured fields when local reading is incomplete.'),
+ ('AI adapter','Managed Vertex or a selected API/subscription model proposes structured fields when local reading is incomplete.'),
  ('Our product','Exact matching, evidence review, route rules, receipt balances, duplicate control and Excel contract.')], 'No extraction score is treated as proof of business correctness.')
 cards('The exact output leadership can inspect',[
  ('Header · 13 columns','One row per invoice. Supplier site, order, location, date and invoice totals.'),
  ('Tax · 3 columns','Transaction number, tax code and tax basis. Current MVP uses one tax treatment per invoice.'),
  ('Details · 6 columns','Transaction number, item, UPC, cost, quantity and unit tax code.')], 'Approved export revalidates and reserves receipts. Manual draft uses the same shape but is visibly DRAFT_UNVALIDATED and reserves nothing.')
-cards('Two controlled routes to the workbook',[
+cards('Three controlled routes to the workbook',[
  ('Approved export','Ready and reviewed invoices are revalidated. Receipt allocations and export receipt commit atomically.'),
- ('Manual draft','Every target field is editable during OCR. Explicit acknowledgement, one joined transaction and no formulas.'),
- ('Visible boundary','Filename, workbook properties and comments say DRAFT_UNVALIDATED, references not validated and no receipt reserved.')], 'The draft does not change job status, revision, extracted invoice, reference approval or the approved-export ledger.')
+ ('Combined review','Saved processed facts join into EXTRACTION_REVIEW_ONLY without approval, allocation or ledger change.'),
+ ('Manual draft','Every target field is editable during OCR. Explicit acknowledgement; DRAFT_UNVALIDATED reserves nothing.')], 'All three use exact 13/3/6 sheets. Only approved export can reserve receipt quantity.')
 cards('Cross-market supply needs an explicit route',[
  ('Supplier legal entity','A supplier name is not enough. Operational sites have their own identities and approved names.'),
  ('Buying company','The same seller may serve different owned companies. PO scope must identify the correct buyer.'),
  ('Route and currency','UAE → Kuwait with AED billing remains a distinct route. Currency equality does not prove approval.')])
 cards('Reference files are evidence, not assumptions',[
- ('Search actual scale','Lookup covers 114,940 item rows and 297,199 PO rows by exact identifier or product-name token.'),
+ ('Known source profile','Private source files contain 412,139 item and PO/GRN rows, but hosted lookup currently reports zero loaded rows.'),
  ('Show conflicts','Keep source sheet/row and duplicate context. Require explicit operator confirmation before copying evidence.'),
- ('Approve separately','Lookup never approves matching. Buyer, receipt, prior invoicing, route and tax meaning still need owners.')], 'Completed target examples and lookup hits are evidence; neither establishes canonical master-data approval.')
+ ('Approve separately','Lookup never approves matching. Supplier/site, receipt, prior invoicing, route and tax meaning still need owners.')], 'Completed target examples and lookup hits are evidence; neither establishes canonical master-data approval.')
 cards('Cloud delivery is a controlled pilot',[
  ('Firebase frontend','Responsive portal, approved account sign-in and authenticated document downloads.'),
- ('GCP application','Cloud Run readers and API. Cloud SQL records/ledger. Private Cloud Storage evidence.'),
- ('Release gates','Re-run auth, draft immutability, lookup, connections, extraction/export and persistence before handoff.')], 'The deployed URL is the earlier baseline. Current source additions are not yet claimed as deployed.')
+ ('GCP application','Cloud Run readers/API and managed Vertex through the service identity. Cloud SQL ledger; private evidence.'),
+ ('Release gates','Deploy the complete feature bundle, restore lookup, then rerun authenticated extraction/export and persistence checks.')], 'Access hotfix 00005-zdk is verified; the full feature release and hosted catalog are not yet live.')
 cards('Owner subscription paths keep a hard boundary',[
  ('Claude setup token','Encrypted on the server and provided only to a restricted hosted CLI invocation with tools disabled.'),
  ('ChatGPT move','Local OAuth uses the application registration. Export deletes local credentials and clears the active account.'),
  ('Hosted owner import','Authenticated import verifies and encrypts the one-time bundle. Protect it, import promptly, then delete it.')], 'No automated result proves subscription eligibility, model access or live inference quality.')
-cards('Show evidence before claiming automation',[
- ('Release validation','101 backend tests and real local PostgreSQL pass; Ruff clean; three-reader container warm passed. Browser, publish, catalog and hosted smoke pending.'),
- ('Pilot next','Representative supplier formats and languages. Independently adjudicated fields, lines and receipt balances.'),
- ('Measure value','Minutes saved per invoice, correction count, false-ready rate, fallback share, latency and provider cost.')])
+cards('Release checks are green; deployment remains bounded',[
+ ('Repository gate','148 backend tests pass with PostgreSQL included and no skips. Ruff and the latest full Chromium workflow pass.'),
+ ('Reader image','All three Docker reader warmups passed in 63 seconds and recovered both synthetic lines.'),
+ ('Hosted boundary','00005-zdk restored access. The complete feature release is not live; hosted lookup reports zero rows.')])
+cards('Measured AI-off reader evidence',[
+ ('Native tables','15/15 PDFs, 570/570 rows and 3,990/3,990 tested line facts exact in one layout family; 24.6 s first total, 12.9 s warm.'),
+ ('PaddleOCR','6/6 scan lines and 60/60 tested facts exact. Treating six descriptions as wrong gives a 60/66 = 90.91% floor.'),
+ ('Docling','5/5, 1/1 and 17/17 native lines. Ten pages exceeded 528 s; three scans took 103–170 s and returned no reliable lines.')], 'These bounded cohorts do not prove the expected 95% across suppliers, scans, languages and lengths.')
+cards('Managed Vertex: useful evidence, narrow cohort',[
+ ('Measured result','All source-tested fields were exact across 15 documents and 570 lines from one layout family.'),
+ ('Measured usage','36,450 input and 91,892 output tokens including reasoning across 15 successful calls.'),
+ ('Calculated cost','USD 0.3719325 at the published time-bounded rate; USD 24.7955 per 1,000 at the same mix.')], 'Not an actual bill. Excludes retries, hosting, database, storage and network. Broad accuracy remains unproven.')
+cards('Define 90% before measuring it',[
+ ('Header exact','Target ≥90% over every frozen gold header cell, including expected nulls. Failures and timeouts score zero.'),
+ ('Line exact','Target ≥90% exact cells after adjudicated line alignment; also report missing, extra and misaligned lines.'),
+ ('Zero correction','Target ≥90% of all attempted invoices needing no extraction edit, plus zero false-ready approvals.')], 'Stratify by supplier, native/scan, language, quality and length. Completeness, schema and arithmetic are diagnostics, not accuracy.')
 cards('A staged build plan with clear exits',[
  ('Data contract\n1–2 weeks','Approve mappings and missing values. Accept the target workbook with the receiving team.'),
  ('Supplier evaluation\n2–3 weeks','Evaluate at least 100 representative invoices and the difficult exception cases.'),

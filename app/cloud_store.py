@@ -221,21 +221,24 @@ class PostgresStore:
             (key,json.dumps(value)),
         )
 
-    def secret(self,key,value=None,delete=False):
-        with self.connection(True) as connection:
-            if delete:
-                connection.execute("DELETE FROM credentials WHERE key=%s",(key,))
-                return None
-            if value is not None:
-                encrypted=self.cipher.encrypt(json.dumps(value).encode())
-                connection.execute(
-                    """INSERT INTO credentials(key,value) VALUES (%s,%s)
-                       ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
-                    (key,encrypted),
-                )
-                return None
-            row=connection.execute("SELECT value FROM credentials WHERE key=%s",(key,)).fetchone()
-            return json.loads(self.cipher.decrypt(bytes(row[0]))) if row else None
+    def secret(self,key,value=None,delete=False,c=None):
+        if c is None:
+            with self.connection(value is not None or delete) as connection:
+                return self.secret(key,value,delete,connection)
+        connection=c
+        if delete:
+            connection.execute("DELETE FROM credentials WHERE key=%s",(key,))
+            return None
+        if value is not None:
+            encrypted=self.cipher.encrypt(json.dumps(value).encode())
+            connection.execute(
+                """INSERT INTO credentials(key,value) VALUES (%s,%s)
+                   ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value""",
+                (key,encrypted),
+            )
+            return None
+        row=connection.execute("SELECT value FROM credentials WHERE key=%s",(key,)).fetchone()
+        return json.loads(self.cipher.decrypt(bytes(row[0]))) if row else None
 
     def job(self,job_id,value=None,c=None):
         if c is None:
@@ -252,12 +255,12 @@ class PostgresStore:
         row=c.execute("SELECT payload FROM jobs WHERE id=%s",(job_id,)).fetchone()
         return json.loads(row[0]) if row else None
 
-    def jobs(self):
-        with self.connection() as connection:
-            rows=connection.execute(
-                "SELECT payload FROM jobs ORDER BY updated_at DESC,id DESC LIMIT 200"
-            )
-            return [json.loads(row[0]) for row in rows]
+    def jobs(self,c=None):
+        if c is None:
+            with self.connection() as connection:
+                return self.jobs(connection)
+        rows=c.execute("SELECT payload FROM jobs ORDER BY updated_at DESC,id DESC LIMIT 200")
+        return [json.loads(row[0]) for row in rows]
 
     def audit(self,event,payload,c=None):
         if c is None:
