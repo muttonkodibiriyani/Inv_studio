@@ -367,3 +367,8 @@ def test_deferred_extraction_evidence_refreshes_the_rules_view_without_a_revisio
 
 def test_extraction_evidence_without_a_page_is_not_given_a_page():
     assert extraction_evidence({"quote": "SYN", "page": None, "source": "native"})["reference"] == "page not given"
+    # An entry placed on a page but not on a text-layer row has no box; a line with nothing located is {}.
+    assert extraction_evidence({"quote": "SYN", "page": 2, "source": "ai"})["reference"] == "page 2"
+    result = {"status": "Review", "header": {"Document": "SYN-3"}, "lines": [{"line": 1}, {"line": 2}], "lineage": [], "exceptions": []}
+    view = rules_view(result, printed={"header": {}, "lines": [{}, {"qty": {"quote": "2", "page": 1, "source": "ocr"}}]})
+    assert len(view["lines"]) == 2
