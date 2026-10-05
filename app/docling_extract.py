@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from statistics import median
 from typing import Any
 
+from app.layout_extract import is_packing_page
+
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
     return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
@@ -441,6 +443,10 @@ def _tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, A
     for page in sorted({int(box.get("page", 1)) for box in boxes}):
         page_words = [box for box in boxes if int(box.get("page", 1)) == page]
         rows = _rows_from_words(page_words)
+        if is_packing_page("\n".join(" ".join(str(w["text"]) for w in row) for row in rows)):
+            # A packing list repeats the goods without being invoice lines.
+            carry = None
+            continue
         size = page_words[0].get("size") if page_words else None
         number = _measured_invoice_number(rows, size)
         has_header = any(required.issubset({r[0] for r in _header_roles(row)}) for row in rows)

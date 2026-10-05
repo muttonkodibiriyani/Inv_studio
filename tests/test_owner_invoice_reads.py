@@ -85,3 +85,54 @@ def test_a_straight_page_groups_rows_as_before():
     words = [{"text": t, "page": 1, "box": [x, y - 8, x + 20, y + 8]}
              for n in range(30) for t, x, y in ((f"r{n}", 100, 100 + 20 * n), (str(n), 300, 101 + 20 * n))]
     assert [[w["text"] for w in row] for row in _rows_from_words(words)] == [[f"r{n}", str(n)] for n in range(30)]
+
+
+# A synthetic two-page scan: the invoice, then a packing list for the same goods. The packing list prints
+# its own 'Supplier:' label beside its 'Packing List:' title and repeats the goods in a priced table.
+from app.layout_extract import extract_invoice  # noqa: E402
+
+
+def _line(texts, y, page, x=100):
+    words = []
+    for text in texts.split():
+        words.append({"text": text, "page": page, "box": [x, y - 8, x + 8 * len(text), y + 8],
+                      "size": [1200, 2000], "geometry": "word"})
+        x += 8 * len(text) + 8
+    return words
+
+
+def _invoice_with_packing_list(supplier_on_invoice=False):
+    words = _line("TAX INVOICE", 100, 1, x=500)
+    if supplier_on_invoice:
+        words += _line("Supplier: Synthetic Goods Trading", 150, 1)
+    words += _line("Invoice Number: SYN-41", 180, 1) + _line("Bill To: Example Retail Store", 210, 1)
+    words += _line("Packing List", 100, 2, x=500)
+    words += _line("Supplier: Business Park   Packing List: PL-9", 150, 2)
+    words += [w for row in (("DESCRIPTION", 160), ("QUANTITY", 660), ("PRICE", 800)) for w in _line(row[0], 300, 2, x=row[1])]
+    words += [w for row in (("Synthetic item", 160), ("4", 680), ("12.50", 805)) for w in _line(row[0], 330, 2, x=row[1])]
+    text = "\n".join(" ".join(w["text"] for w in words if w["box"][1] == y - 8 and w["page"] == p)
+                     for p, y in ((1, 100), (1, 150), (1, 180), (1, 210), (2, 100), (2, 150), (2, 300), (2, 330)))
+    return text, words
+
+
+def test_a_packing_list_page_never_supplies_the_supplier_name():
+    text, words = _invoice_with_packing_list()
+    invoice = extract_invoice(text, words)
+
+    assert invoice is not None
+    assert invoice["supplier_name"] is None
+    assert invoice["buyer_name"] == "Example Retail Store"
+
+
+def test_the_invoice_page_supplier_label_is_still_read_beside_a_packing_list():
+    text, words = _invoice_with_packing_list(supplier_on_invoice=True)
+
+    assert extract_invoice(text, words)["supplier_name"] == "Synthetic Goods Trading"
+
+
+def test_a_packing_list_page_contributes_no_invoice_lines():
+    _text, words = _invoice_with_packing_list()
+    packing = [w for w in words if w["page"] == 2]
+    assert _tables_from_measured_words(packing) == []
+    retitled = [dict(w, text="Delivery") if w["text"] == "Packing" else w for w in packing]
+    assert len(_tables_from_measured_words(retitled)) == 1
