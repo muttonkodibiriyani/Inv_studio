@@ -493,3 +493,13 @@ def test_reads_split_number_ordinal_date_supplier_and_labeled_totals() -> None:
     assert invoice.supplier_name == "Synthetic Trading LLC"
     assert invoice.net == Decimal("120.00")
     assert invoice.tax == Decimal("6.00")
+
+
+def test_next_label_after_invoice_number_label_is_not_the_number():
+    import re
+
+    from app.layout_extract import _unique_identifier
+
+    pattern = re.compile(r"(?i)\b(?:invoice|inv|document)\s*(?:no\.?|number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{0,79})")
+    assert _unique_identifier(["Tax Invoice No.  Tax Invoice Date  Currency"], (pattern,)) is None
+    assert _unique_identifier(["Tax Invoice No. SYN-4401"], (pattern,)) == "SYN-4401"

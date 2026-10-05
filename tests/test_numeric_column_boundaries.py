@@ -304,3 +304,55 @@ def test_incidental_pdfplumber_footer_table_does_not_block_word_recovery():
         "page": 1,
         "evidence": "table page 1 row 2",
     }]
+
+
+def test_right_aligned_barcode_left_of_its_heading_is_not_description():
+    from app.docling_extract import _column_bounds, _mapped_row
+
+    roles = [("description", 40, 90), ("gtin", 200, 240), ("qty", 260, 275)]
+    row = [word("Synthetic serum 30ml", 1, 40, 34, width=80),
+           word("4000000000012", 1, 150, 34, width=80), word("3", 1, 265, 34, width=6)]
+    values, _mapped = _mapped_row(row, roles, _column_bounds(roles))
+    assert values == ["Synthetic serum 30ml", "4000000000012", "3"]
+
+
+def test_size_digits_misread_as_letters_are_restored_in_description():
+    from app.docling_extract import _column_bounds, _mapped_row
+
+    roles = [("description", 40, 90), ("qty", 200, 215)]
+    row = [word("SYN SERUM 3OML", 1, 40, 34, width=60), word("10mI PS", 1, 104, 34, width=30)]
+    values, _mapped = _mapped_row(row, roles, _column_bounds(roles))
+    assert values[0] == "SYN SERUM 30ML 10ml PS"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("1 , 234.56", "1234.56"), ("2, 345.67", "2345.67"), ("12 ,5", None)])
+def test_ocr_split_thousands_separator(raw, expected):
+    from app.docling_extract import _decimal
+
+    assert _decimal(raw) == expected
+
+
+def test_measured_label_row_supplies_header_values_and_tolerates_label_typo():
+    boxes = measured_header(top=40, size=(320, 120)) + measured_row(1, "Synthetic item", top=54, size=(320, 120))
+    size = (320, 120)
+    labels = [("Tax Invoice No.", 8, 50), ("Tax Inyoice Date", 80, 55), ("Sales Order", 160, 40), ("Currency", 230, 30)]
+    values = [("SYN-4401", 10), ("25.06.2026", 84), ("SO-1", 162), ("AED", 232)]
+    for text, left, width in labels:
+        boxes.append(word(text, 1, left, 8, width=width, size=size))
+    for text, left in values:
+        boxes.append(word(text, 1, left, 18, width=30, size=size))
+    text = "Net Amount  8.00\nVAT Amount  0.40\nVAT Amount in AED  0.00\n"
+    invoice = extract_invoice_from_tables(text, [], boxes)
+    assert (invoice["number"], invoice["date"], invoice["currency"]) == ("SYN-4401", "2026-06-25", "AED")
+    assert (invoice["net"], invoice["tax"]) == ("8.00", "0.40")
+
+
+def test_unit_heading_with_ocr_dropped_letter_still_supplies_uom():
+    size = (320, 100)
+    boxes = [word("Description", 1, 38, 20, width=42), word("Qty.", 1, 160, 20, width=12),
+             word("(n", 1, 175, 20, width=8), word("PCE)", 1, 186, 20, width=14),
+             word("Unit Price", 1, 218, 20, width=35), word("Net Amount", 1, 270, 20, width=42),
+             word("Synthetic item", 1, 40, 34, width=60), word("2", 1, 175, 34, width=8),
+             word("4.00", 1, 224, 34, width=20), word("8.00", 1, 276, 34, width=20)]
+    invoice = extract_invoice_from_tables("", [], boxes)
+    assert invoice["lines"][0]["uom"] == "PCE"

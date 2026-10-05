@@ -303,6 +303,28 @@ def _mapped_row(row, roles, bounds, expected_serial=None):
             (float(word["box"][0]) + float(word["box"][2])) / 2
         ) < bounds[column + 1]]
         values.append(" ".join(str(word["text"]).strip() for word in words).strip() or None)
+    # A right-aligned barcode can start left of its own heading and so centre
+    # just inside a wide description column. A whole 8-14 digit token that
+    # reaches into the barcode heading's span belongs to the barcode column.
+    for column in range(len(roles) - 1):
+        if roles[column][0] != "description" or roles[column + 1][0] != "gtin":
+            continue
+        moved = [word for word in row
+                 if bounds[column] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 1]
+                 and float(word["box"][2]) > roles[column + 1][1]
+                 and re.fullmatch(r"[0-9]{8,14}", str(word["text"]).strip())]
+        if len(moved) == 1 and not values[column + 1]:
+            token = str(moved[0]["text"]).strip()
+            kept = [str(word["text"]).strip() for word in row
+                    if word is not moved[0]
+                    and bounds[column] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 1]]
+            values[column] = " ".join(kept).strip() or None
+            values[column + 1] = token
+    for column, role in enumerate(roles):
+        if role[0] == "description" and values[column]:
+            # OCR reads a printed size's 0 as O and l as I ("3OML", "10mI").
+            fixed = re.sub(r"\b(\d+)O(\d*)(?=ml\b)", r"\g<1>0\2", values[column], flags=re.I)
+            values[column] = re.sub(r"(?<=\d)mI\b", "ml", fixed)
     mapped = {role[0]: values[i] for i, role in enumerate(roles)}
     # OCR sometimes merges the printed serial with the adjacent part code.
     # Split only its literal expected prefix, with a token measured across
@@ -377,7 +399,7 @@ def _tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, A
             bounds = _column_bounds(roles)
             table_rows = [[role for role, _left, _right in roles]]
             header_text = _normalized(" ".join(str(w["text"]) for w in rows[index]))
-            unit_match = re.search(r"\bqty\s+in\s+([a-z0-9]{1,10})\b", header_text)
+            unit_match = re.search(r"\bqty\s+i?n\s+([a-z0-9]{1,10})\b", header_text)
             fixed_values = {"uom": unit_match.group(1).upper()} if unit_match else {}
             awaiting_serial = previous["serial"] + 1 if inherited else None
             header_page = previous["header_page"] if inherited else page
@@ -452,6 +474,8 @@ def _decimal(value: Any) -> str | None:
     if negative:
         text = text[1:-1].strip()
     text = re.sub(r"^(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+", "", text)
+    # OCR may split a thousands separator into its own token: "1 , 105.31".
+    text = re.sub(r"(?<=\d)\s*,\s*(?=\d{3}(?:\D|$))", ",", text)
     match = re.fullmatch(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?", text)
     if not match:
         return None
@@ -557,6 +581,55 @@ _HEADER_LABELS = {
     "po number": "po",
     "currency": "currency",
 }
+
+
+def _header_label(text: str) -> str | None:
+    """Return the canonical header label, tolerating one OCR letter slip."""
+    normal = _normalized(text)
+    if normal in _HEADER_LABELS:
+        return normal
+    if len(normal) < 10:
+        return None
+    from difflib import SequenceMatcher
+
+    close = [label for label in _HEADER_LABELS
+             if len(label) == len(normal) and SequenceMatcher(None, normal, label).ratio() >= 0.9]
+    return close[0] if len(close) == 1 else None
+
+
+def _header_tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rebuild a printed label row and the value row directly beneath it.
+
+    Labels are separated by measured gaps; each value word is assigned to the
+    label whose column (midpoints between adjacent labels) contains its centre.
+    """
+    result = []
+    for page in sorted({int(box.get("page", 1)) for box in boxes}):
+        rows = _rows_from_words([box for box in boxes if int(box.get("page", 1)) == page])
+        for row, below in zip(rows, rows[1:]):
+            height = median(max(1.0, w["box"][3] - w["box"][1]) for w in row)
+            cells: list[list[dict[str, Any]]] = []
+            for word in row:
+                if cells and float(word["box"][0]) - float(cells[-1][-1]["box"][2]) <= height * 1.2:
+                    cells[-1].append(word)
+                else:
+                    cells.append([word])
+            spans = [(" ".join(str(w["text"]).strip() for w in cell),
+                      float(cell[0]["box"][0]), float(cell[-1]["box"][2])) for cell in cells]
+            labels = [_header_label(text) for text, _left, _right in spans]
+            if len({_HEADER_LABELS[label] for label in labels if label}) < 2:
+                continue
+            gap = float(below[0]["box"][1]) - max(float(w["box"][3]) for w in row)
+            if gap > height * 2.5:
+                continue
+            edges = [float("-inf"), *[(a[2] + b[1]) / 2 for a, b in zip(spans, spans[1:])], float("inf")]
+            values = [" ".join(str(w["text"]).strip() for w in below
+                               if edges[i] <= (float(w["box"][0]) + float(w["box"][2])) / 2 < edges[i + 1]) or None
+                      for i in range(len(spans))]
+            header = [label or text for label, (text, _left, _right) in zip(labels, spans)]
+            result.append({"page": page, "rows": [header, values], "cells": [], "box": None,
+                           "source": "measured_header", "reconstruction": "measured_label_value_rows"})
+    return result
 
 
 def _date_value(value: Any) -> str | None:
@@ -696,6 +769,8 @@ def extract_invoice_from_tables(
         and not any(table.get("source") == "docling_word_cells" for table in tables)
     ):
         tables.extend(_tables_from_measured_words(boxes))
+    if boxes and not has_native_line_tables:
+        tables.extend(_header_tables_from_measured_words(boxes))
     if not tables:
         return None
     invoice: dict[str, Any] = {"lines": []}
@@ -716,7 +791,7 @@ def extract_invoice_from_tables(
             for row in rows
             for cell in row
             if (match := re.search(
-                r"\bqty\s+in\s+([a-z0-9]{1,10})\b", _normalized(cell)
+                r"\bqty\s+i?n\s+([a-z0-9]{1,10})\b", _normalized(cell)
             )) is not None
         }
         if len(printed_units) == 1:
@@ -852,6 +927,18 @@ def extract_invoice_from_tables(
         if len(values) == 1:
             invoice[field] = next(iter(values))
 
+    # Measured line tables stop at the totals block, so read its printed
+    # "label  amount" lines only when no table supplied that total.
+    for field, labels in (("net", "net amount|net total"), ("tax", "vat amount|tax amount|total vat|total tax")):
+        if field in invoice:
+            continue
+        printed = {
+            parsed for match in re.finditer(
+                rf"(?im)^\s*(?:{labels})\s*:?\s+((?:AED\s+)?[0-9][0-9, ]*\.[0-9]{{2}})\s*$", text)
+            if (parsed := _decimal(match.group(1))) is not None
+        }
+        if len(printed) == 1:
+            invoice[field] = next(iter(printed))
     headers = _table_header_values(tables)
     text_headers = _strict_text_headers(text)
     from .layout_extract import _extract_printed_date
