@@ -467,7 +467,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .review-check span { display: grid; }
 .review-check strong { color: #3f4d49; font-size: 11px; }
 .review-check small { color: var(--muted); font-size: 9px; font-weight: 500; }
-.review-buttons { display: flex; justify-content: flex-end; gap: 7px; }
+.review-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 
 .trace-card { overflow: hidden; }
 .trace-card summary { display: flex; justify-content: space-between; align-items: center; padding: 15px 18px; cursor: pointer; list-style: none; }
