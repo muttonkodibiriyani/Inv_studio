@@ -9,6 +9,69 @@ const make = (tag, className, text) => {
   return node;
 };
 
+// Derived from owner sheets by the fine rules; on fine-rules jobs they are shown with evidence, not typed.
+const RULES_DERIVED_FIELDS = new Set(["seller", "site", "buyer", "location", "origin", "market", "taxCode"]);
+
+function rulesJob(job) {
+  return job?.validation?.source === "fine_rules";
+}
+
+function evidenceText(evidence) {
+  return (evidence || []).map((entry) => {
+    const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
+      : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
+        : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
+          : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
+    return `${where}${entry.rule ? ` (${entry.rule})` : ""}`;
+  }).join("; ");
+}
+
+function rulesCell(cell) {
+  const td = make("td");
+  if (!cell || cell.value === null || cell.value === undefined) {
+    td.append(make("span", "rules-flagged", cell?.reason === "No evidence" ? "Empty · no evidence" : "Not found"));
+    return td;
+  }
+  td.append(make("span", "", cell.value), make("small", "", evidenceText(cell.evidence)));
+  return td;
+}
+
+function renderRulesResult(job) {
+  const rules = job.rules;
+  const show = rulesJob(job) && Boolean(rules);
+  $("#rules-fieldset").hidden = !show;
+  if (!show) return;
+  const rate = rules.item_lines || {};
+  const percent = rate.rate === null || rate.rate === undefined ? "—" : `${(Number(rate.rate) * 100).toFixed(1)}%`;
+  const itemRate = $("#rules-item-rate");
+  itemRate.textContent = `Item lines resolved ${rate.resolved ?? 0}/${rate.total ?? 0} (${percent})`
+    + (rate.owner_review ? " — below 95%: this invoice goes to owner review." : "");
+  itemRate.title = rate.definition || "";
+  itemRate.classList.toggle("owner-review", Boolean(rate.owner_review));
+  const list = $("#rules-fields");
+  list.replaceChildren();
+  Object.values(rules.fields || {}).forEach((field) => {
+    const dd = make("dd");
+    if (field.value === null || field.value === undefined) {
+      dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence" : "Not found in owner sheets or on the invoice"));
+    } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
+    list.append(make("dt", "", field.label), dd);
+  });
+  const body = $("#rules-lines");
+  body.replaceChildren();
+  (rules.lines || []).forEach((line) => {
+    const tr = make("tr");
+    tr.append(make("td", "", String(line.line)));
+    ["Item", "UPC", "Unit Cost", "Quantity", "Unit Tax Code"].forEach((name) => tr.append(rulesCell(line.cells?.[name])));
+    body.append(tr);
+  });
+}
+
+function draftValue(job, field, fallback) {
+  if (!rulesJob(job)) return fallback;
+  return job.rules?.fields?.[field]?.value ?? "";
+}
+
 const HEADER_FIELDS = [
   ["number", "Invoice number", "text"],
   ["supplier_name", "Supplier name", "text"],
@@ -338,20 +401,20 @@ function initializeManualDraft(job) {
   const matches = job.validation?.matches || [];
   setDraftField("Header", "Transaction Number", 1);
   setDraftField("Header", "Document", invoice.number);
-  setDraftField("Header", "Supplier Site", invoice.site);
-  setDraftField("Header", "Order No", invoice.po);
-  setDraftField("Header", "Location", invoice.location);
+  setDraftField("Header", "Supplier Site", draftValue(job, "site", invoice.site));
+  setDraftField("Header", "Order No", draftValue(job, "po", invoice.po));
+  setDraftField("Header", "Location", draftValue(job, "location", invoice.location));
   setDraftField("Header", "Location Type", job.validation?.location_type);
-  setDraftField("Header", "Document Date", invoice.date);
-  setDraftField("Header", "Total Cost Ex Tax", invoice.net);
-  setDraftField("Header", "Tax Amount", invoice.tax);
+  setDraftField("Header", "Document Date", draftValue(job, "date", invoice.date));
+  setDraftField("Header", "Total Cost Ex Tax", draftValue(job, "net", invoice.net));
+  setDraftField("Header", "Tax Amount", draftValue(job, "tax", invoice.tax));
   setDraftField("Header", "Ref No. 1", "");
   setDraftField("Header", "Ref No. 2", "");
   setDraftField("Header", "Ref No. 3", "");
   setDraftField("Header", "Comment", "DRAFT UNVALIDATED — manual entry");
   setDraftField("Tax_Breakdown", "Transaction Number", 1);
-  setDraftField("Tax_Breakdown", "Tax Code", invoice.taxCode);
-  setDraftField("Tax_Breakdown", "Tax Basis", invoice.net);
+  setDraftField("Tax_Breakdown", "Tax Code", draftValue(job, "taxCode", invoice.taxCode));
+  setDraftField("Tax_Breakdown", "Tax Basis", draftValue(job, "net", invoice.net));
   $("#manual-draft-lines").replaceChildren();
   (invoice.lines?.length ? invoice.lines : [{}]).forEach((line, index) => addManualDraftLine({
     "Transaction Number": 1,
@@ -359,7 +422,7 @@ function initializeManualDraft(job) {
     UPC: matches[index]?.gtin || line.gtin || "",
     "Unit Cost": line.price ?? "",
     Quantity: line.qty ?? "",
-    "Unit Tax Code": invoice.taxCode || "",
+    "Unit Tax Code": draftValue(job, "taxCode", invoice.taxCode) || "",
     _description: line.description || "",
   }));
   $("#manual-draft-acknowledge").checked = false;
@@ -889,6 +952,7 @@ function renderInvoiceForm(job) {
   const fields = $("#header-fields");
   fields.replaceChildren();
   HEADER_FIELDS.forEach(([name, label, type, options = {}]) => {
+    if (rulesJob(job) && RULES_DERIVED_FIELDS.has(name)) return;
     const wrapper = make("label", "field-wrap");
     wrapper.append(make("span", "", label));
     const input = make("input");
@@ -916,6 +980,7 @@ function renderInvoiceForm(job) {
   (invoice.lines || []).forEach((line) => addLine(line, ["queued", "processing", "exported"].includes(job.status)));
   $("#no-lines").hidden = Boolean(invoice.lines?.length);
   $("#add-line").disabled = ["queued", "processing", "exported"].includes(job.status);
+  renderRulesResult(job);
   const raw = Number(job.completeness);
   const percent = Number.isFinite(raw) ? Math.round(Math.max(0, Math.min(1, raw)) * 100) : null;
   $("#completeness strong").textContent = percent === null ? "—" : `${percent}%`;
@@ -1019,7 +1084,7 @@ function renderValidation(job) {
     return;
   }
   summary.hidden = false;
-  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW") ? " error" : ""}`;
+  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
   const details = make("details", "validation-details");
   const heading = make("summary");
   heading.append(make("strong", "", `${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve`), make("span", "", "Show all"));
@@ -1027,7 +1092,10 @@ function renderValidation(job) {
   issues.forEach((issue) => {
     const line = issue.line ? `Line ${issue.line}: ` : "";
     const owner = issue.owner ? ` · ${issue.owner}` : "";
-    list.append(make("li", "", `${line}${issue.message}${owner}`));
+    // Fine-rules issues carry the owner's Failure Status name; non-blocking ones are warnings.
+    const status = rulesJob(job) && issue.code !== "REVIEW" ? `${issue.code}: ` : "";
+    const warning = issue.blocking === false ? " (warning)" : "";
+    list.append(make("li", "", `${line}${status}${issue.message}${owner}${warning}`));
   });
   details.append(heading, list);
   summary.append(details);
@@ -1082,7 +1150,9 @@ function renderTrace(job) {
 
   const provenance = $("#provenance-list");
   provenance.replaceChildren();
-  const entries = Array.isArray(job.provenance) ? job.provenance : Object.entries(job.provenance || {}).map(([field, source]) => ({ field, source }));
+  const entries = rulesJob(job) && job.rules
+    ? Object.entries(job.rules.fields || {}).filter(([, f]) => f.value !== null && f.value !== undefined).map(([field, f]) => ({ field, source: evidenceText(f.evidence), value: f.value }))
+    : Array.isArray(job.provenance) ? job.provenance : Object.entries(job.provenance || {}).map(([field, source]) => ({ field, source }));
   if (!entries.length) {
     provenance.append(make("dt", "", "None"), make("dd", "", "No reference-derived fields recorded."));
   } else entries.forEach((entry) => {

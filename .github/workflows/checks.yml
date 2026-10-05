@@ -42,7 +42,7 @@ jobs:
       - run: npm ci && npx playwright install --with-deps chromium
       - name: Run local application and browser checks
         run: |
-          INV_STUDIO_DATA="$RUNNER_TEMP/inv-studio-test" .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8765 --no-access-log > "$RUNNER_TEMP/inv-studio-server.log" 2>&1 &
+          INV_STUDIO_DEMO_REFERENCES=1 INV_STUDIO_DATA="$RUNNER_TEMP/inv-studio-test" .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8765 --no-access-log > "$RUNNER_TEMP/inv-studio-server.log" 2>&1 &
           for attempt in $(seq 1 30); do
             curl --fail --silent http://127.0.0.1:8765/health && break
             sleep 1

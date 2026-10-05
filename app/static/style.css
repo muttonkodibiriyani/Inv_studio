@@ -493,6 +493,13 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .trace-content h3 { margin: 15px 0 8px; font-size: 11px; }
 .trace-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 10px; }
 .trace-list li + li { margin-top: 5px; }
+.rules-fieldset .rules-fields { display: grid; grid-template-columns: minmax(110px, auto) 1fr; gap: 6px 10px; margin: 0 0 10px; font-size: 11px; }
+.rules-fields dt { font-weight: 700; }
+.rules-fields dd { margin: 0; overflow-wrap: anywhere; }
+.rules-fields dd small, .rules-lines small { display: block; color: var(--muted); font-size: 10px; }
+.rules-flagged { color: var(--danger); font-weight: 700; }
+.rules-item-rate { margin: 0 0 8px; font-size: 11px; }
+.rules-item-rate.owner-review { padding: 6px 9px; color: var(--danger); background: var(--danger-bg); border-radius: 7px; font-weight: 700; }
 .provenance-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin: 0; font-size: 10px; }
 .provenance-list dt { font-weight: 700; }
 .provenance-list dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; }

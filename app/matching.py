@@ -102,3 +102,143 @@ def validate(i: Invoice, refs, policy: Policy, ledger=(), reviewed=False):
     elif i.tax is None or abs(rounded(net*D(taxes[0]["rate"]))-i.tax)>policy.total_tolerance: fail("TAX_TOTAL","Tax differs from the configured rule","Tax reviewer")
     if not reviewed: fail("REVIEW","Compare values and derived references with the document, then confirm review")
     return {"ready":not issues,"issues":issues,"matches":matches,"net":str(rounded(net)),"reference_version":refs.get("version"),"location_type":p.get("location_type") if p else None}
+
+
+# --------------------------------------------------------------------------- fine-rules result view
+# Production review fields, banner and download read ONE fine_rules.run_invoice
+# result through rules_view. A value is shown only with its evidence: an owner
+# sheet row, an owner mapping-table key, or the text printed on the invoice.
+# Anything else stays empty and is flagged; nothing is inferred or defaulted.
+
+ITEM_THRESHOLD=Decimal("0.95")
+# (review field, label, result header name). Seller entity, Buyer code and Origin are not in the
+# owner's target Header and no owner sheet holds them, so they are not shown (owner form extra_fields).
+RULES_FIELDS=(("number","Invoice number","Document"),("site","Supplier site","Supplier Site"),
+    ("po","Purchase order","Order No"),("location","Delivery location","Location"),
+    ("location_type","Location type","Location Type"),("date","Invoice date","Document Date"),
+    ("currency","Currency","Currency"),("market","Market","Market"),("taxCode","Tax code","Tax Code"),
+    ("net","Net total","Net Amount"),("tax","Tax total","Tax Amount"))
+LINE_FIELDS=("Item","UPC","Unit Cost","Quantity","Unit Tax Code")
+_SHEET_ROW=re.compile(r"[^!,|]+!\d+")
+
+
+def _blank(value):return value is None or str(value).strip()==""
+
+
+def _evidence(entry):
+    reference=str(entry.get("reference") or "")
+    source=str(entry.get("source") or "")
+    if _SHEET_ROW.match(reference):kind="sheet"
+    elif "|" in reference:kind="table"
+    elif source.startswith("Invoice"):kind="printed"
+    else:kind="rule"
+    return {"kind":kind,"source":source,"reference":reference,"original":str(entry.get("original") or ""),
+            "rule":str(entry.get("rule") or ""),"confidence":str(entry.get("confidence") or "")}
+
+
+def _amount_forms(value):
+    try:d=Decimal(str(value))
+    except Exception:return set()
+    forms={str(d),f"{d:,}",f"{d:.2f}",f"{d:,.2f}"}
+    return {f for f in forms if f and f not in ("0","0.00")} or {"0.00"}
+
+
+def printed_evidence(value,text="",boxes=()):
+    """Locate a printed amount on the document; return its evidence or None."""
+    if _blank(value):return None
+    forms=_amount_forms(value)
+    pattern=lambda f:re.compile(r"(?<![\d.,])"+re.escape(f)+r"(?![\d]|[.,]\d)")
+    for box in boxes or ():
+        t=str(box.get("text") or "")
+        if any(pattern(f).search(t) for f in forms):
+            where=f"page {box.get('page',1)}"+(f" box {list(box['box'])}" if isinstance(box.get("box"),(list,tuple)) else "")
+            return {"kind":"printed","source":"Printed on invoice","reference":where,"original":t[:120],"rule":"","confidence":"Exact"}
+    for n,page in enumerate(str(text or "").split("\f"),1):
+        for f in forms:
+            m=pattern(f).search(page)
+            if m:return {"kind":"printed","source":"Printed on invoice","reference":f"page {n} text","original":page[max(0,m.start()-40):m.end()+10].strip()[:120],"rule":"","confidence":"Exact"}
+    return None
+
+
+def rules_view(result,text="",boxes=()):
+    """Turn one run_invoice result into evidence-checked review fields, lines and banner issues."""
+    header=result.get("header") or {}; lineage=result.get("lineage") or []
+    found=defaultdict(list)
+    for x in lineage:found[(x.get("target"),x.get("line") or None)].append(_evidence(x))
+    lines=result.get("lines") or []
+    flags=[]
+    def field(name,value,evidence,label,line=None):
+        if _blank(value):
+            flags.append((label,line,"not found in the owner's sheets or printed on the invoice"))
+            return {"value":None,"evidence":[],"flagged":True,"reason":"Not found"}
+        if not evidence:
+            flags.append((label,line,"has no evidence and is left empty"))
+            return {"value":None,"evidence":[],"flagged":True,"reason":"No evidence"}
+        return {"value":str(value),"evidence":evidence,"flagged":False,"reason":""}
+    out_lines=[]
+    for n,row in enumerate(lines,1):
+        cells={}
+        for c in LINE_FIELDS:
+            cells[c]=field(c,row.get(c),found.get((c,n),[]),c,n)
+        out_lines.append({"line":n,"cells":cells,"status":row.get("Validation Status") or "","source_row":row.get("Source Row") or "",
+                          "match_method":row.get("Match Method") or ""})
+    fields={}
+    for key_,label,name in RULES_FIELDS:
+        if name=="Tax Code":
+            # One code per invoice: the lines' Unit Tax Code, with the lines' own evidence.
+            codes={l["cells"]["Unit Tax Code"]["value"] for l in out_lines}
+            value=next(iter(codes)) if len(codes)==1 else None
+            evidence=[e for l in out_lines[:1] for e in l["cells"]["Unit Tax Code"]["evidence"]]
+        else:
+            value=header.get(name);evidence=found.get((name,None),[])
+            if not evidence and name in ("Net Amount","Tax Amount"):
+                located=printed_evidence(value,text,boxes);evidence=[located] if located else []
+        fields[key_]={"label":label,"target":name,**field(key_,value,evidence,label)}
+    check=result.get("item_resolution") or result.get("item_line_check")
+    if isinstance(check,dict) and check.get("total") is not None:
+        resolved,total=int(check.get("resolved") or 0),int(check.get("total") or 0)
+        definition=str(check.get("definition") or "")
+    else:
+        resolved=sum(1 for l in out_lines if l["cells"]["Item"]["value"]);total=len(out_lines)
+        definition="Lines whose Item has an owner Item Master row"
+    rate=(Decimal(resolved)/Decimal(total)) if total else None
+    below=bool(check.get("below")) if isinstance(check,dict) and "below" in check else (rate is None or rate<ITEM_THRESHOLD)
+    issues=[]
+    for e in result.get("exceptions") or []:
+        issues.append({"code":str(e.get("Exception Type") or "Exception"),"message":str(e.get("Description") or ""),
+                       "owner":str(e.get("Owner") or ""),"line":e.get("Line No.") or None,"rule":str(e.get("Rule ID") or ""),
+                       "evidence":str(e.get("Candidates / Evidence") or ""),"blocking":bool(e.get("blocking",True))})
+    if below:
+        issues.append({"code":"Owner Review","message":f"Item lines resolved {resolved}/{total}: below 95%, owner review required",
+                       "owner":"Owner","line":None,"rule":"ITEM-95","evidence":"","blocking":True})
+    target_blank={"Document","Supplier Site","Order No","Location","Location Type","Document Date","Net Amount","Tax Amount","Tax Code"}
+    for label,line,why in flags:
+        name=next((n for _,lab,n in RULES_FIELDS if lab==label),label)
+        blocking=(line is not None and label!="UPC") or name in target_blank
+        issues.append({"code":"Missing Evidence","message":f"{label} {why}","owner":"Accounts payable","line":line,
+                       "rule":"EVIDENCE","evidence":"","blocking":blocking})
+    return {"status":result.get("status") or "Review","fields":fields,"lines":out_lines,"issues":issues,
+            "item_lines":{"resolved":resolved,"total":total,"rate":str(rate.quantize(Decimal("0.0001"))) if rate is not None else None,
+                          "threshold":str(ITEM_THRESHOLD),"owner_review":below,"definition":definition},
+            "config_version":result.get("config_version")}
+
+
+def rules_key(view):
+    f=view["fields"]
+    return "|".join(["rules",f["site"]["value"] or "",(f["number"]["value"] or "").strip().upper()])
+
+
+def rules_validation(view,ledger=(),reviewed=False):
+    """Banner and readiness from the rules view only."""
+    if not view:
+        return {"ready":False,"issues":[{"code":"Rules Pending","message":"The fine rules have not run on this revision yet","owner":"","line":None,"blocking":True}],
+                "matches":[],"source":"fine_rules"}
+    issues=list(view["issues"])
+    if view["fields"]["number"]["value"] and any(x.get("invoice_key")==rules_key(view) for x in ledger):
+        issues.append({"code":"Duplicate","message":"Invoice already exported for this supplier site","owner":"Accounts payable","line":None,"blocking":True})
+    if not reviewed:
+        issues.append({"code":"REVIEW","message":"Compare values and evidence with the document, then confirm review","owner":"","line":None,"blocking":True})
+    ready=view["status"]=="Approved" and not any(i["blocking"] for i in issues)
+    matches=[{"line":l["line"],"item":l["cells"]["Item"]["value"] or "","gtin":l["cells"]["UPC"]["value"] or ""} for l in view["lines"]]
+    return {"ready":ready,"issues":issues,"matches":matches,"source":"fine_rules","status":view["status"],
+            "item_lines":view["item_lines"],"location_type":view["fields"]["location_type"]["value"]}

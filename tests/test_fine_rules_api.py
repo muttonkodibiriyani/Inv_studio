@@ -88,7 +88,8 @@ def test_fine_rules_api_config_run_exports_and_feedback(tmp_path, monkeypatch):
     imported(tmp_path, monkeypatch)
     app = create_app(tmp_path / "data")
     app.state.store.job("job-1", {"id": "job-1", "status": "review", "reviewed": False, "revision": 1,
-                                  "filename": "synthetic.pdf", "invoice": INVOICE.model_dump(mode="json")})
+                                  "filename": "synthetic.pdf", "invoice": INVOICE.model_dump(mode="json"),
+                                  "text": "Net total 70.00\nTax 0.00"})
     headers = {"x-studio-request": "1"}
     with TestClient(app) as client:
         bad = client.post("/api/fine-rules/config", json={"qty_tolerance": "-1"}, headers=headers)
@@ -102,7 +103,7 @@ def test_fine_rules_api_config_run_exports_and_feedback(tmp_path, monkeypatch):
         assert "07_Match_Workbench" in load_workbook(io.BytesIO(review.content)).sheetnames
         target = client.post("/api/fine-rules/target.xlsx", json={"job_ids": ["job-1"]}, headers=headers)
         assert target.status_code == 200
-        assert load_workbook(io.BytesIO(target.content))["Details"]["B2"].value == "345000001"
+        assert load_workbook(io.BytesIO(target.content))["Details"]["B2"].value == 345000001
         proposed = client.post("/api/fine-rules/feedback", headers=headers, json={
             "invoice_line": "INV-API/1", "correction": "345000002", "evidence": "label photo"}).json()
         assert proposed["Decision"] == "Proposed"

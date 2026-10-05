@@ -1,6 +1,7 @@
 import io
 import re
 from datetime import date
+from decimal import Decimal
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
@@ -53,3 +54,59 @@ def batch_workbook(entries):
             s.cell(n,3).number_format="@"
             for c in (4,5):s.cell(n,c).number_format="0.0000"
     b=io.BytesIO();w.save(b);return b.getvalue()
+
+
+UPC_MODES=("barcode","empty")
+_NUMBER_ID=re.compile(r"[1-9]\d{0,14}")
+
+
+def _id_cell(cell,value):
+    # Owner examples hold Supplier Site, Order No, Location and Item as numbers.
+    if _NUMBER_ID.fullmatch(str(value)):cell.value=int(value)
+    else:text_cell(cell,value)
+
+
+def rules_workbook(views,upc="barcode"):
+    """Target template (Header / Tax_Breakdown / Details) from fine-rules views only.
+
+    Every written cell comes from a view value that carries evidence; the
+    returned map records that evidence per transaction and cell. Ref No./Comment stay truly empty.
+    """
+    if upc not in UPC_MODES:raise ValueError("UPC mode must be barcode or empty")
+    if not views or any(v["status"]!="Approved" for v in views):
+        raise ValueError("Only invoices the fine rules approved can be exported")
+    w=Workbook();w.remove(w.active);cells={}
+    for name,cols in HEADERS.items():
+        s=w.create_sheet(name);s.append(cols);s.freeze_panes="A2"
+        for c in s[1]:c.font=Font(bold=True,color="FFFFFF");c.fill=PatternFill("solid",fgColor="173D3B")
+        for col in s.columns:s.column_dimensions[col[0].column_letter].width=max(18,len(str(col[0].value))+2)
+    dv=DataValidation(type="list",formula1='"Store (S),Warehouse (W)"');w["Header"].add_data_validation(dv)
+    def need(f,where):
+        if f["flagged"] or f["value"] is None or not f["evidence"]:raise ValueError(f"{where} has no evidenced value")
+        return f["value"]
+    for transaction,v in enumerate(views,1):
+        f=v["fields"];s=w["Header"];row=transaction+1
+        ev=cells.setdefault(transaction,{})
+        put=lambda sheet,r,c,field:ev.__setitem__(f"{sheet}!{w[sheet].cell(r,c).coordinate}",field["evidence"])
+        s.cell(row,1,transaction)
+        text_cell(s.cell(row,2),need(f["number"],"Document"));put("Header",row,2,f["number"])
+        for c,k in ((3,"site"),(4,"po"),(5,"location")):
+            _id_cell(s.cell(row,c),need(f[k],f[k]["label"]));put("Header",row,c,f[k])
+        loc_type=need(f["location_type"],"Location Type")
+        if loc_type not in ("Store (S)","Warehouse (W)"):raise ValueError("Location Type must be Store (S) or Warehouse (W)")
+        text_cell(s.cell(row,6),loc_type);dv.add(s.cell(row,6));put("Header",row,6,f["location_type"])
+        s.cell(row,7,date.fromisoformat(need(f["date"],"Document Date"))).number_format="m/d/yyyy";put("Header",row,7,f["date"])
+        net=Decimal(need(f["net"],"Net total"));tax=Decimal(need(f["tax"],"Tax total"))
+        s.cell(row,8,net);put("Header",row,8,f["net"]);s.cell(row,9,tax);put("Header",row,9,f["tax"])
+        t=w["Tax_Breakdown"];t.cell(row,1,transaction);text_cell(t.cell(row,2),need(f["taxCode"],"Tax code"))
+        t.cell(row,3,net);put("Tax_Breakdown",row,2,f["taxCode"]);put("Tax_Breakdown",row,3,f["net"])
+        d=w["Details"]
+        for line in v["lines"]:
+            c=line["cells"];n=d.max_row+1;d.cell(n,1,transaction)
+            _id_cell(d.cell(n,2),need(c["Item"],f"Line {line['line']} Item"));put("Details",n,2,c["Item"])
+            if upc=="barcode" and c["UPC"]["value"]:
+                text_cell(d.cell(n,3),c["UPC"]["value"]);d.cell(n,3).number_format="@";put("Details",n,3,c["UPC"])
+            for col,k in ((4,"Unit Cost"),(5,"Quantity")):
+                d.cell(n,col,Decimal(need(c[k],f"Line {line['line']} {k}")));put("Details",n,col,c[k])
+            text_cell(d.cell(n,6),need(c["Unit Tax Code"],f"Line {line['line']} Unit Tax Code"));put("Details",n,6,c["Unit Tax Code"])
+    b=io.BytesIO();w.save(b);return b.getvalue(),cells
