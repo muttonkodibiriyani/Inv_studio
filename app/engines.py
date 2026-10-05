@@ -204,12 +204,20 @@ def _reader_map(invoice,source):
             [{f:source for f in READER_LINE_FIELDS if line.get(f) not in (None,"")} for line in invoice.get("lines") or []])
 
 
+def _lines_reconcile(lines,net):
+    """Every line has a net amount and they sum to the invoice net within 0.01."""
+    try:
+        amounts=[Decimal(str(line.get("net_amount"))) for line in lines if line.get("net_amount") not in (None,"")]
+        return net not in (None,"") and len(amounts)==len(lines) and abs(sum(amounts,Decimal(0))-Decimal(str(net)))<=Decimal("0.01")
+    except (InvalidOperation,ValueError):return False
+
+
 def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
     """Fill the engines' empty fields from the AI read and flag every disagreement; never overwrite a value.
 
     ``engine`` and ``ai`` are invoice dicts. Lines merge pairwise when both reads have the same count and the
     pair aligns; in ``fallback`` (the engines' lines failed the basic checks) the AI's lines stand in when the
-    counts differ. Returns (invoice, evidence, header readers, line readers, notes).
+    counts differ and the AI's lines sum to the net; otherwise the local lines are kept. Returns (invoice, evidence, header readers, line readers, notes).
     """
     merged=dict(engine)
     evidence={"header":dict((engine_evidence or {}).get("header") or {}),"lines":[dict(x) for x in ((engine_evidence or {}).get("lines") or [])]}
@@ -225,13 +233,15 @@ def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
             evidence["header"][field]=_disagreement(evidence["header"].get(field),source,theirs,ai_header.get(field))
     engine_lines=list(engine.get("lines") or []);ai_lines=list(ai.get("lines") or [])
     while len(evidence["lines"])<len(engine_lines):evidence["lines"].append({})
-    if ai_lines and (not engine_lines or (mode=="fallback" and len(ai_lines)!=len(engine_lines))):
+    stand_in=mode=="fallback" and len(ai_lines)!=len(engine_lines) and _lines_reconcile(ai_lines,merged.get("net"))
+    if ai_lines and (not engine_lines or stand_in):
         merged["lines"]=ai_lines;evidence["lines"]=[dict(x) for x in ai_lines_ev]
         line_readers=_reader_map(ai,"ai")[1]
         notes.append(f"The AI read {len(ai_lines)} lines where the local readers read {len(engine_lines)}"
                      +("; the local lines failed the basic checks, so the AI lines are shown" if engine_lines else ""))
     elif ai_lines and len(ai_lines)!=len(engine_lines):
-        notes.append(f"The AI read {len(ai_lines)} lines where the local readers read {len(engine_lines)}; the local lines are kept")
+        notes.append(f"The AI read {len(ai_lines)} lines where the local readers read {len(engine_lines)}; the local lines are kept"
+                     +("; the AI lines do not sum to the net either" if mode=="fallback" else ""))
     elif ai_lines:
         merged["lines"]=[]
         for n,(mine_line,their_line) in enumerate(zip(engine_lines,ai_lines)):

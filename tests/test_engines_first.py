@@ -118,3 +118,15 @@ def test_a_429_after_the_bounded_retry_keeps_the_engine_result(monkeypatch, tmp_
                                          "need": "gap_fill"}
     assert result["trace"][-1]["status"] == "failed" and result["trace"][-1]["role"] == "gap_fill"
     assert "currency" in result["readers"]["gaps"]
+
+
+def test_fallback_lines_stand_in_only_when_the_ai_lines_sum_to_the_net():
+    engine = {"number": "N-1", "net": "30.00", "lines": [{"sku": "A", "qty": "1", "price": "10.00", "net_amount": "10.00"}]}
+    reconciled = [{"sku": s, "qty": "1", "price": "10.00", "net_amount": "10.00"} for s in ("A", "B", "C")]
+    merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"lines": reconciled}, {}, {}, "ocr", "fallback")
+    assert merged["lines"] == reconciled and lines[2]["sku"] == "ai"
+    # A gap the AI cannot close either (e.g. a printed document discount) keeps the evidenced local lines.
+    unreconciled = reconciled[:2]
+    merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"lines": unreconciled}, {}, {}, "native", "fallback")
+    assert merged["lines"] == engine["lines"] and lines == [{f: "native" for f in engine["lines"][0]}]
+    assert notes[0].endswith("the local lines are kept; the AI lines do not sum to the net either")
