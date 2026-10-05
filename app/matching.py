@@ -128,7 +128,9 @@ def _blank(value):return value is None or str(value).strip()==""
 def _evidence(entry):
     reference=str(entry.get("reference") or "")
     source=str(entry.get("source") or "")
-    if _SHEET_ROW.match(reference):kind="sheet"
+    if entry.get("evidence_kind")=="owner_rule":kind="owner_rule"
+    elif entry.get("evidence_kind")=="printed":kind="printed"
+    elif _SHEET_ROW.match(reference):kind="sheet"
     elif "|" in reference:kind="table"
     elif source.startswith("Invoice"):kind="printed"
     else:kind="rule"
@@ -209,6 +211,10 @@ def rules_view(result,text="",boxes=(),printed=None):
             if not evidence and name in ("Net Amount","Tax Amount"):
                 located=printed_evidence(value,text,boxes);evidence=[located] if located else []
         fields[key_]={"label":label,"target":name,**field(key_,value,evidence,label)}
+    # Shown on review only (not a target column); unconfigured means blank, which is not an invoice problem.
+    if not _blank(header.get("Buyer Name")):
+        fields["buyer_name"]={"label":"Buyer name","target":"Buyer Name",
+                              **field("buyer_name",header["Buyer Name"],found.get(("Buyer Name",None),[]),"Buyer name")}
     check=result.get("item_resolution") or result.get("item_line_check")
     if isinstance(check,dict) and check.get("total") is not None:
         resolved,total=int(check.get("resolved") or 0),int(check.get("total") or 0)

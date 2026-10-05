@@ -20,6 +20,7 @@ function evidenceText(evidence) {
   return (evidence || []).map((entry) => {
     const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
       : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
+        : entry.kind === "owner_rule" ? `owner rule · ${entry.reference}`
         : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
           : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
     return `${where}${entry.rule ? ` (${entry.rule})` : ""}`;

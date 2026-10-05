@@ -244,3 +244,19 @@ def test_extraction_evidence_backs_printed_fields_and_disagreement_is_a_warning(
     assert len(warn)==1 and warn[0]["blocking"] is False and "SYN-1" not in warn[0]["message"]
     # Without extraction evidence the same value stays empty and flagged.
     assert rules_view(result)["fields"]["number"]["value"] is None
+
+
+def test_owner_rule_and_printed_evidence_kinds_and_buyer_name():
+    result={"status":"Approved","header":{"Document":"SYN-2","Buyer Name":"Synthetic Buyer"},"lines":[],"exceptions":[],
+            "lineage":[{"target":"Buyer Name","line":None,"original":"","value":"Synthetic Buyer","rule":"BUYER-NAME",
+                        "source":"Owner rule","reference":"owner rule BUYER-NAME (2026-10-05)","confidence":"Owner rule",
+                        "evidence_kind":"owner_rule"},
+                       {"target":"Document","line":None,"original":"Invoice SYN-2","value":"SYN-2","rule":"",
+                        "source":"Invoice","reference":"page 1","confidence":"Exact","evidence_kind":"printed"}]}
+    view=rules_view(result)
+    buyer=view["fields"]["buyer_name"]
+    assert buyer["value"]=="Synthetic Buyer" and not buyer["flagged"] and buyer["evidence"][0]["kind"]=="owner_rule"
+    assert view["fields"]["number"]["evidence"][0]["kind"]=="printed"
+    assert not any("Buyer" in i["message"] for i in view["issues"])
+    result["header"]["Buyer Name"]=""
+    assert "buyer_name" not in rules_view(result)["fields"]
