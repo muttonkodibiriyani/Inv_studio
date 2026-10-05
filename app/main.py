@@ -595,7 +595,9 @@ def create_app(data_dir=None):
     @app.post("/api/connections/{provider}")
     def connect(provider:str,body:Connection):
         if provider not in ("openai","anthropic"):raise ValueError("Use API keys only for OpenAI or Anthropic API connections")
-        store.secret(provider,body.api_key.get_secret_value().strip());return {"connected":True}
+        key=body.api_key.get_secret_value().strip()
+        verified=providers.verify_key(provider,key)
+        store.secret(provider,key);return {"connected":True,"verified":verified}
 
     @app.post("/api/subscriptions/claude/import")
     def import_claude_subscription(body:SubscriptionToken):

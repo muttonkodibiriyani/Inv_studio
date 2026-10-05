@@ -32,6 +32,17 @@ class Providers:
         if provider=="openai":return {"Authorization":"Bearer "+key}
         return {"x-api-key":key,"anthropic-version":"2023-06-01"}
 
+    def verify_key(self,provider,key):
+        """Refuse a key the provider rejects; network or quota failures stay unverified, not fatal."""
+        url="https://api.anthropic.com/v1/models" if provider=="anthropic" else "https://api.openai.com/v1/models"
+        headers={"Authorization":"Bearer "+key} if provider=="openai" else {"x-api-key":key,"anthropic-version":"2023-06-01"}
+        try:
+            with httpx.Client(timeout=15) as http:r=http.get(url,headers=headers)
+        except httpx.HTTPError:return False
+        if r.status_code in (401,403):
+            raise ValueError("The provider rejected this API key. Check that it is active and copied in full; it was not saved.")
+        return r.status_code==200
+
     def models(self,provider):
         if provider=="claude_local":
             return [{"id":k,"name":k} for k in ("sonnet","opus","haiku")]

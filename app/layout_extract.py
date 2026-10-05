@@ -330,7 +330,9 @@ def _unique_identifier(
             match = pattern.search(line)
             if match:
                 value = match.group(1).strip().rstrip(".,:;")
-                if _SAFE_IDENTIFIER.fullmatch(value):
+                # A label followed by the next label ("Invoice No.  Tax Invoice
+                # Date") is not a value; printed identifiers carry a digit.
+                if _SAFE_IDENTIFIER.fullmatch(value) and any(char.isdigit() for char in value):
                     values.append(value)
                 break
     return _only_distinct(values)
