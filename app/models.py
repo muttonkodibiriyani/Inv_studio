@@ -30,6 +30,7 @@ class Invoice(StrictModel):
     buyer: str | None = None
     po: str | None = None
     location: str | None = None
+    date_printed: str | None = Field(default=None, max_length=40)
     date: str | None = None
     currency: str | None = None
     origin: str | None = None
@@ -48,6 +49,7 @@ class Policy(StrictModel):
 
 class ProcessingOptions(StrictModel):
     engine: Literal["auto", "invoice2data", "paddleocr", "docling", "ai"] = "auto"
+    prefer_native_text: bool = True
     ai_fallback: bool = True
     provider: Literal["openai", "anthropic", "chatgpt", "claude_local", "vertex"] = "openai"
     model: str = Field(default="", max_length=150, pattern=r"^[A-Za-z0-9._:/-]*$")

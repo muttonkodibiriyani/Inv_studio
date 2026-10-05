@@ -120,7 +120,7 @@ def template_extract(text, templates):
     result=extract_data("ocr-text", templates=templates, input_module=TextReader, ai_fallback=False)
     if not result: return None
     fields={"invoice_number":"number","amount":"net"}
-    allowed={"number","supplier_name","buyer_name","seller","site","buyer","po","location","date","currency","origin","market","taxCode","net","tax","lines"}
+    allowed={"number","supplier_name","buyer_name","seller","site","buyer","po","location","date_printed","date","currency","origin","market","taxCode","net","tax","lines"}
     out={fields.get(k,k):v for k,v in result.items() if fields.get(k,k) in allowed}
     if isinstance(out.get("date"),(date,datetime)):out["date"]=out["date"].strftime("%Y-%m-%d")
     from .models import Line
@@ -145,7 +145,7 @@ def structured_extract(text, boxes, templates, tables=None):
             # same reader's text/geometry. Never borrow a different engine's rows.
             from .layout_extract import extract_invoice
             header=extract_invoice(text,boxes) or {}
-            fields=("number","po","date","currency","net","tax","supplier_name","buyer_name")
+            fields=("number","po","date_printed","date","currency","net","tax","supplier_name","buyer_name")
             compatible=all(candidate.get(key) in (None,"") or header.get(key) in (None,"")
                            or str(candidate[key])==str(header[key]) for key in ("number","po"))
             if compatible:

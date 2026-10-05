@@ -163,8 +163,15 @@ def _normalized(value: Any) -> str:
 
 
 def _role(header: Any) -> str | None:
+    exact = _exact_header_role(header)
+    if exact is not None:
+        return exact
     value = _normalized(header)
     packed = value.replace(" ", "")
+    if packed in {"sn", "sno"}:
+        return "serial"
+    if packed in {"barcodepart", "barcodepartnumber", "partcode"}:
+        return "part_code"
     checks = (
         ("serial", ("serialnumber", "serialno", "srno", "sr")),
         ("gtin", ("barcode", "gtin", "ean", "upc")),
@@ -189,8 +196,13 @@ def _role(header: Any) -> str | None:
 
 def _exact_header_role(header: Any) -> str | None:
     packed = _normalized(header).replace(" ", "")
+    if re.fullmatch(r"\s*(?:vat|tax)\s*\d+(?:\.\d+)?\s*%\s*", str(header), re.I):
+        return "tax_amount"
+    if re.fullmatch(r"\s*amount\s+(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s*", str(header), re.I):
+        return "other_amount"
     aliases = {
-        "serial": {"sr", "srno", "serialno", "serialnumber"},
+        "serial": {"sn", "sno", "sr", "srno", "serialno", "serialnumber"},
+        "part_code": {"barcodepart", "barcodepartnumber"},
         "gtin": {"barcode", "gtin", "ean", "upc"},
         "description": {
             "description", "productdescription", "itemdescription", "productname",
@@ -212,6 +224,9 @@ def _exact_header_role(header: Any) -> str | None:
 
 
 def _rows_from_words(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    # Some OCR readers return measured whitespace tokens as well as words.
+    # They are not columns and must not widen compound header spans.
+    words = [word for word in words if str(word.get("text", "")).strip()]
     if not words:
         return []
     typical = median(max(1.0, float(word["box"][3]) - float(word["box"][1])) for word in words)
@@ -250,97 +265,194 @@ def _header_roles(row: list[dict[str, Any]]) -> list[tuple[str, float, float]]:
                     min(float(cell["box"][0]) for cell in cells),
                     max(float(cell["box"][2]) for cell in cells),
                 )
+    spans = [(role, value[1], value[2]) for role, value in found.items()]
+    # A compound heading such as Barcode / Part Number owns its whole span;
+    # the word Barcode within it is not a second physical column.
+    spans = [item for item in spans if not any(
+        other[0] != item[0] and other[1] <= item[1] and other[2] >= item[2]
+        and other[2] - other[1] > item[2] - item[1]
+        for other in spans
+    )]
     return sorted(
-        ((role, value[1], value[2]) for role, value in found.items()),
+        spans,
         key=lambda value: value[1],
     )
 
 
-def _tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Recover missed borderless tables from real Docling word cells.
+def _column_bounds(roles: list[tuple[str, float, float]]) -> list[float]:
+    boundaries = []
+    for left, right in zip(roles, roles[1:]):
+        gap = max(0.0, right[1] - left[2])
+        if left[0] == "description":
+            # A left-aligned description heading does not mark the end of its
+            # wide column. Keep sizes/numbers beside the description, up to
+            # the start of the next printed heading, not the gap midpoint.
+            boundary = right[1] - min(3.0, gap * 0.08)
+        elif left[0] == "sku":
+            boundary = left[2] + min(gap / 2, max(4.0, (left[2] - left[1]) * 0.15))
+        else:
+            boundary = left[2] + gap / 2
+        boundaries.append(boundary)
+    return [float("-inf"), *boundaries, float("inf")]
 
-    Every value is assigned by its measured x coordinate beneath an explicit
-    semantic header. No block is split and no coordinate is synthesized.
+
+def _mapped_row(row, roles, bounds, expected_serial=None):
+    values = []
+    for column in range(len(roles)):
+        words = [word for word in row if bounds[column] <= (
+            (float(word["box"][0]) + float(word["box"][2])) / 2
+        ) < bounds[column + 1]]
+        values.append(" ".join(str(word["text"]).strip() for word in words).strip() or None)
+    mapped = {role[0]: values[i] for i, role in enumerate(roles)}
+    # OCR sometimes merges the printed serial with the adjacent part code.
+    # Split only its literal expected prefix, with a token measured across
+    # those two columns. Never split a code positioned within its own column.
+    if (expected_serial is not None and len(roles) >= 2
+            and roles[0][0] == "serial" and roles[1][0] in {"part_code", "gtin"}
+            and not mapped.get("serial")):
+        crossing = [w for w in row if roles[0][1] - 3 <= w["box"][0] < bounds[1]
+                    < w["box"][2] <= bounds[2]]
+        if len(crossing) == 1:
+            raw = str(crossing[0]["text"]).strip()
+            prefix = str(expected_serial)
+            rest = raw[len(prefix):] if raw.startswith(prefix) else ""
+            if (mapped.get(roles[1][0]) == raw
+                    and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./_-]{2,79}", rest)):
+                values[0], values[1] = prefix, rest
+                mapped["serial"], mapped[roles[1][0]] = prefix, rest
+                mapped["_repair"] = "split OCR token across serial and part columns; verify identifier"
+    return values, mapped
+
+
+def _measured_invoice_number(rows, size):
+    """Find an explicit header label even when a logo shares its baseline."""
+    candidates = set()
+    for row in rows:
+        if size and min(w["box"][1] for w in row) > size[1] / 3:
+            continue
+        text = " ".join(str(w["text"]) for w in row)
+        label = re.search(r"\b(?:tax\s+)?invoice\s+(?:no\.?|number|#)\s*[:\-]", text, re.I)
+        if not label:
+            continue
+        # Credit notes may also name the original invoice. That is not the
+        # identity of the current document and cannot prove continuation.
+        if re.search(r"\b(?:original|related|reference|previous)\s*$", text[:label.start()], re.I):
+            continue
+        number = _strict_text_headers(text[label.start():]).get("number")
+        if number:
+            candidates.add(number)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
+def _tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Recover tables from measured words and explicit printed column headings.
+
+    Headerless continuation requires the same invoice number, adjacent page,
+    unchanged page size and the next printed serial. No numeric substring of
+    a product name is eligible as a quantity or price.
     """
-    result: list[dict[str, Any]] = []
+    result = []
+    required = {"description", "qty", "price"}
+    carry = None
     for page in sorted({int(box.get("page", 1)) for box in boxes}):
         page_words = [box for box in boxes if int(box.get("page", 1)) == page]
         rows = _rows_from_words(page_words)
+        size = page_words[0].get("size") if page_words else None
+        number = _measured_invoice_number(rows, size)
+        has_header = any(required.issubset({r[0] for r in _header_roles(row)}) for row in rows)
+        inherited = bool(
+            not has_header and carry and carry["page"] == page - 1
+            and number and number == carry["number"] and size == carry["size"]
+            and carry["serial"] is not None
+        )
+        previous = carry
+        carry = None
         index = 0
+        typical = median(max(1.0, w["box"][3] - w["box"][1]) for w in page_words) if page_words else 6.0
         while index < len(rows):
-            roles = _header_roles(rows[index])
-            required = {"description", "qty", "price"}
-            if not required.issubset({role for role, _left, _right in roles}):
+            roles = previous["roles"] if inherited else _header_roles(rows[index])
+            if not required.issubset({r[0] for r in roles}):
                 index += 1
                 continue
-            boundaries = []
-            for left_role, right_role in zip(roles, roles[1:]):
-                gap = max(0.0, right_role[1] - left_role[2])
-                header_width = max(1.0, left_role[2] - left_role[1])
-                if left_role[0] == "sku":
-                    # Product references are compact and left aligned, while
-                    # descriptions can start well before their long heading.
-                    boundary = left_role[2] + min(gap / 2, max(4.0, header_width * 0.15))
-                else:
-                    boundary = left_role[2] + gap / 2
-                boundaries.append(boundary)
-            bounds = [float("-inf"), *boundaries, float("inf")]
-            table_rows: list[list[str | None]] = [[role for role, _left, _right in roles]]
-            header_text = _normalized(" ".join(str(word["text"]) for word in rows[index]))
+            bounds = _column_bounds(roles)
+            table_rows = [[role for role, _left, _right in roles]]
+            header_text = _normalized(" ".join(str(w["text"]) for w in rows[index]))
             unit_match = re.search(r"\bqty\s+in\s+([a-z0-9]{1,10})\b", header_text)
             fixed_values = {"uom": unit_match.group(1).upper()} if unit_match else {}
-            index += 1
+            awaiting_serial = previous["serial"] + 1 if inherited else None
+            header_page = previous["header_page"] if inherited else page
+            inherited = False
+            if awaiting_serial is None:
+                index += 1
+            last_serial = None
+            last_y = None
+            document_total = False
+            row_repairs = {}
             while index < len(rows):
                 row = rows[index]
-                normal = _normalized(" ".join(str(word["text"]) for word in row))
-                if any(label in normal for label in (
-                    "total qty", "total price", "net amount", "total in", "amount in words",
-                )):
+                normal = _normalized(" ".join(str(w["text"]) for w in row))
+                if re.match(r"^(?:total(?: qty| price| in)?|net (?:amount|total)|gross total|discount|amount in words)\b", normal):
+                    document_total = True
                     break
-                if required.issubset({role for role, _left, _right in _header_roles(row)}):
+                if re.match(r"^(?:created by|approved by|printed by|payment information|bank name|iban)\b", normal):
                     break
-                values: list[str | None] = []
-                for column in range(len(roles)):
-                    words = [word for word in row if bounds[column] <= (
-                        (float(word["box"][0]) + float(word["box"][2])) / 2
-                    ) < bounds[column + 1]]
-                    value = " ".join(str(word["text"]).strip() for word in words).strip()
-                    values.append(value or None)
-                mapped = {roles[column][0]: values[column] for column in range(len(roles))}
-                identity = any(
-                    mapped.get(role) for role in ("sku", "gtin", "description")
+                if required.issubset({r[0] for r in _header_roles(row)}):
+                    break
+                expected = awaiting_serial if awaiting_serial is not None else (
+                    last_serial + 1 if last_serial is not None else None
                 )
+                values, mapped = _mapped_row(row, roles, bounds, expected)
+                identity = any(mapped.get(role) for role in ("sku", "gtin", "part_code", "description"))
                 price = _decimal(mapped.get("price"))
-                has_quantity_or_amount = (
-                    _decimal(mapped.get("qty")) is not None
-                    or _decimal(mapped.get("net_amount")) is not None
-                )
-                if identity and price is not None and has_quantity_or_amount:
+                qty = _decimal(mapped.get("qty"))
+                amount = _decimal(mapped.get("net_amount"))
+                serial_text = str(mapped.get("serial") or "").strip()
+                serial = int(serial_text) if re.fullmatch(r"[0-9]{1,6}", serial_text) else None
+                y = median((w["box"][1] + w["box"][3]) / 2 for w in row)
+                if identity and price is not None and (qty is not None or amount is not None):
+                    if awaiting_serial is not None:
+                        if serial != awaiting_serial:
+                            index += 1
+                            continue
+                        awaiting_serial = None
                     table_rows.append(values)
+                    if mapped.get("_repair"):
+                        row_repairs[len(table_rows) - 1] = mapped["_repair"]
+                    last_serial, last_y = serial, y
+                elif (awaiting_serial is None and len(table_rows) > 1
+                      and mapped.get("description") and last_y is not None
+                      and 0 <= y - last_y <= max(12.0, typical * 2.4)
+                      and not any(_decimal(mapped.get(k)) is not None for k in ("qty", "price", "net_amount", "tax_amount"))):
+                    description_index = next(i for i, role in enumerate(roles) if role[0] == "description")
+                    current = table_rows[-1][description_index] or ""
+                    table_rows[-1][description_index] = current + "\n" + mapped["description"]
+                    last_y = y
                 index += 1
             if len(table_rows) > 1:
                 result.append({
-                    "page": page,
-                    "rows": table_rows,
-                    "cells": [],
-                    "box": None,
-                    "size": page_words[0].get("size") if page_words else None,
-                    "coordinate_system": "top-left",
-                    "source": "docling_word_cells",
-                    "reconstruction": "measured_column_alignment",
-                    "fixed_values": fixed_values,
+                    "page": page, "rows": table_rows, "cells": [], "box": None,
+                    "size": size, "coordinate_system": "top-left",
+                    "source": "docling_word_cells", "reconstruction": "measured_column_alignment",
+                    "fixed_values": fixed_values, "header_page": header_page,
+                    "row_repairs": row_repairs,
                 })
+                if not document_total:
+                    carry = {"page": page, "size": size, "number": number,
+                             "roles": roles, "serial": last_serial, "header_page": header_page}
             if index < len(rows):
                 index += 1
     return result
 
 
 def _decimal(value: Any) -> str | None:
-    text = str(value or "").strip()
+    text = str(value if value is not None else "").strip().replace("\u00a0", " ")
     if not text:
         return None
     negative = text.startswith("(") and text.endswith(")")
-    match = re.search(r"[-+]?\d[\d, ]*(?:\.\d+)?", text)
+    if negative:
+        text = text[1:-1].strip()
+    text = re.sub(r"^(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+", "", text)
+    match = re.fullmatch(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?", text)
     if not match:
         return None
     number = match.group(0).replace(",", "").replace(" ", "")
@@ -409,8 +521,24 @@ def _semantic_row_roles(row: list[str | None]) -> dict[int, str]:
 def _is_line_header(roles: dict[int, str]) -> bool:
     values = set(roles.values())
     return {"qty", "price"}.issubset(values) and bool(
-        values & {"sku", "gtin", "description"}
+        values & {"sku", "gtin", "part_code", "description"}
     )
+
+
+def _description_facts(text: str) -> tuple[str | None, str | None]:
+    """Separate explicit row metadata from the wrapped product name."""
+    description = []
+    skus = set()
+    # Docling may flatten a cell's visual line breaks. Explicit metadata
+    # labels still delimit values; they are not part of the product name.
+    parts = re.split(r"\n|(?=\b(?:SKU|COO|country of origin|HS\s*code)\s*:)", text, flags=re.I)
+    for line in parts:
+        sku = re.fullmatch(r"\s*SKU\s*:\s*([A-Za-z0-9][A-Za-z0-9./_-]{0,79})\s*", line, re.I)
+        if sku:
+            skus.add(sku.group(1))
+        elif not re.match(r"\s*(?:COO|country of origin|HS\s*code)\s*:", line, re.I):
+            description.append(line.strip())
+    return " ".join(description).strip() or None, next(iter(skus)) if len(skus) == 1 else None
 
 
 _HEADER_LABELS = {
@@ -454,11 +582,11 @@ def _date_value(value: Any) -> str | None:
                 return datetime.strptime(raw.title(), pattern).date().isoformat()
             except ValueError:
                 continue
-    # Slash dates are locale-ambiguous. Preserve the visible value rather than
-    # silently swapping its month and day.
-    if re.fullmatch(r"\d{1,2}/\d{1,2}/\d{4}", raw):
-        return raw
-    return None
+    # Ambiguous slash/hyphen values are retained separately in date_printed;
+    # they cannot populate an ISO date picker without a locale decision.
+    from .layout_extract import _parse_date
+
+    return _parse_date(raw)
 
 
 def _header_value(field: str, value: Any) -> str | None:
@@ -476,7 +604,7 @@ def _header_value(field: str, value: Any) -> str | None:
 
 def _table_header_values(tables: list[dict[str, Any]]) -> dict[str, str]:
     """Read repeated label/value header tables and reject conflicting values."""
-    candidates: dict[str, set[str]] = {field: set() for field in {"number", "date", "po", "currency"}}
+    candidates: dict[str, set[str]] = {field: set() for field in {"number", "date", "date_printed", "po", "currency"}}
     for table in sorted(tables, key=lambda value: int(value.get("page", 1))):
         rows = _table_rows(table)
         for row in rows:
@@ -509,6 +637,8 @@ def _table_header_values(tables: list[dict[str, Any]]) -> dict[str, str]:
             for column, field in mapped.items():
                 if column >= len(values):
                     continue
+                if field == "date" and values[column]:
+                    candidates["date_printed"].add(str(values[column]).strip())
                 parsed = _header_value(field, values[column])
                 if parsed is not None:
                     candidates[field].add(parsed)
@@ -555,10 +685,14 @@ def extract_invoice_from_tables(
 ) -> dict[str, Any] | None:
     """Extract only values explicitly represented by table columns or labels."""
     tables = list(tables or [])
-    has_native_tables = any(table.get("source") == "pdfplumber" for table in tables)
+    has_native_line_tables = any(
+        table.get("source") == "pdfplumber"
+        and any(_is_line_header(_semantic_row_roles(row)) for row in _table_rows(table))
+        for table in tables
+    )
     if (
         boxes
-        and not has_native_tables
+        and not has_native_line_tables
         and not any(table.get("source") == "docling_word_cells" for table in tables)
     ):
         tables.extend(_tables_from_measured_words(boxes))
@@ -566,8 +700,7 @@ def extract_invoice_from_tables(
         return None
     invoice: dict[str, Any] = {"lines": []}
     total_candidates: dict[str, list[tuple[int, str]]] = {"net": [], "tax": []}
-    active_roles: dict[int, str] | None = None
-    active_width: int | None = None
+    active_by_source: dict[str, tuple[dict[int, str], int]] = {}
     line_candidates: list[tuple[str, dict[str, Any]]] = []
     for table in sorted(tables, key=lambda value: (
         int(value.get("page", 1)), value.get("source") != "docling_word_cells",
@@ -593,25 +726,27 @@ def extract_invoice_from_tables(
             row_roles = _semantic_row_roles(row)
             if _is_line_header(row_roles):
                 roles = row_roles
-                active_roles, active_width = roles, len(row)
+                active_by_source[table_source] = roles, len(row)
                 continue
             total = _totals_row(row)
             if total is not None:
                 field, priority, value = total
                 total_candidates[field].append((priority, value))
                 continue
+            active_roles, active_width = active_by_source.get(table_source, (None, None))
             current = roles or (active_roles if active_width == len(row) else None)
             if not current:
                 continue
             if _is_line_header(row_roles):  # repeated header
                 continue
             values: dict[str, Any] = {}
+            part_code = None
             for column, role in current.items():
                 if column >= len(row):
                     continue
                 if role not in {
                     "sku", "gtin", "description", "qty", "uom", "price",
-                    "net_amount", "tax_amount",
+                    "net_amount", "tax_amount", "part_code",
                 }:
                     continue
                 raw = row[column]
@@ -623,8 +758,25 @@ def extract_invoice_from_tables(
                     parsed = _gtin(raw)
                     if parsed is not None:
                         values[role] = parsed
+                elif role == "part_code":
+                    part_code = str(raw or "").strip() or None
+                    if part_code and re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
+                        values["gtin"] = part_code
                 elif str(raw or "").strip():
                     values[role] = str(raw).strip()
+            if values.get("description"):
+                description, printed_sku = _description_facts(values["description"])
+                if description:
+                    values["description"] = description
+                else:
+                    values.pop("description", None)
+                if printed_sku:
+                    if values.get("sku") and values["sku"] != printed_sku:
+                        values.pop("sku", None)
+                    else:
+                        values["sku"] = printed_sku
+            if part_code and "gtin" not in values:
+                values.setdefault("sku", part_code)
             identity = any(values.get(key) for key in ("sku", "gtin", "description"))
             priced_quantity = values.get("qty") is not None and values.get("price") is not None
             priced_amount = (
@@ -642,6 +794,9 @@ def extract_invoice_from_tables(
                     values.setdefault(key, value)
                 values["page"] = page
                 values["evidence"] = f"table page {values['page']} row {row_index + 1}"
+                repair = (table.get("row_repairs") or {}).get(row_index)
+                if repair:
+                    values["evidence"] += f"; {repair}"
                 line_candidates.append((table_source, values))
 
     measured_total = sum(
@@ -670,6 +825,15 @@ def extract_invoice_from_tables(
         if measured_complete:
             # Use real measured words when they cover every structural row;
             # this removes duplicate rows caused by cell spans/split headers.
+            for measured_line in measured:
+                matches = [line for line in structural if _lines_equivalent(line, measured_line)]
+                if len(matches) == 1:
+                    # A measured header can miss a column that TableFormer
+                    # read. Preserve complementary explicit cell facts from
+                    # the same uniquely matched row, never calculated values.
+                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount"):
+                        if measured_line.get(field) is None and matches[0].get(field) is not None:
+                            measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
         else:
             # Preserve every TableFormer/native structural row. Measured rows
@@ -690,7 +854,12 @@ def extract_invoice_from_tables(
 
     headers = _table_header_values(tables)
     text_headers = _strict_text_headers(text)
-    for field in ("number", "date", "po", "currency"):
+    from .layout_extract import _extract_printed_date
+
+    printed_date = _extract_printed_date(text.splitlines())
+    if printed_date:
+        text_headers["date_printed"] = printed_date
+    for field in ("number", "date", "date_printed", "po", "currency"):
         if field in headers:
             invoice[field] = headers[field]
         elif field in text_headers:
@@ -706,6 +875,10 @@ def _lines_equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
         return False
     if _decimal(left.get("price")) != _decimal(right.get("price")):
         return False
+    for field in ("net_amount", "tax_amount"):
+        if left.get(field) is not None and right.get(field) is not None:
+            if Decimal(str(left[field])) != Decimal(str(right[field])):
+                return False
     for field in ("sku", "gtin", "description"):
         left_value = re.sub(r"[^a-z0-9]+", "", str(left.get(field) or "").casefold())
         right_value = re.sub(r"[^a-z0-9]+", "", str(right.get(field) or "").casefold())
@@ -783,6 +956,7 @@ def _totals_row(row: list[str | None]) -> tuple[str, int, str] | None:
         "vat amount in aed": ("tax", 10),
         "tax amount in aed": ("tax", 10),
         "net amount": ("net", 100),
+        "net total": ("net", 110),
         "taxable total": ("net", 90),
         "total excl": ("net", 90),
         "subtotal": ("net", 80),

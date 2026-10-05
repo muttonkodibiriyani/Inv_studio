@@ -10,13 +10,17 @@ import threading
 import uuid
 from pathlib import Path
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from .models import Invoice
 
 ROOT=Path(__file__).resolve().parent
 # A recovery reader can coexist with its original process briefly. Keep heavy
 # local OCR within the deployment's memory budget; native and AI reads continue.
-_LOCAL_OCR_LOCK=threading.Lock()
+# Two concurrent OCR subprocesses are useful only when a deployment has enough
+# CPU as well as memory, so operators must opt in after sizing the service.
+try:_LOCAL_OCR_CONCURRENCY=int(os.getenv("INV_LOCAL_OCR_CONCURRENCY","1"))
+except ValueError:_LOCAL_OCR_CONCURRENCY=1
+_LOCAL_OCR_SLOTS=threading.BoundedSemaphore(max(1,min(2,_LOCAL_OCR_CONCURRENCY)))
 
 
 def capabilities():
@@ -47,6 +51,45 @@ def quality(i:Invoice | None):
         if abs(net-i.net)>Decimal("0.01"):missing.append("line amounts do not reconcile with net total")
     total=6+4*len(i.lines)
     return min(0.99 if missing else 1.0,round(max(0,1-len(missing)/total),2)),missing
+
+
+def _native_reconciliation(i:Invoice,text):
+    if i.net is None or not i.lines or not all(line.net_amount is not None for line in i.lines):
+        return None
+    printed_total=sum((line.net_amount for line in i.lines),Decimal(0))
+    if abs(printed_total-i.net)<=Decimal("0.01"):
+        return "printed_line_total"
+    matches=re.findall(
+        r"(?im)^\s*(?:discount|less(?:\s+discount)?)\s*(?:[:\-]\s*)?"
+        r"(?:[A-Z]{3}\s*)?(\(?-?[0-9][0-9,]*(?:\.[0-9]{1,3})?\)?)\s*$",
+        text,
+    )
+    if len(matches)!=1:return None
+    visible=matches[0]
+    negative=visible.startswith("-") or (visible.startswith("(") and visible.endswith(")"))
+    try:discount=Decimal(visible.strip("()-").replace(",",""))
+    except InvalidOperation:return None
+    if negative:return None
+    if abs(printed_total-discount-i.net)<=Decimal("0.01"):
+        return "explicit_document_discount"
+    return None
+
+
+def native_pdf_quality(i:Invoice | None,text=""):
+    """Require internally checkable facts before an embedded-text read skips OCR."""
+    if i is None:return False,["no structured invoice"]
+    issues=[]
+    for field in ("number","currency","net","tax"):
+        if getattr(i,field) in (None,""):issues.append(field)
+    if not i.lines:issues.append("line items")
+    for n,line in enumerate(i.lines,1):
+        if not (line.sku or line.gtin):issues.append(f"line {n} item identity")
+        for field in ("qty","uom","price","net_amount"):
+            if getattr(line,field) in (None,""):issues.append(f"line {n} {field}")
+    if i.net is not None and i.lines and all(line.net_amount is not None for line in i.lines):
+        if _native_reconciliation(i,text) is None:
+            issues.append("printed line amounts do not reconcile with net total or one explicit document discount")
+    return not issues,issues
 
 
 def local_read(engine,path,root,language="en"):
@@ -101,6 +144,11 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             progress(options.provider,"AI reading finished",{"trace":list(trace),"characters":len(text)})
     installed={x["id"] for x in capabilities() if x["installed"]}
     chain=["invoice2data","paddleocr","docling"] if options.engine=="auto" else ([] if options.engine=="ai" else [options.engine])
+    native_preflight_engine=None
+    if (path.suffix.lower()==".pdf" and options.engine in ("paddleocr","docling")
+            and getattr(options,"prefer_native_text",True)):
+        native_preflight_engine=options.engine
+        chain=["native_pdf_text",options.engine]
     if options.engine=="invoice2data" and path.suffix.lower() in (".png",".jpg",".jpeg",".tif",".tiff",".webp",".bmp"):
         invoice2data_ocr=True;chain=["paddleocr"]
         trace.append({"engine":"invoice2data","status":"needs_ocr","reason":"This image needs local OCR input. PaddleOCR will read it before invoice2data templates and structured parsing."})
@@ -110,6 +158,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         if options.provider=="claude_local":chain=["invoice2data","paddleocr","docling"]
         elif path.suffix.lower() in (".docx",".xlsx",".txt",".csv",".json"):chain=["invoice2data"]
     for engine in chain:
+        reader_engine="invoice2data" if engine=="native_pdf_text" else engine
         # For scans, a configured vision reader can extract the document directly
         # before paying the CPU cost of a second local OCR pass. On failure the
         # local readers still run. Explicit local-engine choices remain local.
@@ -118,30 +167,53 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 for remaining in chain[chain.index(engine):]:
                     trace.append({"engine":remaining,"status":"skipped","reason":"The selected vision AI returned invoice fields and item values; review remaining exceptions."})
                 break
-        start=time.monotonic();progress(engine,"Reading document")
-        if engine not in installed:
+        start=time.monotonic();queue_seconds=None
+        progress(engine,"Checking embedded PDF text" if engine=="native_pdf_text" else "Reading document")
+        if reader_engine not in installed:
             trace.append({"engine":engine,"status":"unavailable","reason":"Optional engine is not installed"});continue
         if engine=="paddleocr" and path.suffix.lower() in (".docx",".xlsx",".txt",".csv",".json"):
             trace.append({"engine":engine,"status":"skipped","reason":"Digital office/text document; use native reading or Docling"});continue
         try:
             if engine in ("paddleocr","docling"):
+                queue_started=time.monotonic()
                 progress(engine,"Waiting for the local OCR reader")
-                with _LOCAL_OCR_LOCK:
+                with _LOCAL_OCR_SLOTS:
+                    queue_seconds=time.monotonic()-queue_started
                     start=time.monotonic()
                     progress(engine,"Reading document")
-                    result=local_read(engine,path,store.root,options.language)
+                    result=local_read(reader_engine,path,store.root,options.language)
             else:
-                result=local_read(engine,path,store.root,options.language)
+                result=local_read(reader_engine,path,store.root,options.language)
             candidate=Invoice.model_validate(result["invoice"]) if result.get("invoice") else None
             score,missing=quality(candidate)
             if len(result["text"])>len(text):text=result["text"];boxes=result.get("boxes",[])
-            trace.append({"engine":engine,"method":result.get("extraction_method","template" if candidate else "text_only"),"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines") if candidate else 0,"line_items":len(candidate.lines) if candidate else 0,"text_characters":len(result["text"]),"table_count":len(result.get("tables",[])),"parser_error":result.get("parser_error"),"reason":"Required extraction fields present" if not missing else "; ".join(missing)})
+            native_suitable,native_issues=(native_pdf_quality(candidate,result["text"])
+                if engine=="native_pdf_text" else (False,[]))
+            native_reconciliation=(_native_reconciliation(candidate,result["text"])
+                if native_suitable else None)
+            reason=("Embedded PDF text has complete line facts reconciled through the document's explicit discount"
+                if native_reconciliation=="explicit_document_discount" else
+                "Embedded PDF text has complete, reconciled line facts"
+                if native_suitable else "; ".join(native_issues)
+                if engine=="native_pdf_text" else
+                "Required extraction fields present" if not missing else "; ".join(missing))
+            trace_entry={"engine":engine,"method":result.get("extraction_method","template" if candidate else "text_only"),"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines") if candidate else 0,"line_items":len(candidate.lines) if candidate else 0,"text_characters":len(result["text"]),"table_count":len(result.get("tables",[])),"parser_error":result.get("parser_error"),"reason":reason}
+            if queue_seconds is not None:trace_entry["queue_seconds"]=round(queue_seconds,2)
+            trace.append(trace_entry)
             if result.get("recovery"):
                 trace[-1]["recovery"]=result["recovery"]
-            if candidate is not None and score>best_score:
+            if candidate is not None and (score>best_score or (
+                    score==best_score and engine==native_preflight_engine)):
                 best=candidate;best_score=score
-                selected="invoice2data + PaddleOCR" if invoice2data_ocr and engine=="paddleocr" else engine
+                selected=("native PDF text" if engine=="native_pdf_text" else
+                    "invoice2data + PaddleOCR" if invoice2data_ocr and engine=="paddleocr" else engine)
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
+            if engine=="native_pdf_text":
+                if native_suitable:
+                    trace.append({"engine":native_preflight_engine,"status":"skipped",
+                        "reason":"Embedded PDF text passed the structured quality checks; the selected OCR reader did not run. Disable native-text preference to force OCR."})
+                    break
+                continue
             if options.engine=="invoice2data" and engine=="invoice2data" and path.suffix.lower()==".pdf" and len(result["text"].strip())<40 and not (candidate and candidate.lines):
                 invoice2data_ocr=True;chain.append("paddleocr")
                 trace.append({"engine":"invoice2data","status":"needs_ocr","reason":"This PDF has no usable text layer. PaddleOCR will provide local OCR input for invoice2data templates and structured parsing."})
@@ -167,7 +239,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 break
             if not missing:break
         except Exception as e:
-            trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2)})
+            trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2),"queue_seconds":round(queue_seconds,2) if queue_seconds is not None else None})
             progress(engine,"Reader attempt finished",{"trace":list(trace),"characters":len(text)})
     _,missing=quality(best)
     if document_type_hint=="possible_purchase_order":
