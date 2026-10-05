@@ -423,6 +423,11 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             gaps=[x for x in gaps if not x.endswith(" item identity")]
         return gaps
     missing=gaps_of(best);ai_reason=None
+    # What the engines' result asks of the AI, recorded whether or not the AI runs, so AI calls per invoice
+    # can be counted on an AI-off run: fallback when the engines could not read, gap fill when they left gaps,
+    # cross-check (an extra call on a complete invoice) only when the owner switched it on.
+    need=None if document_type_hint=="possible_purchase_order" else (
+        "fallback" if not _basic_checks(best,missing) else "gap_fill" if missing else "cross_check")
     if document_type_hint=="possible_purchase_order":
         trace.append({"engine":options.provider,"status":"skipped","reason":"The document is labelled Purchase Order; invoice extraction needs the supplier invoice."})
         ai_status,ai_reason="skipped",trace[-1]["reason"]
@@ -435,14 +440,10 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             if missing:trace.append({"engine":options.provider,"status":"needs_connection","reason":"Select a model in AI connections"})
             ai_status="unavailable" if missing else "skipped"
             if not missing:ai_reason="The local readers read a complete, reconciled invoice; no model is selected"
-        else:
-            # Fallback when the engines could not read; gap-fill when they left gaps; cross-check (an extra
-            # call on a complete invoice) only when the owner switched it on.
-            mode=("fallback" if not _basic_checks(best,missing) else "gap_fill" if missing else "cross_check" if cross_check else None)
-            if mode is None:ai_status="skipped"
-            else:merge_ai(mode)
+        elif need=="cross_check" and not cross_check:ai_status="skipped"
+        else:merge_ai(need)
     if ai_status=="failed":ai_reason=str(trace[-1].get("reason") or "The AI read failed")[:240]
-    ai_record={"status":ai_status,"reason":ai_reason or AI_REASONS.get(ai_status,""),"calls":ai_calls}
+    ai_record={"status":ai_status,"reason":ai_reason or AI_REASONS.get(ai_status,""),"calls":ai_calls,"need":need}
     if ai_notes:ai_record["notes"]=ai_notes
     invoice=(best or Invoice()).model_dump(mode="json")
     header_readers,line_readers=readers_maps or _reader_map(invoice,best_source if best is not None else "native")

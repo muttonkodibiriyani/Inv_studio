@@ -204,7 +204,8 @@ def test_scan_runs_the_local_ocr_readers_before_the_ai(monkeypatch,tmp_path):
     assert calls==['invoice2data','paddleocr','docling','vertex']
     assert len(result['invoice']['lines'])==1
     assert result['selected_engine']=='vertex / gemini-test'
-    assert result['readers']['ai']=={'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1}
+    assert result['readers']['ai']=={'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1,
+                                      'need':'fallback'}
     assert result['readers']['header']['number']=='ai' and result['readers']['lines'][0]['qty']=='ai'
 
 
@@ -216,7 +217,7 @@ def test_failed_vision_after_the_local_readers_keeps_their_result(monkeypatch,tm
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
     assert calls==['invoice2data','paddleocr','docling','ai']
     assert not result['invoice']['lines']
-    assert result['readers']['ai']=={'status':'failed','reason':'Unavailable','calls':1}
+    assert result['readers']['ai']=={'status':'failed','reason':'Unavailable','calls':1,'need':'fallback'}
 
 
 def test_empty_ai_response_is_not_reported_as_extracted(monkeypatch,tmp_path):

@@ -33,7 +33,8 @@ def test_a_complete_reconciled_engine_read_makes_no_ai_call_unless_cross_check_i
     native = {**complete_native_invoice(), "date": "2026-01-15"}
     result, calls = run(monkeypatch, tmp_path, native, {**native, "number": "AI-1"})
     assert calls.count("ai") == 0
-    assert result["readers"]["ai"] == {"status": "skipped", "reason": engines.AI_REASONS["skipped"], "calls": 0}
+    assert result["readers"]["ai"] == {"status": "skipped", "reason": engines.AI_REASONS["skipped"], "calls": 0,
+                                         "need": "cross_check"}
 
     monkeypatch.setenv("INV_STUDIO_AI_CROSS_CHECK", "1")
     result, calls = run(monkeypatch, tmp_path, native, {**native, "number": "AI-1"})
@@ -102,6 +103,8 @@ def test_ai_off_or_unconnected_leaves_the_engine_result_and_the_gaps(monkeypatch
     assert "ai" not in calls and result["readers"]["ai"]["status"] == status and result["readers"]["ai"]["calls"] == 0
     assert result["invoice"] == engines_only["invoice"] and result["evidence"] == engines_only["evidence"]
     assert result["selected_engine"] == engines_only["selected_engine"] and "currency" in result["readers"]["gaps"]
+    # An AI-off run still records what the AI would have been asked to do, for counting calls per invoice.
+    assert result["readers"]["ai"]["need"] == engines_only["readers"]["ai"]["need"] == "gap_fill"
 
 
 def test_a_429_after_the_bounded_retry_keeps_the_engine_result(monkeypatch, tmp_path):
@@ -111,6 +114,7 @@ def test_a_429_after_the_bounded_retry_keeps_the_engine_result(monkeypatch, tmp_
     result, calls = run(monkeypatch, tmp_path, native, {}, error=RuntimeError("Vertex AI returned HTTP 429"))
     assert calls.count("ai") == 1
     assert result["invoice"] == engines_only["invoice"] and result["evidence"] == engines_only["evidence"]
-    assert result["readers"]["ai"] == {"status": "failed", "reason": "Vertex AI returned HTTP 429", "calls": 1}
+    assert result["readers"]["ai"] == {"status": "failed", "reason": "Vertex AI returned HTTP 429", "calls": 1,
+                                         "need": "gap_fill"}
     assert result["trace"][-1]["status"] == "failed" and result["trace"][-1]["role"] == "gap_fill"
     assert "currency" in result["readers"]["gaps"]
