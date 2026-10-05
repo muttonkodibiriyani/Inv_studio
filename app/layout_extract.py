@@ -71,7 +71,7 @@ class _DraftLine:
     description: str | None
     uom: str | None
     qty: Decimal
-    price: Decimal
+    price: Decimal | None
     evidence_parts: list[str]
     page: int
     last_y: float
@@ -981,7 +981,7 @@ def _extract_table_lines(words: list[_Word]) -> list[Line]:
                         description=description,
                         uom=_clean_uom(_join_words(parts["uom"])),
                         qty=qty,
-                        price=price,
+                        price=None if _dropped_decimal_point(qty, price, row, columns) else price,
                         evidence_parts=[row_text],
                         page=page,
                         last_y=_row_y(row),
@@ -1346,6 +1346,28 @@ def _join_words(words: list[_Word]) -> str:
     return " ".join(
         word.text for line in lines for word in sorted(line, key=lambda item: item.x)
     ).strip()
+
+
+def _dropped_decimal_point(qty: Decimal, price: Decimal, row: list[_Word], columns: _Columns) -> bool:
+    """A unit price OCR read without its decimal point: left empty rather than filled wrong.
+
+    True only when the price was read as a whole number, quantity x price is not an amount printed right of
+    the price column, and quantity x price / 10^k is one printed with exactly k decimals (e.g. 12 x "2400"
+    beside a printed 28.800). Nothing is restored: the printed point itself was not read.
+    """
+    if price.as_tuple().exponent < 0 or not qty:
+        return False
+    amounts = [
+        value for value in (_parse_decimal(word.text) for word in row if word.x >= columns.price_right)
+        if value is not None and value
+    ]
+    if any(value == qty * price for value in amounts):
+        return False
+    return any(
+        value.as_tuple().exponent == -places and value == qty * price.scaleb(-places)
+        for value in amounts
+        for places in (1, 2, 3)
+    )
 
 
 def _first_decimal(words: list[_Word]) -> Decimal | None:
