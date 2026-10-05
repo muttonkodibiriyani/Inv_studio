@@ -320,6 +320,9 @@ def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     assert picked["header"]["Order No"] == "13000001" and picked["po_candidates"] == 1
     trace = next(x for x in picked["lineage"] if x["target"] == "Order No")
     assert "decision 16" in trace["source"] and "POGRN!2" in trace["reference"]
+    assert trace["evidence_kind"] == fr.EVIDENCE_SELECTED and "among 2 order/location candidates" in trace["source"]
+    printed = run(invoice(po="13000001"))
+    assert next(x for x in printed["lineage"] if x["target"] == "Order No")["evidence_kind"] == fr.EVIDENCE_PRINTED
     # A lone order that disagrees is not linked; items never rescue it.
     lone = run(rows=[pogrn("13000001", "38091", "6", "70")])
     assert lone["header"]["Order No"] == "" and "Missing PO" in types(lone, "POG-001")

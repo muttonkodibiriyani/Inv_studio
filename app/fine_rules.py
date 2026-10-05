@@ -57,6 +57,7 @@ RECORDED_NO_BARCODE, RECORDED_NO_VPN = "Recorded No Barcode", "Recorded No VPN" 
 BUYER_RULE = "BUYER-NAME"
 BUYER_RULE_EVIDENCE = "owner rule BUYER-NAME (2026-10-05)"
 EVIDENCE_PRINTED, EVIDENCE_OWNER_RULE = "printed", "owner_rule"
+EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not printed on the invoice
 EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
 
@@ -977,7 +978,8 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         if not rows:
             run.exception("Missing PO", "Printed PO is not an RMS_ORDER_NO in the POGRN report (order not found)",
                           "POG-001", evidence=POGRN_REPORT, owner="Buyer")
-            run.trace("Order No", printed, "R-024", "Invoice PO (not in POGRN)", confidence="Unvalidated")
+            run.trace("Order No", printed, "R-024", "Invoice PO (not in POGRN)", confidence="Unvalidated",
+                      evidence_kind=EVIDENCE_PRINTED)
             outcome.update(order=printed, source=FROM_INVOICE, status="Order not found")
             return outcome
         evaluated, _ = evaluate_pogrn(run, rows, *common)
@@ -994,7 +996,7 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
             outcome.update(order=None, source=None, candidates=0, status="Printed PO not validated")
             return outcome
         run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO of the supplier's "
-                  "6-character EBS code", reference=_refs(rows))
+                  "6-character EBS code", reference=_refs(rows), evidence_kind=EVIDENCE_PRINTED)
         outcome.update(order=printed, source=FROM_INVOICE, candidates=1)
         if len(mine) > 1:
             run.exception("Location ID", "Printed order has several locations; no approved multi-location rule",
@@ -1038,9 +1040,10 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
         return outcome
     group = selected[0]
     derived = group["POGRN RMS Order No"]
-    run.trace("Order No", derived, "POG-001", "POGRN RMS_ORDER_NO: the only order/location under the supplier's "
-              "6-character EBS code whose quantity and value agree (form 01a10c4d, decision 16)",
-              reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN)
+    run.trace("Order No", derived, "POG-001", f"Selected by POG-001 among {len(evaluated)} order/location "
+              f"candidates under the supplier's 6-character EBS code {'/'.join(sorted(keys))}: the only one whose "
+              "quantity and value agree (form 01a10c4d, decision 16); not printed on the invoice",
+              reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN, evidence_kind=EVIDENCE_SELECTED)
     outcome.update(order=derived, source=DERIVED_FROM_POGRN)
     group.update({"Derived PO Number": derived, "PO Source": DERIVED_FROM_POGRN})
     _validate_accepted(run, group)
