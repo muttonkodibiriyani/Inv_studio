@@ -4,6 +4,7 @@ from datetime import date
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
+from .matching import strip_ult
 
 HEADERS={
 "Header":["Transaction Number","Document","Supplier Site","Order No","Location","Location Type","Document Date","Total Cost Ex Tax","Tax Amount","Ref No. 1","Ref No. 2","Ref No. 3","Comment"],
@@ -46,7 +47,7 @@ def batch_workbook(entries):
         for l,m in zip(invoice.lines,result["matches"]):
             s=w["Details"];n=s.max_row+1
             s.append([transaction,None,None,l.price,l.qty,None])
-            for c,v in ((2,m["item"]),(3,m["gtin"]),(6,invoice.taxCode)):
+            for c,v in ((2,m["item"]),(3,strip_ult(m["gtin"])),(6,invoice.taxCode)):
                 if c==2 and re.fullmatch(r"[1-9]\d{0,14}",str(v)):s.cell(n,c,int(v))
                 else:text_cell(s.cell(n,c),v)
             s.cell(n,3).number_format="@"

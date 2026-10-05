@@ -28,6 +28,9 @@ from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
 from .deletion import DeletionError, delete_invoices
 from .reference_lookup import ReferenceLookup
+from .fine_rules import RulesConfig, decide_feedback, feedback_entry, run_batch
+from .fine_rules_export import review_workbook, target_workbook
+from .fine_rules_source import LookupRulesSource
 from .product_candidates import ProductCandidates
 from .matching import enrich, key, validate
 from .models import Invoice, Policy, ProcessingOptions, StrictModel
@@ -49,6 +52,25 @@ class Review(StrictModel):
 
 class Revision(StrictModel):
     revision: int
+
+
+class FineRulesRequest(StrictModel):
+    job_ids: list[str] = Field(min_length=1,max_length=200)
+
+
+class FeedbackRequest(StrictModel):
+    invoice_line: str = Field(max_length=200)
+    original: str = Field(default="",max_length=500)
+    correction: str = Field(max_length=500)
+    reason: str = Field(default="",max_length=1000)
+    evidence: str = Field(max_length=2000)
+    rule_candidate: str = Field(default="",max_length=200)
+
+
+class FeedbackDecision(StrictModel):
+    approver: str = Field(max_length=200)
+    decision: str = Field(pattern="^(Approved|Rejected)$")
+    version: str = Field(default="",max_length=80)
 
 
 class ExtractionDraftRequest(Revision):
@@ -634,6 +656,75 @@ def create_app(data_dir=None):
     @app.get("/api/reference-lookup/products")
     def product_candidates(q:str,limit:int=25,site:str="",supplier:str="",po:str="",invoice_po:str="",price:str="",qty:str="",currency:str="",uom:str=""):
         return products.search(q,limit=limit,site=site,supplier=supplier,po=po,invoice_po=invoice_po,price=price,qty=qty,currency=currency,uom=uom)
+
+    def fine_rules_results(job_ids):
+        config=RulesConfig.from_dict(store.get("fine_rules_config",{}))
+        entries=[]
+        for jid in dict.fromkeys(job_ids):
+            j=job_or_404(jid)
+            if j["status"] in ("queued","processing"):raise HTTPException(409,"Wait for extraction to finish")
+            entries.append({"invoice":Invoice.model_validate(j["invoice"]),"filename":j["filename"],
+                            "text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":jid})
+        return run_batch(entries,LookupRulesSource(store),config)
+
+    def plain(value):
+        # Money and quantities stay exact strings in JSON.
+        if isinstance(value,dict):return {k:plain(v) for k,v in value.items() if not str(k).startswith("_")}
+        if isinstance(value,(list,tuple)):return [plain(v) for v in value]
+        if isinstance(value,set):return sorted(plain(v) for v in value)
+        if isinstance(value,(int,float,str,bool)) or value is None:return value
+        return str(value)
+
+    @app.get("/api/fine-rules/config")
+    def fine_rules_config():return store.get("fine_rules_config",{})
+
+    @app.post("/api/fine-rules/config")
+    async def save_fine_rules_config(request:Request):
+        body=await request.json()
+        if not isinstance(body,dict):raise ValueError("Fine-rules configuration must be an object")
+        RulesConfig.from_dict(body)
+        with store.connection(True) as c:
+            store.set("fine_rules_config",body,c);store.audit("fine_rules_config_changed",body,c)
+        return body
+
+    @app.post("/api/fine-rules/run")
+    def fine_rules_run(body:FineRulesRequest):
+        results=fine_rules_results(body.job_ids)
+        store.audit("fine_rules_run",{"job_ids":body.job_ids,"statuses":[r["status"] for r in results],"approved":False})
+        return {"results":plain(results)}
+
+    @app.post("/api/fine-rules/review.xlsx")
+    def fine_rules_review(body:FineRulesRequest):
+        content=review_workbook(fine_rules_results(body.job_ids),store.get("fine_rules_feedback",[]))
+        store.audit("fine_rules_review_downloaded",{"job_ids":body.job_ids,"approved":False})
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":'attachment; filename="ULTA_Rules_Review.xlsx"',"Cache-Control":"no-store"})
+
+    @app.post("/api/fine-rules/target.xlsx")
+    def fine_rules_target(body:FineRulesRequest):
+        results=fine_rules_results(body.job_ids)
+        try:content=target_workbook(results)
+        except ValueError as exc:raise HTTPException(409,str(exc))
+        store.audit("fine_rules_target_downloaded",{"job_ids":body.job_ids,"sha256":hashlib.sha256(content).hexdigest()})
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":'attachment; filename="ULTA_Target.xlsx"',"Cache-Control":"no-store"})
+
+    @app.get("/api/fine-rules/feedback")
+    def fine_rules_feedback():return store.get("fine_rules_feedback",[])
+
+    @app.post("/api/fine-rules/feedback")
+    def add_fine_rules_feedback(body:FeedbackRequest):
+        with store.connection(True) as c:
+            log=feedback_entry(store.get("fine_rules_feedback",[],c),body.invoice_line,body.original,body.correction,
+                               body.reason,body.evidence,body.rule_candidate)
+            store.set("fine_rules_feedback",log,c);store.audit("fine_rules_feedback_proposed",log[-1],c)
+        return log[-1]
+
+    @app.post("/api/fine-rules/feedback/{fid}/decision")
+    def decide_fine_rules_feedback(fid:str,body:FeedbackDecision):
+        with store.connection(True) as c:
+            log=decide_feedback(store.get("fine_rules_feedback",[],c),fid,body.approver,body.decision,body.version)
+            store.set("fine_rules_feedback",log,c)
+            entry=next(x for x in log if x["Feedback ID"]==fid);store.audit("fine_rules_feedback_decided",entry,c)
+        return entry
 
     @app.post("/api/jobs/{jid}/draft")
     def manual_draft(jid:str,body:ManualDraftRequest):

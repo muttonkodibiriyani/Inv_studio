@@ -6,6 +6,12 @@ from .models import Invoice, Policy
 from .references import decimal as D
 
 
+def strip_ult(value):
+    """R-004: Item Master ITEM carries a ``ULT_`` prefix; only that prefix is removed."""
+    value=str(value or "").strip()
+    return value[4:] if value[:4].upper()=="ULT_" else value
+
+
 def key(i):
     return "|".join([i.seller or "", i.buyer or "", (i.number or "").strip().upper()])
 
@@ -69,10 +75,10 @@ def validate(i: Invoice, refs, policy: Policy, ledger=(), reviewed=False):
     for n,l in enumerate(i.lines,1):
         candidates=[x for x in refs.get("items",[]) if str(x["site"])==i.site and (
             (l.item_id and str(x["id"])==l.item_id) or
-            (not l.item_id and ((l.gtin and str(x["gtin"])==l.gtin) or (not l.gtin and l.sku and str(x["sku"])==l.sku))))]
+            (not l.item_id and ((l.gtin and strip_ult(x["gtin"])==strip_ult(l.gtin)) or (not l.gtin and l.sku and str(x["sku"])==l.sku))))]
         item=candidates[0] if len(candidates)==1 else None
         if not item: fail("ITEM","No unique exact approved item / supplier SKU / barcode match","Item steward",n)
-        if item and l.item_id and ((l.sku and str(item["sku"])!=l.sku) or (l.gtin and str(item["gtin"])!=l.gtin)):
+        if item and l.item_id and ((l.sku and str(item["sku"])!=l.sku) or (l.gtin and strip_ult(item["gtin"])!=strip_ult(l.gtin))):
             fail("ITEM_CONFLICT","The confirmed internal item conflicts with the supplier SKU or barcode","Item steward",n)
         if item and l.gtin and l.sku and str(item["sku"])!=l.sku: fail("ITEM_CONFLICT","Barcode and supplier SKU identify different items","Item steward",n)
         if l.qty is None or l.qty<=0: fail("QTY","Quantity is missing or not positive",line=n)
@@ -89,7 +95,7 @@ def validate(i: Invoice, refs, policy: Policy, ledger=(), reviewed=False):
         within[allocation]+=l.qty or Decimal(0)
         if within[allocation]>available: fail("RECEIPT",f"Needs {within[allocation]} units; {available} accepted received units remain","Receiving",n)
         if within[allocation]>D(pl["ordered"])-D(pl["invoiced"])-used[allocation]: fail("ORDER_QTY","Exceeds remaining ordered quantity","Buyer",n)
-        matches.append({"line":n,"item":str(item["id"]),"gtin":l.gtin or str(item.get("gtin","")),"po_price":str(pl["price"]),"available":str(available),"allocation":{"key":allocation,"qty":str(l.qty or 0)}})
+        matches.append({"line":n,"item":str(item["id"]),"gtin":strip_ult(l.gtin or item.get("gtin","")),"po_price":str(pl["price"]),"available":str(available),"allocation":{"key":allocation,"qty":str(l.qty or 0)}})
     if i.net is None or abs(rounded(net)-i.net)>policy.total_tolerance: fail("TOTAL",f"Calculated net {rounded(net)} differs from the invoice net")
     taxes=[t for t in refs.get("taxRules",[]) if all(str(t[k])==getattr(i,k) for k in ("origin","market","currency")) and t["code"]==i.taxCode]
     if len(taxes)!=1: fail("TAX","No unique approved tax mapping","Tax reviewer")
