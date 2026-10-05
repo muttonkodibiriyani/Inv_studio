@@ -396,14 +396,14 @@ def printed_line_count(text):
 
 def missing_lines(read, net, exact, text):
     """Item lines missing or merged when lines_to_net fails (MEASURE, T2(b)): printed - read when the invoice
-    prints a line count, else |residual| / mean read-line net; at least 1, at most 2 x the read lines."""
+    prints a line count (exact evidence, uncapped), else |residual| / mean read-line net, at most 2 x the read
+    lines; at least 1 either way."""
     printed_count = printed_line_count(text)
     if printed_count is not None:
-        k = printed_count - read
-    elif exact > 0:
-        k = int((abs(net - exact) * read / exact).quantize(Decimal(1), rounding=ROUND_HALF_UP))
-    else:
-        k = 1
+        return max(printed_count - read, 1)
+    if exact <= 0:
+        return 1
+    k = int((abs(net - exact) * read / exact).quantize(Decimal(1), rounding=ROUND_HALF_UP))
     return min(max(k, 1), 2 * read)
 
 

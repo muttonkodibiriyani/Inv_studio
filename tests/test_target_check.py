@@ -378,7 +378,8 @@ def test_printed_line_count_wins_over_the_residual():
     text = TEXT + "\nTotal Lines: 13"
     r = tc.check_view(view(lines=lines, fields={"net": field("99.000", ev("Invoice printed total", "page 1", "99.000",
                                                                             "printed"))}), sources(text=text))
-    assert lines_check(r)["missing_lines"] == 8  # 13 - 4 = 9, clamped to 2 x 4 read lines
+    assert lines_check(r)["missing_lines"] == 9  # 13 - 4: a printed count is exact, never capped at 2 x read
+    assert tc.missing_lines(2, tc.Decimal("10"), tc.Decimal("5"), "Total lines: 40") == 38  # printed - read > 2n
     r = tc.check_view(view(lines=lines[:3] + [line(4)] * 4, fields={"net": field("99.000", ev(
         "Invoice printed total", "page 1", "99.000", "printed"))}), sources(text=text))
     assert lines_check(r)["missing_lines"] == 6  # 13 - 7 read lines
