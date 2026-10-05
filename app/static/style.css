@@ -632,7 +632,8 @@ dialog:has(.fine-rules-dialog) { width: min(1180px, calc(100vw - 28px)); }
 .fine-rules-blank { background: repeating-linear-gradient(135deg, transparent 0 5px, #eef2f0 5px 6px); }
 .fine-rules-block { padding: 0 13px 13px; }
 .fine-rules-block h4 { margin: 4px 0 6px; font-size: 11px; }
-.fine-rules-table td { padding: 6px 7px; font-size: 10px; overflow-wrap: anywhere; }
+.fine-rules-table th { white-space: nowrap; }
+.fine-rules-table td { padding: 6px 7px; font-size: 10px; overflow-wrap: break-word; }
 .fine-rules-table td:nth-child(n) { width: auto; min-width: 0; }
 .draft-warning { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; padding: 12px 13px; color: #765319; background: var(--warning-bg); border: 1px solid #ead7a5; border-radius: 10px; font-size: 10px; }
 .draft-warning strong { flex: 0 0 auto; padding: 5px 8px; color: #fff; background: #9a6d19; border-radius: 6px; font-size: 9px; letter-spacing: .06em; }

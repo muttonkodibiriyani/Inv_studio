@@ -1199,7 +1199,8 @@ function renderFineRulesResult(result) {
 
 function fineRulesConfigGaps(config) {
   const gaps = [];
-  if (!Object.keys(config?.location_market || {}).length) gaps.push("location→market list (V-007)");
+  const masterMarkets = Object.values(config?.location_master || {}).some((row) => row?.market);
+  if (!masterMarkets && !Object.keys(config?.location_market || {}).length) gaps.push("location→market list (V-007)");
   if (!(config?.supplier_site_currency || []).length) gaps.push("supplier-site currency list (V-010)");
   return gaps;
 }

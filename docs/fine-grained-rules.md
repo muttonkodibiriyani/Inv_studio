@@ -125,3 +125,21 @@ Tests: `tests/test_fine_rules.py` has one test per rule ID (`test_R_001_…` to 
 | V-008 ambiguous dates | `Date Review` exception | Business date-format rule per supplier |
 | V-009 description threshold | Description route is review-only | Approved threshold |
 | R-016 tax mapping | `Unit Tax Code` only from the reviewed invoice tax code; blank = `Tax Code` exception | Approved ULTA tax mapping |
+
+## Website panel (branch feat/fine-rules-ui)
+
+In the review workspace, select processed invoices in the inbox and click **Run ULTA rules**. The dialog
+calls `POST /api/fine-rules/run` and shows, per invoice:
+
+- the status (Approved / Review / Blocked) and the count of blocking exceptions;
+- header facts (Supplier Site, Order No, PO source, Location, Location Type, Market, Currency, …). A value the
+  rules could not establish is shown as an empty hatched cell, never as invented text;
+- the exceptions with rule ID, line, evidence, proposed resolution and whether each one blocks;
+- the PO/GRN candidates (06A) with location, market, qty/value match, checks passed and the evidence rows;
+- the item matches (barcode, VPN, ITEM_PARENT, ITEM, match method, rule ID and the three checks).
+
+**Download review workbook** always works (`review.xlsx`). **Download target workbook** is enabled only when
+every selected invoice is Approved; otherwise the dialog lists the invoices that are not and why (the server
+refuses the same request with 409). While the location→market list (V-007) or the supplier-site currency list
+(V-010) is missing from `/api/fine-rules/config`, a banner says so: no PO can be confirmed, so invoices stay in
+Review.
