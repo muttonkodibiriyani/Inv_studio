@@ -56,6 +56,10 @@ class RulesConfig:
     location_market: dict = field(default_factory=dict)
     # Approved supplier-site + market currency: {(supplier_site, market): currency}
     supplier_site_currency: dict = field(default_factory=dict)
+    # Owner supplier-site table: {supplier_site: {"currency": ..., "status": "Active" | "Inactive"}}
+    supplier_sites: dict = field(default_factory=dict)
+    # Owner VAT codes, type C / PV only: {vat region: {"code": ..., "rate": Decimal, "active_from": date}}
+    vat_codes: dict = field(default_factory=dict)
     # Supplier sites with an approved USD exception (ALG-024).
     usd_exceptions: set = field(default_factory=set)
     entity_map: dict = field(default_factory=lambda: dict(ENTITY_MAP))
@@ -80,6 +84,27 @@ class RulesConfig:
             if currency.get((site, market), code) != code:
                 raise ValueError(f"Supplier site {site} has two currencies for {market}")
             currency[(site, market)] = code
+        sites = {}
+        for row in data.get("supplier_sites") or []:
+            site, code, status = (str(row.get(k) or "").strip() for k in ("supplier_site", "currency", "status"))
+            if not (site and re.fullmatch(r"[A-Z]{3}", code) and status in ("Active", "Inactive")):
+                raise ValueError("Supplier-site rows need supplier_site, a 3-letter currency and Active/Inactive")
+            if site in sites:
+                raise ValueError(f"Supplier site {site} appears twice")
+            sites[site] = {"currency": code, "status": status}
+        vat = {}
+        for row in data.get("vat_codes") or []:
+            region, code = str(row.get("region") or "").strip().upper(), str(row.get("code") or "").strip()
+            rate = to_decimal(row.get("rate"))
+            try:
+                active = date.fromisoformat(str(row.get("active_from") or ""))
+            except ValueError:
+                active = None
+            if not (region and code and rate is not None and rate >= 0 and active):
+                raise ValueError("VAT code rows need region, code, a non-negative rate and active_from")
+            if region in vat:
+                raise ValueError(f"VAT region {region} has two codes")
+            vat[region] = {"code": code, "rate": rate, "active_from": active}
         tolerances = {}
         for key in ("qty_tolerance", "value_tolerance"):
             value = to_decimal(data.get(key, "0"))
@@ -90,6 +115,8 @@ class RulesConfig:
             location_master=master,
             location_market={str(k).strip(): str(v).strip() for k, v in (data.get("location_market") or {}).items()},
             supplier_site_currency=currency,
+            supplier_sites=sites,
+            vat_codes=vat,
             usd_exceptions={str(x).strip() for x in data.get("usd_exceptions") or []},
             entity_map={**ENTITY_MAP, **{str(k).upper(): dict(v) for k, v in (data.get("entity_map") or {}).items()}},
             version=str(data.get("version") or "unconfigured")[:80],
@@ -318,6 +345,10 @@ def location_type(location, config=None):
         conflict = prefix is not None and prefix != master_type
         return {"type": master_type, "source": "location master", "prefix_type": prefix, "conflict": conflict}
     return {"type": prefix, "source": "prefix fallback" if prefix else None, "prefix_type": prefix, "conflict": False}
+
+
+def same_market(a, b):
+    return text(a).casefold() == text(b).casefold()
 
 
 def location_market(location, config):
@@ -726,9 +757,19 @@ def resolve_currency(run, supplier_site, market, hint):
                       "ALG-023", proposed="Supply the supplier-site-market-currency list (V-010)", owner="Finance")
         return None
     configured = config.supplier_site_currency.get((supplier_site, market))
+    source, reference = "Supplier-site-market currency map", f"{supplier_site}|{market}|{config.version}"
+    site = config.supplier_sites.get(supplier_site) if configured is None else None
+    if site and site["status"] != "Active":
+        # R-012: the current currency maintained for the site; an inactive site is not current.
+        run.exception("Currency Mapping", f"Supplier site {supplier_site} is {site['status']} in the supplier-site "
+                      "table; its currency is not current", "R-012", evidence=site["currency"], owner="Finance")
+        return None
+    if site:
+        # ALG-025: the payment currency is the one configured for the supplier site, whatever the market.
+        configured, source, reference = site["currency"], "Supplier-site table", f"{supplier_site}|{config.version}"
     if configured is None:
         # R-013 / ALG-025: a cross-border pair is accepted only when configured.
-        kind = "Cross-border" if hint and hint.get("mapped") and hint["mapped"].get("market") != market else "Currency Mapping"
+        kind = "Cross-border" if hint and hint.get("mapped") and not same_market(hint["mapped"].get("market"), market) else "Currency Mapping"
         run.exception(kind, f"No approved currency for supplier site {supplier_site} in {market}",
                       "ALG-025" if kind == "Cross-border" else "R-012", owner="Finance",
                       proposed="Supply the supplier-site-market-currency list (V-010)")
@@ -744,9 +785,46 @@ def resolve_currency(run, supplier_site, market, hint):
         run.exception("Currency Mapping", f"Invoice currency {printed} differs from configured {configured}",
                       "R-012", owner="Finance")
         return None
-    run.trace("Currency", configured, "ALG-023", "Supplier-site-market currency map",
-              reference=f"{supplier_site}|{market}|{config.version}")
+    run.trace("Currency", configured, "ALG-023", source, reference=reference)
     return configured
+
+
+# --------------------------------------------------------------------------- tax code
+
+
+def resolve_tax_code(run, market, document_date):
+    """R-016: Unit Tax Code is the owner's C/PV code of the receiving market's VAT region (R-013).
+
+    The printed tax must agree with the region rate, either on the invoice net or line by line.
+    """
+    invoice = run.invoice
+    printed = text(invoice.taxCode)
+    if printed or not market or not run.config.vat_codes:
+        return printed
+    vat = run.config.vat_codes.get(text(market).upper())
+    if not vat:
+        run.exception("Tax Code", f"No C/PV VAT code for the {market} VAT region", "R-016", owner="Tax reviewer")
+        return ""
+    if not document_date or document_date < vat["active_from"].isoformat():
+        run.exception("Tax Code", f"VAT code {vat['code']} applies from {vat['active_from'].isoformat()}; "
+                      "document date is earlier or unknown", "R-016", owner="Tax reviewer")
+        return ""
+    if invoice.tax is None:
+        run.exception("Tax Code", "Printed tax amount is missing; the region rate cannot be checked", "R-016",
+                      owner="Tax reviewer")
+        return ""
+
+    def at_rate(amount):
+        return (amount * vat["rate"] / 100).quantize(invoice.tax, rounding=ROUND_HALF_UP)
+
+    nets = [line.net_amount for line in invoice.lines]
+    agrees = (invoice.net is not None and at_rate(invoice.net) == invoice.tax) or (
+        nets and None not in nets and sum((at_rate(n) for n in nets), Decimal(0)) == invoice.tax)
+    if not agrees:
+        run.exception("Tax Code", f"Printed tax {invoice.tax} does not agree with the {vat['rate']}% rate of "
+                      f"VAT code {vat['code']}", "R-016", owner="Tax reviewer")
+        return ""
+    return vat["code"]
 
 
 # --------------------------------------------------------------------------- invoice run
@@ -844,7 +922,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     else:
         run.exception("Location ID", "Location waits for an accepted POGRN order (never from Item Master)",
                       "ALG-011", owner="Buyer")
-    if hint and hint["mapped"] and market and hint["mapped"]["market"] != market:
+    if hint and hint["mapped"] and market and not same_market(hint["mapped"]["market"], market):
         run.exception("Market Mapping", f"Supplier suffix suggests {hint['mapped']['market']} but the receiving "
                       f"location is {market}", "R-027", owner="Business")
     currency = resolve_currency(run, supplier_site, market, hint) if group else None
@@ -855,7 +933,8 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         run.trace("Order No", po["order"], "R-024", "Invoice PO kept (not validated)", confidence="Unvalidated")
 
     # Line outputs (ALG-021/022/026/027).
-    tax_code = text(invoice.taxCode)
+    tax_code = resolve_tax_code(run, market, document_date)
+    tax_source = "Reviewed invoice tax code" if text(invoice.taxCode) else "Owner VAT code table (C/PV), receiving market"
     lines_out = []
     for line, m in zip(invoice.lines, matches):
         n = m["line"]
@@ -884,7 +963,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         for f, v in (("Unit Cost", line.price), ("Quantity", line.qty)):
             run.trace(f, v, "ALG-026", "Invoice line", line=n)
         if tax_code:
-            run.trace("Unit Tax Code", tax_code, "R-016", "Reviewed invoice tax code", line=n)
+            run.trace("Unit Tax Code", tax_code, "R-016", tax_source, line=n)
         lines_out.append({
             "Transaction Number": transaction, "Item": m["parent"] if m["status"] == "Matched" else "",
             "UPC": upc if m["status"] == "Matched" or not m["parent"] else upc, "Unit Cost": line.price,
@@ -896,7 +975,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
             "POGRN RMS Order No": po["order"] or "", "POGRN Validation Status": po["status"],
             "_match": m, "_line": line,
         })
-    if not tax_code and invoice.lines:
+    if not tax_code and invoice.lines and not any(e["Exception Type"] == "Tax Code" for e in run.exceptions):
         run.exception("Tax Code", "Unit Tax Code is blank; no approved tax mapping in the ULTA sources", "R-016",
                       owner="Tax reviewer")
 
