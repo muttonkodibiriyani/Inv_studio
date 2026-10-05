@@ -381,3 +381,71 @@ def test_measured_size_column_does_not_contaminate_quantity_and_keeps_partial_li
         "description": "Synthetic item", "sku": "SYN-1", "price": "4.00",
         "net_amount": "12.00", "page": 1, "evidence": "table page 1 row 2",
     }]
+
+
+def _two_amount_boxes(amounts, net_amounts=("50.00", "60.00"), taxes=("2.25", "2.50")):
+    """A borderless table printing a pre-discount net and, after it, the amount charged."""
+    header = [
+        ("SN", 6), ("Item", 16), ("Code", 24), ("Description", 50), ("Qty", 88), ("UOM", 98),
+        ("Unit", 108), ("Price", 116), ("Net", 128), ("Amount", 137), ("VAT", 150), ("5%", 157),
+    ]
+    if amounts is not None:
+        header += [("Amount", 172), ("AED", 181)]
+    boxes = [{"text": text, "page": 1, "box": [x - 3, 10, x + 3, 16], "size": [200, 100]} for text, x in header]
+    rows = [
+        [("1", 6), ("SKU-1", 20), ("First", 45), ("item", 55), ("2", 88), ("Nos", 98), ("25.00", 112),
+         (net_amounts[0], 132), (taxes[0], 153)],
+        [("2", 6), ("SKU-2", 20), ("Second", 45), ("item", 55), ("3", 88), ("Nos", 98), ("20.00", 112),
+         (net_amounts[1], 132), (taxes[1], 153)],
+    ]
+    for index, row in enumerate(rows):
+        if amounts is not None:
+            row.append((amounts[index], 176))
+        top = 22 + index * 10
+        boxes += [{"text": text, "page": 1, "box": [x - 3, top, x + 3, top + 6], "size": [200, 100]}
+                  for text, x in row]
+    return boxes
+
+
+def test_second_amount_column_is_taken_when_it_reconciles_with_the_totals():
+    # Net Amount is the pre-discount value; Amount AED sums to the printed Net Total and
+    # carries the 5% VAT, so it is the line net. Nothing else on the row moves.
+    text = "Tax Invoice\nTotal 110.00\nDiscount 15.00\nNet Total 95.00\nVAT 5% 4.75\nGross Total 99.75\n"
+    result = extract_invoice_from_tables(text, [], boxes=_two_amount_boxes(("45.00", "50.00")))
+
+    assert result is not None
+    assert [line["net_amount"] for line in result["lines"]] == ["45.00", "50.00"]
+    assert [line["tax_amount"] for line in result["lines"]] == ["2.25", "2.50"]
+    assert [line["price"] for line in result["lines"]] == ["25.00", "20.00"]
+    assert result["net"] == "95.00"
+    assert all("_other_amount" not in line for line in result["lines"])
+
+
+def test_second_amount_column_is_ignored_when_it_does_not_reconcile():
+    # The printed Net Total is the sum of the Net Amount column, so that column stays.
+    text = "Tax Invoice\nNet Total 110.00\nVAT 5% 5.50\nGross Total 115.50\n"
+    boxes = _two_amount_boxes(("45.00", "50.00"), taxes=("2.50", "3.00"))
+    result = extract_invoice_from_tables(text, [], boxes=boxes)
+
+    assert result is not None
+    assert [line["net_amount"] for line in result["lines"]] == ["50.00", "60.00"]
+    assert result["net"] == "110.00"
+
+
+def test_second_amount_column_is_ignored_when_line_vat_does_not_follow_it():
+    # The sums agree by coincidence but the VAT is charged on the Net Amount column.
+    text = "Tax Invoice\nNet Total 110.00\nVAT 5% 5.50\n"
+    boxes = _two_amount_boxes(("40.00", "70.00"), taxes=("2.50", "3.00"))
+    result = extract_invoice_from_tables(text, [], boxes=boxes)
+
+    assert result is not None
+    assert [line["net_amount"] for line in result["lines"]] == ["50.00", "60.00"]
+
+
+def test_single_amount_column_is_unchanged_by_the_reconciliation_rule():
+    text = "Tax Invoice\nNet Total 110.00\nVAT 5% 5.50\n"
+    result = extract_invoice_from_tables(text, [], boxes=_two_amount_boxes(None, taxes=("2.50", "3.00")))
+
+    assert result is not None
+    assert [line["net_amount"] for line in result["lines"]] == ["50.00", "60.00"]
+    assert all("_other_amount" not in line for line in result["lines"])

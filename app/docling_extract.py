@@ -219,6 +219,7 @@ def _exact_header_role(header: Any) -> str | None:
         "tax_rate": {"taxrate", "vatrate", "taxpercent"},
         "tax_amount": {"taxamount", "vatamount", "taxamt", "vatamt"},
         "gross_amount": {"grossamount", "amountincludingtax", "total"},
+        "other_amount": {"otheramount"},
     }
     return next((role for role, values in aliases.items() if packed in values), None)
 
@@ -821,14 +822,17 @@ def extract_invoice_from_tables(
                     continue
                 if role not in {
                     "sku", "gtin", "description", "qty", "uom", "price",
-                    "net_amount", "tax_amount", "part_code",
+                    "net_amount", "tax_amount", "part_code", "other_amount",
                 }:
                     continue
                 raw = row[column]
-                if role in {"qty", "price", "net_amount", "tax_amount"}:
+                if role in {"qty", "price", "net_amount", "tax_amount", "other_amount"}:
                     parsed = _decimal(raw)
                     if parsed is not None:
-                        values[role] = parsed
+                        # A second printed amount per line (e.g. "Amount AED" beside
+                        # "Net Amount") is kept aside until the totals prove which
+                        # column is the line net; see _take_reconciled_amount.
+                        values["_other_amount" if role == "other_amount" else role] = parsed
                 elif role == "gtin":
                     parsed = _gtin(raw)
                     if parsed is not None:
@@ -906,7 +910,7 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
-                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount"):
+                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount", "_other_amount"):
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
@@ -939,6 +943,7 @@ def extract_invoice_from_tables(
         }
         if len(printed) == 1:
             invoice[field] = next(iter(printed))
+    _take_reconciled_amount(invoice)
     headers = _table_header_values(tables)
     text_headers = _strict_text_headers(text)
     from .layout_extract import _extract_printed_date
@@ -955,6 +960,43 @@ def extract_invoice_from_tables(
     if buyer_name is not None:
         invoice["buyer_name"] = buyer_name
     return invoice if invoice["lines"] else None
+
+
+def _take_reconciled_amount(invoice: dict[str, Any]) -> None:
+    """Prefer the printed amount column that reconciles when a layout prints two per line.
+
+    Some layouts print a pre-discount "Net Amount" and, after it, the amount actually
+    charged for the line ("Amount AED"). The line net is the column whose sum is the
+    printed net total and whose line VAT is the rate times the amount. Only then is the
+    second column taken; otherwise the reader behaves as before. Nothing is calculated.
+    """
+    lines = invoice.get("lines") or []
+    others = [line.pop("_other_amount", None) for line in lines]
+    if not lines or any(other is None for other in others):
+        return
+    header_net = _decimal(invoice.get("net"))
+    if header_net is None or Decimal(header_net) == 0:
+        return
+    amounts = [Decimal(other) for other in others]
+    nets = [Decimal(line["net_amount"]) for line in lines if line.get("net_amount") is not None]
+    if sum(amounts) != Decimal(header_net) or sum(nets) == Decimal(header_net):
+        return
+    taxed = [(Decimal(line["tax_amount"]), amount) for line, amount in zip(lines, amounts)
+             if line.get("tax_amount") is not None]
+    header_tax = _decimal(invoice.get("tax"))
+    if header_tax is not None:
+        rate = Decimal(header_tax) / Decimal(header_net)
+    elif taxed and sum(amount for _tax, amount in taxed) != 0:
+        # The printed VAT total is read later from the page header; until then the
+        # lines' own tax and amount columns give the rate the layout applied.
+        rate = sum(tax for tax, _amount in taxed) / sum(amount for _tax, amount in taxed)
+    else:
+        rate = Decimal(0)
+    rate = rate.quantize(Decimal("0.0001"))
+    if any(abs(tax - amount * rate) > Decimal("0.01") for tax, amount in taxed):
+        return
+    for line, other in zip(lines, others):
+        line["net_amount"] = other
 
 
 def _lines_equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
