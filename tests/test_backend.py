@@ -656,8 +656,13 @@ def test_batch_aggregates_prior_allocations_and_rolls_back(api_client):
     assert client.get(f"/api/jobs/{second['id']}").json().get("export_id") is None
 
 
-def test_api_keys_are_never_echoed_and_database_contains_only_ciphertext(api_client):
+def test_api_keys_are_never_echoed_and_database_contains_only_ciphertext(api_client, monkeypatch):
     client, app = api_client
+    import httpx
+
+    monkeypatch.setattr(
+        httpx.Client, "get", lambda self, url, headers=None: httpx.Response(200, json={"data": []})
+    )
     secret = "sk-test-super-secret-never-echo"
     response = client.post(
         "/api/connections/openai", headers=MUTATION, json={"api_key": secret}
@@ -673,6 +678,39 @@ def test_api_keys_are_never_echoed_and_database_contains_only_ciphertext(api_cli
     )
     assert invalid.status_code == 422
     assert short_secret not in invalid.text
+
+
+def test_rejected_api_key_is_not_saved(api_client, monkeypatch):
+    client, app = api_client
+    import httpx
+
+    monkeypatch.setattr(
+        httpx.Client, "get", lambda self, url, headers=None: httpx.Response(401)
+    )
+    secret = "sk-ant-rejected-key-never-echo"
+    response = client.post(
+        "/api/connections/anthropic", headers=MUTATION, json={"api_key": secret}
+    )
+    assert response.status_code == 400
+    assert "rejected this API key" in response.json()["detail"]
+    assert secret not in response.text
+    assert app.state.store.secret("anthropic") is None
+
+
+def test_unreachable_provider_still_saves_unverified_key(api_client, monkeypatch):
+    client, app = api_client
+    import httpx
+
+    def offline(self, url, headers=None):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(httpx.Client, "get", offline)
+    response = client.post(
+        "/api/connections/openai", headers=MUTATION, json={"api_key": "sk-test-offline-key"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"connected": True, "verified": False}
+    assert app.state.store.secret("openai") == "sk-test-offline-key"
 
 
 def test_mutating_api_requires_request_protection_header(api_client):
