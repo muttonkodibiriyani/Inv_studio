@@ -417,3 +417,15 @@ def test_missing_lines_in_barcode_mode_and_downstream_consumers():
     records = tc.confirm_records(r, r)  # read lines are ints, missing lines strings: still sorts
     assert sum(1 for x in records if x["line"] == "missing 1") == 5 and not any(x["changed"] for x in records)
     assert tc.log_fields(r)["checks"]["lines_to_net"] == tc.FAIL
+
+
+def test_missing_line_cells_count_only_under_their_status_in_accuracy():
+    now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    read = tc.check_view(view(), sources())
+    short = tc.check_view(view(fields={"net": field("21.000", ev("Invoice printed total", "page 1", "21.000",
+                                                                 "printed"))}), sources())
+    a = tc.accuracy_summary(tc.confirm_records(read, read, at=now), now=now)["periods"]["all"]
+    b = tc.accuracy_summary(tc.confirm_records(short, short, at=now), now=now)["periods"]["all"]
+    assert b["overall"] == a["overall"] and b["fields"] == a["fields"]
+    assert b["by_status_before"]["missing_line"]["cells"] == 4
+    assert b["by_status_before"]["empty_owner_rule"]["cells"] == a["by_status_before"]["empty_owner_rule"]["cells"] + 1

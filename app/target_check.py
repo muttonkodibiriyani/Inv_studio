@@ -773,8 +773,10 @@ def accuracy_summary(records, now=None, supplier=None):
                   and (supplier is None or r.get("supplier") == supplier)]
         group = defaultdict(lambda: [0, 0])
         for r in picked:
-            for k in (("overall",), ("field", r["field"]), ("status", r["status_before"]),
-                      ("supplier", r.get("supplier") or "")):
+            # A missing line (line 'missing i') has no value to confirm: it shows under its status only, never as accurate.
+            keys = (("status", r["status_before"]),) if isinstance(r["line"], str) else \
+                (("overall",), ("field", r["field"]), ("status", r["status_before"]), ("supplier", r.get("supplier") or ""))
+            for k in keys:
                 group[k][0] += 1
                 group[k][1] += bool(r["changed"])
         invoices = len({(r.get("job_id"), r["at"]) for r in picked})
