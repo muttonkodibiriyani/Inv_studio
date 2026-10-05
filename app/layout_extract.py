@@ -727,8 +727,8 @@ def _only_distinct(values: Iterable[str]) -> str | None:
 
 def _extract_printed_date(lines: list[str]) -> str | None:
     """Preserve a labelled source date even when its locale is ambiguous."""
-    date_pattern = r"(?:\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}|\d{1,2}[- /][A-Za-z]{3,9}[- /]\d{4})"
-    label = re.compile(r"(?i)\b(?:invoice|document)\s+date\s*:?\s*(" + date_pattern + r")(?!\d)")
+    date_pattern = r"(?:\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}|\d{1,2}(?:st|nd|rd|th)?[- /][A-Za-z]{3,9},?[- /]\d{4})"
+    label = re.compile(r"(?i)(?:^|\s{2,}|\b(?:invoice|document)\s+)date\s*:?\s*(" + date_pattern + r")(?!\d)")
     values = []
     for i, line in enumerate(lines):
         match = label.search(line)
