@@ -73,6 +73,11 @@ class LookupRulesSource:
         value = normalize_name(value)
         return self._rows("item", [f"f:supplier:{value}"]) if value else []
 
+    def items_by_site(self, value, limit=20):
+        # A few rows are enough: the site's SUPPLIER_NAME is the same on all of them (checked by the caller).
+        value = normalize_name(value)
+        return self._rows("item", [f"f:site:{value}"], limit) if value else []
+
     def items_by_description(self, value, sites=None):
         tokens = [t for t in normalize_name(normalize_description(value)).split() if 3 <= len(t) <= 100][:30]
         site_terms = [f"f:site:{normalize_name(s)}" for s in sites or ()]

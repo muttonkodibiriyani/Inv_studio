@@ -92,7 +92,8 @@ def locations(workbook, flag):
 
 
 def supplier_sites(workbook, flag):
-    """Supplier site id, its one currency and status. Rows without a site id cannot be keyed and are counted."""
+    """Supplier site id, its one currency and status, with supplier code, name and site name for the SUP-001
+    bridge. Rows without a site id cannot be keyed and are counted."""
     sites, without_id = {}, 0
     for number, row in _rows(workbook, SITE_SHEET):
         _need(row, "SUPPLIER SITE", "STATUS DESCRIPTION", "CURRENCY")
@@ -106,7 +107,10 @@ def supplier_sites(workbook, flag):
         elif site in sites:
             flag(SITE_SHEET, number, "supplier site id repeats")
         else:
-            sites[site] = {"supplier_site": site, "currency": currency, "status": status}
+            # SUP-001 bridge fields; the config stays private (names never leave it).
+            sites[site] = {"supplier_site": site, "currency": currency, "status": status,
+                           "supplier_code": _cell(row.get("SUPPLIER CODE")), "supplier_name": _cell(row.get("SUPPLIER NAME")),
+                           "site_name": _cell(row.get("SUPPLIER SITE NAME"))}
     return list(sites.values()), without_id
 
 

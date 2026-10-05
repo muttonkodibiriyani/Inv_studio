@@ -62,7 +62,9 @@ def test_loader_reads_three_sheets_counts_and_flags_bad_rows(tmp_path):
     assert [v["code"] for v in loaded["vat_codes"]] == ["TKPV00", "ZZPV05", "CXPV00"]
     assert loaded["location_master"]["800901"] == {"type": fr.WAREHOUSE, "market": "TESTLAND",
                                                    "country": "TESTLAND", "entity_currency": "RT1TKD"}
-    assert loaded["supplier_sites"][1] == {"supplier_site": "22002", "currency": "AED", "status": "Inactive"}
+    assert loaded["supplier_sites"][1] == {"supplier_site": "22002", "currency": "AED", "status": "Inactive",
+                                           "supplier_code": "1", "supplier_name": "Sample Supplier",
+                                           "site_name": "ABC001RZ1ZZD"}
     assert {k: v for k, v in report.items() if k != "flagged"} == {
         "vat_codes_c_pv": 3, "vat_rows_excluded": 1, "locations": 2,
         "locations_by_type": {fr.STORE: 1, fr.WAREHOUSE: 1}, "supplier_sites": 2, "supplier_sites_active": 1,
@@ -114,7 +116,7 @@ def test_usd_site_still_needs_an_approved_usd_exception():
     sites = [{"supplier_site": "22001", "currency": "USD", "status": "Active"}]
     state = fr.Run(invoice(currency="USD"), fr.RulesConfig.from_dict(owner_config(supplier_sites=sites)), "")
     assert fr.resolve_currency(state, "22001", "KUWAIT", None) is None
-    assert [e["Exception Type"] for e in state.exceptions] == ["USD Review"]
+    assert [e["Engine Type"] for e in state.exceptions] == ["USD Review"]
 
 
 def test_tax_code_needs_a_region_row_an_active_date_and_the_printed_rate():
