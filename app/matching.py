@@ -160,7 +160,19 @@ def printed_evidence(value,text="",boxes=()):
     return None
 
 
-def rules_view(result,text="",boxes=()):
+# Header fields read off the document; extraction evidence (job.evidence) may stand in when lineage has none.
+PRINTED_KEYS=("number","date","currency","net","tax")
+
+
+def extraction_evidence(entry):
+    """job.evidence entry {quote, page, box?, source} -> a printed evidence item, or None."""
+    if not isinstance(entry,dict) or not str(entry.get("quote") or "").strip():return None
+    where=f"page {entry.get('page') or 1}"+(f" box {list(entry['box'])}" if isinstance(entry.get("box"),(list,tuple)) else "")
+    return {"kind":"printed","source":f"Invoice ({entry.get('source') or 'ai'})","reference":where,"original":str(entry["quote"])[:120],
+            "rule":"","confidence":""}
+
+
+def rules_view(result,text="",boxes=(),printed=None):
     """Turn one run_invoice result into evidence-checked review fields, lines and banner issues."""
     header=result.get("header") or {}; lineage=result.get("lineage") or []
     found=defaultdict(list)
@@ -191,6 +203,9 @@ def rules_view(result,text="",boxes=()):
             evidence=[e for l in out_lines[:1] for e in l["cells"]["Unit Tax Code"]["evidence"]]
         else:
             value=header.get(name);evidence=found.get((name,None),[])
+            if not evidence and key_ in PRINTED_KEYS:
+                located=extraction_evidence(((printed or {}).get("header") or {}).get(key_))
+                evidence=[located] if located else []
             if not evidence and name in ("Net Amount","Tax Amount"):
                 located=printed_evidence(value,text,boxes);evidence=[located] if located else []
         fields[key_]={"label":label,"target":name,**field(key_,value,evidence,label)}
@@ -211,6 +226,14 @@ def rules_view(result,text="",boxes=()):
     if below:
         issues.append({"code":"Owner Review","message":f"Item lines resolved {resolved}/{total}: below 95%, owner review required",
                        "owner":"Owner","line":None,"rule":"ITEM-95","evidence":"","blocking":True})
+    # A second reader (OCR) disagreeing with the extracted value never edits it; it is surfaced for the reviewer.
+    printed=printed if isinstance(printed,dict) else {}
+    disagreements=[(None,k,e) for k,e in (printed.get("header") or {}).items()]
+    disagreements+=[(n,k,e) for n,row in enumerate(printed.get("lines") or [],1) if isinstance(row,dict) for k,e in row.items()]
+    for line,k,e in disagreements:
+        if isinstance(e,dict) and isinstance(e.get("review"),dict):
+            issues.append({"code":"Evidence Disagreement","message":f"{k}: {e['review'].get('reason') or 'readers disagree'}; value kept, check the document",
+                           "owner":"Accounts payable","line":line,"rule":"EVID-OCR","evidence":f"page {e.get('page') or 1}","blocking":False})
     target_blank={"Document","Supplier Site","Order No","Location","Location Type","Document Date","Net Amount","Tax Amount","Tax Code"}
     for label,line,why in flags:
         name=next((n for _,lab,n in RULES_FIELDS if lab==label),label)

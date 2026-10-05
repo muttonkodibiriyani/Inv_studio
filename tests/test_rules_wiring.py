@@ -229,3 +229,18 @@ def test_demo_references_are_test_only(production, monkeypatch, tmp_path):
 
 def test_legacy_demo_validation_is_still_available_to_tests():
     assert matching.validate and matching.enrich and Decimal("0.95") == matching.ITEM_THRESHOLD
+
+
+def test_extraction_evidence_backs_printed_fields_and_disagreement_is_a_warning():
+    result={"status":"Approved","header":{"Document":"SYN-1"},"lines":[],"lineage":[],"exceptions":[]}
+    printed={"header":{"number":{"quote":"Invoice SYN-1","page":1,"box":[0.1,0.1,0.3,0.12],"source":"ai",
+                                 "review":{"reason":"OCR read a different number","other_value":"SYN-7"}}},
+             "lines":[{"qty":{"quote":"2","page":1,"source":"ocr"}}]}
+    view=rules_view(result,printed=printed)
+    number=view["fields"]["number"]
+    assert number["value"]=="SYN-1" and not number["flagged"]
+    assert number["evidence"][0]["kind"]=="printed" and number["evidence"][0]["reference"]=="page 1 box [0.1, 0.1, 0.3, 0.12]"
+    warn=[i for i in view["issues"] if i["rule"]=="EVID-OCR"]
+    assert len(warn)==1 and warn[0]["blocking"] is False and "SYN-1" not in warn[0]["message"]
+    # Without extraction evidence the same value stays empty and flagged.
+    assert rules_view(result)["fields"]["number"]["value"] is None

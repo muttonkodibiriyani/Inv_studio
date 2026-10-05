@@ -271,7 +271,7 @@ def create_app(data_dir=None):
         with store.connection() as c:config=store.get("fine_rules_config",{},c);signature=rules_signature(c)
         entry={"invoice":invoice,"filename":j["filename"],"text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":j["id"]}
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
-        view=rules_view(plain(result),entry["text"],entry["boxes"])
+        view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"))
         view.update(signature=signature,computed_at=datetime.now(timezone.utc).isoformat())
         return view
     def fresh_rules(j):
