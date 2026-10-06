@@ -935,8 +935,8 @@ print(json.dumps({
     provenance: [],
   }));
   const traceEvidence = await page.locator("#trace-list li").allTextContents();
-  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s reading · 4\.50 s waiting for a reader · 1,222 text characters · 0 fields · 0 items · 0% field completeness/);
-  assert.match(traceEvidence[1], /Docling: Extracted · Table and word geometry conversion · 7\.25 s reading · 31,717 text characters · 6 fields · 5 items · 80% field completeness/);
+  assert.match(traceEvidence[0], /PaddleOCR: Text Only · Text only · 1\.93 s reading · 4\.50 s waiting for a reader · 1,222 text characters · 0 fields · 0 items$/, "A reader that found nothing still showed a fields-found percentage");
+  assert.match(traceEvidence[1], /Docling: Extracted · Table and word geometry conversion · 7\.25 s reading · 31,717 text characters · 6 fields · 5 items · 80% fields found/);
   await page.evaluate(() => renderTrace({selected_engine: "paddleocr", trace: [
     {engine: "paddleocr", status: "extracted"}, {engine: "docling", status: "extracted"},
   ]}));

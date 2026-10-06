@@ -241,6 +241,11 @@ function collectEntries() {
   return entries;
 }
 
+// An empty header field shows the header-level exception raised for it, e.g. R-016's reason under Tax code.
+function headerException(job, target) {
+  return (job.validation?.issues || []).find((issue) => target && issue.code === target && !issue.line && issue.message)?.message || "";
+}
+
 function renderRulesResult(job) {
   const rules = job.rules;
   const show = rulesJob(job) && Boolean(rules);
@@ -260,7 +265,9 @@ function renderRulesResult(job) {
     const dd = make("dd");
     const empty = field.value === null || field.value === undefined;
     if (empty) {
-      dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence" : "Not found in owner sheets or on the invoice"));
+      dd.append(make("span", "rules-flagged", field.reason === "No evidence" ? "Empty · no evidence"
+        // "Not found" is the view's placeholder for every blank field, not a reason of its own.
+        : (field.reason !== "Not found" && field.reason) || headerException(job, field.target) || "Not found in owner sheets or on the invoice"));
     } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
     dd.append(...readerNotes(job, "header", key));
     if ((empty && RULES_REQUIRED_HEADER.has(key)) || enteredByReviewer(field)) dd.append(rulesEntry(field, field.label, "header", key));
@@ -1222,6 +1229,64 @@ function hasStructuredInvoiceData(job) {
   });
 }
 
+// A coverage figure beside an invoice with no item lines or no key fields reads like a pass (D88), so the box says
+// "Not read" and gives the reason the reader trace shows instead of a percentage.
+const KEY_FIELDS = ["number", "po", "date", "net", "tax"];
+const AI_ENGINES = ["openai", "anthropic", "chatgpt", "claude_local", "vertex"];
+
+function readFailure(job) {
+  const invoice = job.invoice || {};
+  const lines = invoice.lines?.length || 0;
+  const keyFields = KEY_FIELDS.filter((name) => String(invoice[name] ?? "").trim() !== "").length;
+  if (lines && keyFields) return null;
+  const what = !lines && !keyFields ? "no item lines and no key fields were found" : !lines ? "no item lines were found" : "no key fields were found";
+  return { what, why: readFailureReasons(job).join("; ") || "no reader returned them" };
+}
+
+// What lowers the figure, in the order engines.quality() counts it, so a missing tax total is not read as missing items.
+function missingFields(invoice) {
+  const blank = (value) => value === null || value === undefined || String(value).trim() === "";
+  const labels = { number: "Invoice number", date: "Invoice date", currency: "Currency", net: "Net total", tax: "Tax total" };
+  const missing = Object.entries(labels).filter(([name]) => blank(invoice[name])).map(([, label]) => `${label} missing`);
+  if (!blank(invoice.date) && !/^\d{4}-\d{2}-\d{2}$/.test(String(invoice.date))) missing.push("Invoice date not a calendar date");
+  const lines = invoice.lines || [];
+  [["qty", "quantity"], ["price", "unit price"], ["uom", "unit of measure"]].forEach(([name, label]) => {
+    const count = lines.filter((line) => blank(line[name])).length;
+    if (count) missing.push(`${count} line${count === 1 ? "" : "s"} without ${label}`);
+  });
+  const unidentified = lines.filter((line) => blank(line.sku) && blank(line.gtin)).length;
+  if (unidentified) missing.push(`${unidentified} line${unidentified === 1 ? "" : "s"} without item id`);
+  if (lines.length && !blank(invoice.net) && lines.every((line) => !blank(line.qty) && !blank(line.price))) {
+    const total = lines.every((line) => !blank(line.net_amount))
+      ? lines.reduce((sum, line) => sum + Number(line.net_amount), 0)
+      : lines.reduce((sum, line) => sum + Number(line.qty) * Number(line.price), 0);
+    if (Math.abs(total - Number(invoice.net)) > 0.01) missing.push("line amounts do not add up to the net total");
+  }
+  return missing;
+}
+
+function readFailureReasons(job) {
+  const trace = job.trace || [];
+  const reasons = [];
+  const textCharacters = Math.max(String(job.text || "").trim().length, ...trace.map((entry) => Number(entry.text_characters) || 0));
+  const pageDocument = /\.(pdf|png|jpe?g|tiff?|webp|bmp|gif|heic)$/i.test(job.filename || "");
+  if (trace.some((entry) => entry.status === "needs_ocr") || (pageDocument && textCharacters < 20)) reasons.push("scanned image, no text layer");
+  const ocr = trace.filter((entry) => ["paddleocr", "docling"].includes(entry.engine));
+  if (ocr.some((entry) => entry.status === "failed")) reasons.push("OCR failed");
+  else if (ocr.length && ocr.every((entry) => entry.status === "unavailable")) reasons.push("OCR reader not installed");
+  else if (ocr.some((entry) => ["text_only", "no_fields"].includes(entry.status))) reasons.push("OCR read no invoice fields");
+  else if (ocr.some((entry) => entry.status === "extracted" && !Number(entry.line_items))) reasons.push("OCR read no item lines");
+  const ai = trace.filter((entry) => AI_ENGINES.includes(entry.engine) || entry.model !== undefined);
+  const aiStatus = (status) => ai.some((entry) => entry.status === status);
+  if (!ai.length) reasons.push("AI fallback not run");
+  else if (aiStatus("failed")) reasons.push("AI read failed");
+  else if (aiStatus("needs_connection")) reasons.push("AI fallback not set up");
+  else if (aiStatus("no_fields")) reasons.push("AI returned no fields");
+  else if (ai.some((entry) => entry.status === "extracted" && !Number(entry.line_items))) reasons.push("AI returned no item lines");
+  else if (aiStatus("skipped")) reasons.push("AI fallback skipped");
+  return reasons;
+}
+
 function renderSelectedJob(job) {
   $("#workspace-empty").hidden = true;
   $("#review-panel").hidden = false;
@@ -1246,10 +1311,11 @@ function renderSelectedJob(job) {
   $("#empty-retry").disabled = $("#retry-job").disabled;
   const hasText = Boolean(String(job.text || "").trim());
   $("#empty-show-text").hidden = !hasText;
-  $("#empty-extraction-title").textContent = hasText ? "Text read, invoice fields not extracted" : "Invoice fields were not extracted";
-  $("#empty-extraction-detail").textContent = hasText
+  const failure = processing ? null : readFailure(job);
+  $("#empty-extraction-title").textContent = hasText ? "Text read, invoice fields not extracted" : "This document could not be read";
+  $("#empty-extraction-detail").textContent = (failure ? `Why: ${failure.why}. ` : "") + (hasText
     ? "The document text is available, but Invoice Studio could not turn it into invoice fields. Nothing is approved and export remains on hold."
-    : "No structured invoice fields are available yet. Retry with another extraction path, configure AI fallback or enter the workbook values manually.";
+    : "No structured invoice fields are available yet. Retry with another extraction path, configure AI fallback or enter the workbook values manually.");
   if (processing) {
     const title = job.status === "queued" ? "Waiting for an extraction slot…" : `${humanize(job.progress?.engine || "engine")} is reading the invoice…`;
     const detail = job.progress?.message || "The result will appear here when it is ready.";
@@ -1372,7 +1438,14 @@ function renderInvoiceForm(job) {
   renderRulesResult(job);
   const raw = Number(job.completeness);
   const percent = Number.isFinite(raw) ? Math.round(Math.max(0, Math.min(1, raw)) * 100) : null;
-  $("#completeness strong").textContent = percent === null ? "—" : `${percent}%`;
+  const failure = readFailure(job);
+  const lowered = failure || percent === null || percent >= 100 ? [] : missingFields(invoice);
+  $("#completeness").classList.toggle("not-read", Boolean(failure));
+  $("#completeness strong").textContent = failure ? "Not read" : percent === null ? "—" : `${percent}%`;
+  $("#completeness-reason").hidden = !failure && !lowered.length;
+  $("#completeness-reason").textContent = failure
+    ? `Could not read this document: ${failure.what} (${failure.why}).`
+    : lowered.length ? `Lowered by: ${lowered.join("; ")}.` : "";
   app.reviewDirty = false;
   renderReviewSaveState();
 }
@@ -1533,7 +1606,8 @@ function renderTrace(job) {
       if (Number.isFinite(lineItems)) evidence.push(`${lineItems.toLocaleString()} item${lineItems === 1 ? "" : "s"}`);
       else if (entry.status === "text_only" || entry.method === "text_only") evidence.push("0 items");
       const evidenceText = evidence.length ? ` · ${evidence.join(" · ")}` : "";
-      const completeness = entry.completeness === undefined ? "" : ` · ${Math.round(Number(entry.completeness) * 100)}% field completeness`;
+      const nothingRead = extractedFields === 0 || lineItems === 0;
+      const completeness = entry.completeness === undefined || nothingRead ? "" : ` · ${Math.round(Number(entry.completeness) * 100)}% fields found`;
       const reason = entry.reason ? ` — ${entry.reason}` : "";
       const recovery = entry.recovery?.attempted
         ? entry.recovery.selected_pass === "higher_resolution" ? " · Recovery read retained after consistency checks" : " · Original read retained; recovery did not safely improve it"
