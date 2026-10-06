@@ -55,7 +55,7 @@ function rulesEntry(cell, label, scope, name, line) {
 function rulesCell(cell, name, line) {
   const td = make("td");
   const empty = !cell || cell.value === null || cell.value === undefined;
-  if (empty) td.append(make("span", "rules-flagged", cell?.reason === "No evidence" ? "Empty · no evidence" : "Not found"));
+  if (empty) td.append(make("span", "rules-flagged", cell?.reason === "No evidence" ? "Empty · no evidence" : cell?.reason || "Not found"));
   else td.append(make("span", "", cell.value), make("small", "", evidenceText(cell.evidence)));
   td.append(...readerNotes(app.currentJob, "line", name, line));
   if ((empty && RULES_REQUIRED_LINE.has(name)) || enteredByReviewer(cell)) td.append(rulesEntry(cell, name, "line", name, line));
@@ -1260,7 +1260,8 @@ function missingFields(invoice) {
     const total = lines.every((line) => !blank(line.net_amount))
       ? lines.reduce((sum, line) => sum + Number(line.net_amount), 0)
       : lines.reduce((sum, line) => sum + Number(line.qty) * Number(line.price), 0);
-    if (Math.abs(total - Number(invoice.net)) > 0.01) missing.push("line amounts do not add up to the net total");
+    // The server compares Decimals; rounding the float gap drops summing noise (0.1 + 0.2 - 0.29 is not over 0.01).
+    if (Math.round(Math.abs(total - Number(invoice.net)) * 1e6) / 1e6 > 0.01) missing.push("line amounts do not add up to the net total");
   }
   return missing;
 }

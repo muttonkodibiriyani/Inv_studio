@@ -35,6 +35,7 @@ const base = {
   boxes: [],
 };
 const taxReason = "Printed tax amount is missing; the region rate cannot be checked";
+const barcodeReason = "printed barcode fails the GTIN check digit (likely misprint) - check the printout";
 const unreadLine = (n) => ({ description: `Synthetic row ${n}`, qty: 1, price: 2 });
 const jobs = [
   {
@@ -98,7 +99,8 @@ const jobs = [
     id: "rf-no-tax",
     filename: "SYNTHETIC-no-tax.pdf",
     selected_engine: "openai",
-    invoice: { number: "SYN-RF-2", date: "2026-10-04", currency: "AED", net: 25, lines: [{ sku: "SYN-1", qty: 2, price: 10, uom: "EA" }, { sku: "SYN-2", qty: 1, price: 5, uom: "EA" }] },
+    // The printed line amounts reach the net only through float noise (0.1 + 0.2 - 0.29), which the server's Decimal check accepts.
+    invoice: { number: "SYN-RF-2", date: "2026-10-04", currency: "AED", net: 0.29, lines: [{ sku: "SYN-1", qty: 2, price: 10, uom: "EA", net_amount: 0.1 }, { sku: "SYN-2", qty: 1, price: 5, uom: "EA", net_amount: 0.2 }] },
     completeness: 0.93,
     text: "SYNTHETIC DIGITAL TEXT",
     trace: [{ engine: "openai", model: "synthetic-model", status: "extracted", extracted_fields: 4, line_items: 2, completeness: 0.93 }],
@@ -117,7 +119,13 @@ const jobs = [
         taxCode: { label: "Tax code", target: "Tax Code", value: null, evidence: [], flagged: true, reason: "Not found" },
         location: { label: "Delivery location", target: "Location", value: null, evidence: [], flagged: true, reason: "Not found" },
       },
-      lines: [],
+      lines: [{
+        line: 1,
+        cells: { Item: { value: null, evidence: [], flagged: true, reason: "Not found" }, UPC: { value: null, evidence: [], flagged: true, reason: barcodeReason } },
+        status: "",
+        source_row: "",
+        match_method: "",
+      }],
       issues: [],
       item_lines: { resolved: 2, total: 2, rate: "1.0000", threshold: "0.95", owner_review: false, definition: "Synthetic definition" },
       revision: 1,
@@ -198,6 +206,9 @@ try {
     const ruleField = async (label) => page.locator("#rules-fields dt").filter({ hasText: new RegExp(`^${label}$`) }).locator("xpath=following-sibling::dd[1]").textContent();
     assert.match(await ruleField("Tax code"), new RegExp(`^${taxReason}`), `${at}: the empty Tax code does not show the R-016 reason`);
     assert.match(await ruleField("Delivery location"), /^Not found in owner sheets or on the invoice/, `${at}: a field with no reason lost the generic text`);
+    const lineCell = (column) => page.locator(`#rules-lines tr:first-child td:nth-child(${column})`).textContent();
+    assert.match(await lineCell(3), new RegExp(`^${barcodeReason.replace(/[()]/g, "\\$&")}`), `${at}: the empty UPC cell does not show its own reason`);
+    assert.match(await lineCell(2), /^Not found/, `${at}: an empty line cell with no reason lost "Not found"`);
 
     assert.deepEqual(pageErrors, []);
     await page.close();
