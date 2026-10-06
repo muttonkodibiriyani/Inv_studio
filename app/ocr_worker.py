@@ -155,6 +155,11 @@ def template_extract(text, templates, with_meta=False):
                 out[field]=value
                 break
     if isinstance(out.get("date"),(date,datetime)):out["date"]=out["date"].strftime("%Y-%m-%d")
+    if out.get("date") and not out.get("date_printed"):
+        # The date as printed, for the review: only a labelled one the template's date confirms.
+        from .layout_extract import _extract_printed_date
+        printed=_extract_printed_date(text.splitlines())
+        if printed and _printed_date_is(printed,out["date"]):out["date_printed"]=printed
     from .models import Line
     lines=[]
     for row in out.get("lines",[]):
@@ -173,6 +178,17 @@ def template_extract(text, templates, with_meta=False):
                 if places is not None:value=value.quantize(Decimal(1).scaleb(-int(places)))
                 out[field]=format(value,"f")
     return (out,meta) if with_meta else out
+
+
+def _printed_date_is(printed,iso):
+    # Either day/month order may be the printed locale; the template already chose the date.
+    value=re.sub(r"(?i)\b(\d{1,2})(st|nd|rd|th)\b",r"\1",re.sub(r"\s*([-/.])\s*",r"\1",printed.strip()))
+    for fmt in ("%d/%m/%Y","%m/%d/%Y","%d-%m-%Y","%m-%d-%Y","%d.%m.%Y","%Y-%m-%d","%Y/%m/%d","%d/%m/%y","%d-%m-%y",
+                "%d-%b-%Y","%d %b %Y","%d/%b/%Y","%d %B %Y","%d-%B-%Y","%B %d, %Y","%b %d, %Y","%B %d %Y"):
+        try:
+            if datetime.strptime(value,fmt).date().isoformat()==str(iso):return True
+        except ValueError:pass
+    return False
 
 
 LEARNED_HEADER_FIELDS=("number","date","currency","net","tax","po")

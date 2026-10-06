@@ -399,3 +399,27 @@ def test_text_only_returns_the_layer_and_boxes_without_parsing(tmp_path, monkeyp
     payload = json.loads(out.read_text())
     assert payload["invoice"] is None and payload["extraction_method"] == "text_only"
     assert payload["boxes"] == boxes and payload["text"] == "Invoice SYN-1" and parsed == []
+
+
+def test_template_date_keeps_the_labelled_printed_date_it_confirms(tmp_path):
+    (tmp_path / "synthetic.yml").write_text(
+        "issuer: Synthetic Supplier\n"
+        "keywords:\n  - Synthetic Supplier\n"
+        "fields:\n"
+        "  invoice_number: 'Invoice No:\\s*(SYN-\\d+)'\n"
+        "  date: 'Issued\\s+(\\d{2}/\\d{2}/\\d{4})'\n"
+        "required_fields:\n  - invoice_number\n  - date\n"
+        "options:\n  date_formats:\n    - '%d/%m/%Y'\n"
+    )
+    templates = ocr_worker.templates_from([tmp_path])
+
+    def read(invoice_date):
+        text = f"Synthetic Supplier\nInvoice No: SYN-1\nInvoice Date: {invoice_date}\nIssued 05/03/2031\n"
+        return ocr_worker.template_extract(text, templates)
+
+    confirmed = read("05/03/2031")
+    assert confirmed["date"] == "2031-03-05"
+    assert confirmed["date_printed"] == "05/03/2031"
+    assert "date_printed" not in read("06/03/2031")  # a printed date the template's date contradicts is not shown
+    assert read("5th March 2031")["date_printed"] == "5th March 2031"
+    assert "date_printed" not in read("5th April 2031")
