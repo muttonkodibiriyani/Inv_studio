@@ -109,7 +109,12 @@ try {
 
     await page.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
     await page.locator("#app-shell").waitFor({ state: "visible" });
-    await page.locator('[aria-label="Review SYNTHETIC-part-code.png"]').click();
+    // Wait for the click's own GET: the boot already opened this job, and editing while the click's refetch is in
+    // flight is covered by review_reselect.browser.mjs.
+    await Promise.all([
+      page.waitForResponse((response) => response.url().endsWith(`/api/jobs/${job.id}`) && response.request().method() === "GET"),
+      page.locator('[aria-label="Review SYNTHETIC-part-code.png"]').click(),
+    ]);
     await page.locator("#line-items tr").first().waitFor({ state: "visible" });
 
     // The reviewer edits line 1's description and adds a line; the printed part code stays on line 1 only.

@@ -1106,11 +1106,16 @@ async function selectJob(id, { reveal = false } = {}) {
     return;
   }
   const token = ++app.selectionToken;
+  // A clean form that the reviewer edits while this job's GET is in flight keeps the edits: re-rendering would
+  // silently replace them before the save. A form already dirty before the await (the save-conflict reload) still
+  // loads the server version.
+  const dirtyBefore = app.reviewDirty;
   app.selectedJobId = id;
   renderJobs();
   try {
     const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (token !== app.selectionToken) return;
+    if (!dirtyBefore && app.reviewDirty && app.currentJob?.id === job.id) return;
     const switched = app.currentJob?.id !== job.id;
     app.currentJob = job;
     app.reviewDirty = false;
