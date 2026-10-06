@@ -224,6 +224,16 @@ def test_local_misprinted_barcode_goes_to_barcode_unchecked(monkeypatch,tmp_path
     assert result["evidence"]["lines"][0]["gtin"]["review"]["reason"]==scan_guard.MISPRINT
 
 
+
+def test_a_misprint_the_reader_already_set_aside_is_still_flagged(monkeypatch,tmp_path):
+    local={"number":"LOCAL-1","date":"2026-01-15","net":"5.00","tax":"0.25",
+           "lines":[{"sku":"A","barcode_unchecked":wrong_check(CODE),"qty":"1","price":"5.00","net_amount":"5.00"}]}
+    result,calls=run_scan(monkeypatch,tmp_path,ai_scan_read(),local=local,ocr_tokens=[wrong_check(CODE)])
+    line=result["invoice"]["lines"][0]
+    assert line["gtin"] is None and line["barcode_unchecked"]==wrong_check(CODE)
+    review=result["evidence"]["lines"][0]["gtin"]["review"]
+    assert review["reason"]==scan_guard.MISPRINT and review["other_value"]==wrong_check(CODE)
+
 def test_po_is_never_read_from_a_po_box(monkeypatch,tmp_path):
     ai=ai_scan_read(po="4521")
     result,_=run_scan(monkeypatch,tmp_path,ai,ocr_tokens=[CODE,OTHER],

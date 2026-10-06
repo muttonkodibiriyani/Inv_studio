@@ -251,7 +251,7 @@ def test_compound_barcode_part_column_only_maps_pure_digits_to_gtin():
         "page": 1,
         "rows": [
             ["Barcode / Part Number", "Description", "Qty", "Unit Price"],
-            ["001234567890", "Numeric identifier item", "1", "3.00"],
+            ["001234567895", "Numeric identifier item", "1", "3.00"],
             ["PR-001234567890-OP", "Mixed part item", "1", "4.00"],
         ],
     }]
@@ -259,7 +259,7 @@ def test_compound_barcode_part_column_only_maps_pure_digits_to_gtin():
     result = extract_invoice_from_tables("Tax Invoice", tables)
 
     assert result is not None
-    assert result["lines"][0]["gtin"] == "001234567890"
+    assert result["lines"][0]["gtin"] == "001234567895"
     assert "sku" not in result["lines"][0]
     assert result["lines"][1]["sku"] == "PR-001234567890-OP"
     assert "gtin" not in result["lines"][1]

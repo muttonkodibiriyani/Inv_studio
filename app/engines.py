@@ -311,7 +311,11 @@ def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
     claims=[]
     for n,line in enumerate(lines):
         printed=line.get("gtin")
-        if printed in (None,""):continue
+        if printed in (None,""):
+            # A reader that already moved a failed-check code aside still owes the review flag.
+            if line.get("barcode_unchecked") and not (rows[n].get("gtin") or {}).get("review"):
+                rows[n]["gtin"]=_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
+            continue
         gtin,unchecked,reason=scan_guard.classify_barcode(printed)
         from_ai=line_readers[n].get("gtin")=="ai"
         line["gtin"]=gtin

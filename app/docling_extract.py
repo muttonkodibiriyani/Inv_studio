@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any
 
 from app.layout_extract import is_packing_page
+from app.scan_guard import classify_barcode
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
@@ -906,12 +907,21 @@ def extract_invoice_from_tables(
                         values["_other_amount" if role == "other_amount" else role] = parsed
                 elif role == "gtin":
                     parsed = _gtin(raw)
-                    if parsed is not None:
-                        values[role] = parsed
+                    gtin, unchecked, _reason = classify_barcode(parsed)
+                    if unchecked:
+                        # A complete code failing the GS1 check digit is never gtin.
+                        values["barcode_unchecked"] = unchecked
+                    elif parsed is not None:
+                        # A checked code, or unreadable text that guard_lines clears and flags.
+                        values[role] = gtin or parsed
                 elif role == "part_code":
                     part_code = str(raw or "").strip() or None
                     if part_code and re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
-                        values["gtin"] = part_code
+                        gtin, unchecked, _reason = classify_barcode(part_code)
+                        if gtin:
+                            values["gtin"] = gtin
+                        else:
+                            values["barcode_unchecked"] = unchecked
                 elif str(raw or "").strip():
                     values[role] = str(raw).strip()
             if values.get("description"):
@@ -928,7 +938,7 @@ def extract_invoice_from_tables(
             if part_code and not re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
                 # Kept even when the description's printed code already set sku.
                 values["part_code"] = part_code
-            if part_code and "gtin" not in values:
+            if part_code and "gtin" not in values and "barcode_unchecked" not in values:
                 values.setdefault("sku", part_code)
             identity = any(values.get(key) for key in ("sku", "gtin", "description"))
             priced_quantity = values.get("qty") is not None and values.get("price") is not None
@@ -984,7 +994,8 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
-                    for field in ("sku", "gtin", "part_code", "uom", "net_amount", "tax_amount", "_other_amount"):
+                    for field in ("sku", "gtin", "barcode_unchecked", "part_code", "uom",
+                                  "net_amount", "tax_amount", "_other_amount"):
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
