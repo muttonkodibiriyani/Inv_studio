@@ -95,6 +95,17 @@ function lineReviews(job) {
   const lines = job?.evidence?.lines;
   return Array.isArray(lines) && lines.length === (job?.invoice?.lines || []).length ? lines : null;
 }
+// A "not read" or "not printed" note explains an EMPTY value, so it hides while the reviewer's own entry fills the input
+// (decision 156); barcode notes (misprint, unreadable, unconfirmed) stay, since the printed code is still in doubt.
+const EMPTY_VALUE_CODES = new Set(["not_read", "not_printed"]);
+function noteFor(input, note) {
+  if (note && EMPTY_VALUE_CODES.has(note.dataset.reviewCode)) {
+    const sync = () => { note.hidden = String(input.value ?? "").trim() !== ""; };
+    input.addEventListener("input", sync);
+    sync();
+  }
+  return note;
+}
 const hasLineReview = (job) => (job?.evidence?.lines || []).some((entry) => Object.values(entry || {}).some((value) => value?.review?.reason));
 
 function readerNotes(job, scope, column, line) {
@@ -1435,7 +1446,7 @@ function renderInvoiceForm(job) {
     }
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
-    const review = reviewNote(job.evidence?.header?.[name]?.review);
+    const review = noteFor(input, reviewNote(job.evidence?.header?.[name]?.review));
     if (review) wrapper.append(review);
     if (buyer) {
       wrapper.append(make("small", "buyer-evidence", buyerEvidence(buyer)));
@@ -1517,7 +1528,7 @@ function lineInput(name, value, label, type = "text") {
 }
 
 // An input followed by its read review, if the reader left one for that line field.
-const withReview = (input, reviews) => [input, reviewNote(reviews?.[input.name]?.review)].filter(Boolean);
+const withReview = (input, reviews) => [input, noteFor(input, reviewNote(reviews?.[input.name]?.review))].filter(Boolean);
 
 function printedLineAmounts(line, reviews) {
   const details = make("details", "line-amounts");
@@ -2644,7 +2655,11 @@ function applyReferenceCandidate(action) {
   if (!selected.sku && !selected.internal_item && !selected.gtin && !selected.uom) return;
   const names = target.mode === "draft" ? { internal_item: "Item", gtin: "UPC" } : { internal_item: "item_id", sku: "sku", gtin: "gtin", uom: "uom", description: "description" };
   Object.entries(names).forEach(([field, inputName]) => {
-    if (selected[field]) $(`[name="${inputName}"]`, target.row).value = selected[field];
+    if (!selected[field]) return;
+    const input = $(`[name="${inputName}"]`, target.row);
+    input.value = selected[field];
+    // As if typed: a filled field hides its "Not read" note (decision 160) and draft totals update.
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   const mode = target.mode;
   const evidence = $('[name="evidence"]', target.row);

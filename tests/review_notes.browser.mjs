@@ -1,7 +1,8 @@
 /**
  * Playwright check that read reviews (evidence.*.review) show beside their review-form inputs, worded by code
  * (F4, decisions 144-146): header and line, a neutral "Check" without a code, nothing where there is no review,
- * and line notes hidden once a saved line count no longer matches the read. Every job is mocked synthetic data.
+ * line notes hidden once a saved line count no longer matches the read, and (F6, decision 156) a not_read or
+ * not_printed note hidden while its input holds a value. Every job is mocked synthetic data.
  *
  *   BASE_URL=http://127.0.0.1:8765 node tests/review_notes.browser.mjs
  */
@@ -39,6 +40,8 @@ const evidence = {
   header: {
     tax: review("no tax total printed on the invoice", "not_printed"),
     po: review("a P.O. Box is not an order number"),
+    // Filled already (as after a save): the stored not_read note starts hidden.
+    number: review("an invoice number label is printed but no value was read", "not_read"),
   },
   lines: [
     { gtin: review("barcode unreadable or incomplete", "unreadable", "12345"), sku: review("an item code column is printed but this value was not read", "not_read") },
@@ -112,6 +115,46 @@ try {
   assert.equal(await page.locator(`${row(3)} details.line-amounts`).getAttribute("open"), null);
   assert.equal(await page.locator("#line-reviews-hidden").isVisible(), false);
 
+  // F6 (decision 156): a not_read / not_printed note explains an empty input, so it hides while the input is filled
+  // and returns when cleared; a barcode note stays whatever is typed.
+  assert.equal(await note("#header-fields", "number").isVisible(), false, "a filled field hides its not_read note");
+  assert(await note("#header-fields", "tax").isVisible());
+  await page.locator('#header-fields [name="tax"]').fill("5");
+  assert.equal(await note("#header-fields", "tax").isVisible(), false, "typing hides the not_printed note");
+  await page.locator('#header-fields [name="tax"]').fill("");
+  assert(await note("#header-fields", "tax").isVisible(), "clearing the input brings it back");
+  await page.locator(`${row(1)} [name="sku"]`).fill("SYN-TYPED-1");
+  assert.equal(await note(row(1), "sku").isVisible(), false, "a line not_read note hides too");
+  await page.locator(`${row(1)} [name="sku"]`).fill(" ");
+  assert(await note(row(1), "sku").isVisible(), "whitespace counts as empty");
+  await page.locator(`${row(1)} [name="gtin"]`).fill("40000008");
+  assert(await note(row(1), "gtin").isVisible(), "a barcode note stays when the input is filled");
+  await page.locator(`${row(1)} [name="sku"]`).fill("");
+  await page.locator(`${row(1)} [name="gtin"]`).fill("");
+
+  // A confirmed reference lookup fills the sku as if typed, so its not_read note hides too (decision 160).
+  await page.route("**/api/reference-lookup/summary", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ sources: [] }) }));
+  await page.route(/\/api\/reference-lookup\/(search|products)\?/, (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
+    records: [{
+      kind: "item", source_hash: "synthetic-source", source_sheet: "ItemMaster", source_row: 2,
+      data: { Description: "Synthetic one", VPN: "SYN-LOOKUP-1" }, flags: [],
+      candidate_fields: { sku: ["SYN-LOOKUP-1"], description: ["Synthetic one"] },
+      candidate_field_sources: { sku: [{ column: "VPN", value: "SYN-LOOKUP-1" }] },
+      match: { basis: ["description_tokens"], score: 0.98, matched_terms: ["Synthetic one"] },
+      approved_for_matching: false, requires_confirmation: true,
+    }],
+    next_cursor: null, notice: "Source evidence only.",
+  }) }));
+  assert(await note(row(1), "sku").isVisible());
+  await page.locator(row(1)).getByRole("button", { name: "Find item" }).click();
+  const candidate = page.locator(".reference-result").first();
+  await candidate.locator("summary").click();
+  await candidate.locator(".candidate-confirm").check();
+  await candidate.getByRole("button", { name: "Use selected item" }).click();
+  await page.locator(`${row(1)} [name="sku"]`).waitFor({ state: "visible" });
+  assert.equal(await page.locator(`${row(1)} [name="sku"]`).inputValue(), "SYN-LOOKUP-1");
+  assert.equal(await note(row(1), "sku").isVisible(), false, "a lookup-filled sku hides its not_read note");
+
   // Remove the unreviewed third line and save: the read's line notes no longer match the rows.
   await page.locator(`${row(3)} .remove-line`).click();
   await page.locator("#save-review").click();
@@ -121,7 +164,7 @@ try {
   assert.equal(await page.locator("#line-reviews-hidden").textContent(), "Line read notes hidden after a line was added or removed.");
   assert.equal(await note("#header-fields", "tax").textContent(), "Not printed: no tax total printed on the invoice", "header reviews still shown");
   assert.deepEqual(pageErrors, []);
-  console.log(`Review notes browser test passed (header and line reviews by code, hidden after a line count change; ${baseURL}).`);
+  console.log(`Review notes browser test passed (header and line reviews by code, not_read hidden while filled (typed or looked up), hidden after a line count change; ${baseURL}).`);
 } finally {
   await browser.close();
 }
