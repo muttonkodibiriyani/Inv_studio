@@ -130,3 +130,17 @@ def test_fallback_lines_stand_in_only_when_the_ai_lines_sum_to_the_net():
     merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"lines": unreconciled}, {}, {}, "native", "fallback")
     assert merged["lines"] == engine["lines"] and lines == [{f: "native" for f in engine["lines"][0]}]
     assert notes[0].endswith("the local lines are kept; the AI lines do not sum to the net either")
+
+
+def test_lines_whose_quantity_times_price_sums_to_the_net_need_no_ai_call(monkeypatch, tmp_path):
+    # The line-amount column reads short (e.g. a discount column), but quantity x price sums to the net exactly.
+    monkeypatch.delenv("INV_STUDIO_AI_CROSS_CHECK", raising=False)
+    native = {**complete_native_invoice(), "date": "2026-01-15"}
+    native["lines"][0]["net_amount"] = "9.00"
+    result, calls = run(monkeypatch, tmp_path, native, {**native, "number": "AI-1"})
+    assert calls.count("ai") == 0 and result["readers"]["ai"]["need"] == "cross_check"
+    assert not any(g.startswith(engines.UNRECONCILED) for g in result["readers"]["gaps"])
+    # Neither sum reaching the net is still a fallback.
+    native["lines"][0]["qty"] = "3"
+    result, calls = run(monkeypatch, tmp_path, native, {**native, "number": "AI-1"})
+    assert calls.count("ai") == 1 and result["readers"]["ai"]["need"] == "fallback"

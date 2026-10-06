@@ -164,11 +164,23 @@ AI_REASONS={
     "off":"AI fallback is off","unavailable":"Select a model in AI connections","selected":"The AI was the selected reader"}
 
 
+UNRECONCILED="line amounts do not reconcile"
+
+
+def _open_gaps(invoice,gaps):
+    """Quality gaps less an unreconciled-lines gap when quantity x unit price sums to the net (the target
+    check's basis): a line-amount column read off by a discount or tax column is not a short read."""
+    if invoice is None or invoice.net is None or not invoice.lines:return gaps
+    if any(l.qty is None or l.price is None for l in invoice.lines):return gaps
+    if abs(sum((l.qty*l.price for l in invoice.lines),Decimal(0))-invoice.net)>Decimal("0.01"):return gaps
+    return [x for x in gaps if not x.startswith(UNRECONCILED)]
+
+
 def _basic_checks(invoice,missing):
     """The engines' result is usable when it names the invoice, has lines with a net total, and reconciles."""
     if invoice is None or not invoice.lines:return False
     if invoice.number in (None,"") or invoice.net is None:return False
-    return not any(x.startswith("line amounts do not reconcile") for x in missing)
+    return not any(x.startswith(UNRECONCILED) for x in missing)
 
 
 def _same(field,mine,theirs):
@@ -417,7 +429,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 break
             # Lines that do not sum to the net (a table read short of the printed rows) are not a stopping
             # point: the next local reader still runs and the existing score keeps the better read.
-            unreconciled=any(x.startswith("line amounts do not reconcile") for x in missing)
+            unreconciled=any(x.startswith(UNRECONCILED) for x in _open_gaps(candidate,missing))
             if options.engine in ("auto","ai") and engine=="paddleocr" and candidate is not None and candidate.number and candidate.lines and not unreconciled:
                 for remaining in chain[chain.index(engine)+1:]:
                     trace.append({"engine":remaining,"status":"skipped","reason":"Invoice fields were read. Remaining exceptions go to the selected AI or manual review."})
@@ -431,7 +443,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         if native_review and selected in ("native PDF text","invoice2data"):
             # The gate already checked every amount; an unprinted code is for review, not for the AI to supply.
             gaps=[x for x in gaps if not x.endswith(" item identity")]
-        return gaps
+        return _open_gaps(invoice,gaps)
     missing=gaps_of(best);ai_reason=None
     # What the engines' result asks of the AI, recorded whether or not the AI runs, so AI calls per invoice
     # can be counted on an AI-off run: fallback when the engines could not read, gap fill when they left gaps,
