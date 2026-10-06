@@ -722,17 +722,23 @@ def create_app(data_dir=None):
                   "workbook_checks":{k["check"]:k["status"] for k in workbook_checks}} for r in results}
         return content,receipts
     def order_date_rows(content,views):
-        """Decision 76: one Checks row per transaction with its POGRN Order Date; the template sheets are untouched."""
-        dates=[(n,v["order_date"]) for n,v in enumerate(views,1) if v.get("order_date")]
-        if not dates:return content
+        """Decisions 76/83: per transaction, a Checks row with its POGRN Order Date and one with its Receipt Date(s)
+        check; evidence only, the template sheets are untouched."""
+        rows=[]
+        for n,v in enumerate(views,1):
+            for column,d in (("Order Date",v.get("order_date")),("Receipt Date",v.get("receipt_date"))):
+                if not d:continue
+                status="flagged" if d.get("flag") else "filled" if d.get("value") is not None else "empty_flagged"
+                reason="; ".join(x for x in (d.get("flag"),d.get("reason")) if x)
+                detail="Evidence only; not a template column (decision 76)" if column=="Order Date" else \
+                       "Date check only; flags, never blocks (decision 83)"
+                rows.append({"Transaction Number":n,"Sheet":"(evidence)","Column":column,"Value":d.get("value") or "",
+                             "Status":status,"Detail":detail,"Reason":reason,"Evidence Kind":d.get("evidence_kind") or "",
+                             "Evidence Source":d.get("source") or "","Evidence Reference":d.get("reference") or "","Rule":d.get("rule") or ""})
+        if not rows:return content
         from openpyxl import load_workbook
         book=load_workbook(io.BytesIO(content));sheet=book["Checks"]
-        for n,d in dates:
-            filled=d.get("value") is not None
-            row={"Transaction Number":n,"Sheet":"(evidence)","Column":"Order Date","Value":d.get("value") or "",
-                 "Status":"filled" if filled else "empty_flagged","Detail":"Evidence only; not a template column (decision 76)",
-                 "Reason":d.get("reason") or "","Evidence Kind":d.get("evidence_kind") or "","Evidence Source":d.get("source") or "",
-                 "Evidence Reference":d.get("reference") or "","Rule":d.get("rule") or ""}
+        for row in rows:
             sheet.append([None]*len(tc.CHECKS_COLUMNS));r=sheet.max_row
             for name,value in row.items():
                 if value=="":continue

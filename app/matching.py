@@ -297,6 +297,12 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
         if isinstance(e,dict) and isinstance(e.get("review"),dict):
             issues.append({"code":"Evidence Disagreement","message":f"{k}: {e['review'].get('reason') or 'readers disagree'}; value kept, check the document",
                            "owner":"Accounts payable","line":line,"rule":"EVID-OCR","evidence":f"page {e.get('page') or 1}","blocking":False,"level":"warning"})
+    # Decision 83 (POG-010): a date check only flags; it never blocks, fills or changes the status.
+    receipt=result.get("receipt_date") or {}
+    if receipt.get("flag"):
+        issues.append({"code":"Date Check","message":f"{receipt['flag']}; check the order and receipt dates",
+                       "owner":"Buyer","line":None,"rule":"POG-010","evidence":str(receipt.get("reference") or ""),
+                       "blocking":False,"level":"warning"})
     for label,line,why in flags:
         key_=next((k for k,lab,_ in RULES_FIELDS if lab==label),label)
         required=label in REQUIRED_LINE if line is not None else key_ in REQUIRED_HEADER
@@ -309,6 +315,7 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
             "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version"),
             # Decision 76: Order Date is evidence only (review note and a Checks row), never an editable field.
             **({"order_date":result["order_date"]} if result.get("order_date") else {}),
+            **({"receipt_date":result["receipt_date"]} if result.get("receipt_date") else {}),
             # Codes left when the rules cannot pick a supplier code: offered for the owner's pick, never a value.
             **({"supplier_site_candidates":result["supplier_site_candidates"]} if result.get("supplier_site_candidates") else {})}
 

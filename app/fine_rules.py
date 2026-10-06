@@ -66,6 +66,11 @@ ORDERED_NOT_RECEIVED_SOURCE = "POGRN order matched on items and ordered qty, not
 # Decision 76: evidence only (a Checks row and the review note), never a template column.
 EVIDENCE_ORDER_DATE = "pogrn_order_date"
 ORDER_DATE_SOURCE = "POGRN order date of the rows cited for Order No: CREATED_DATE"
+# Decision 83 (POG-010): a date check that only flags; the day limits come from the 52-invoice counts, not the owner.
+EVIDENCE_RECEIPT_DATE = "pogrn_receipt_date"
+RECEIPT_DATE_SOURCE = "POGRN receipt dates of the rows cited for Order No: RECEIPT_DATE"
+DAYS_BEFORE_ORDER = 7
+DAYS_FROM_RECEIPT = 30
 # Decision 41: the owner's pick among the R-006 supplier-code candidates; cells resolved through it say so.
 OWNER_PICK, EVIDENCE_OWNER_ENTRY = "OWNER-PICK", "owner_entry"
 OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", "Market", "Currency", "Tax Code",
@@ -1360,6 +1365,44 @@ def resolve_order_date(run, po):
     return out
 
 
+def _day(value):
+    try:
+        return date.fromisoformat(text(value)[:10])
+    except ValueError:
+        return None
+
+
+def check_receipt_dates(po, order_date, document_date):
+    """POG-010 (decisions 81/83): the cited rows' RECEIPT_DATE text beside the Order Date, and a flag when the
+    Invoice Date is more than DAYS_BEFORE_ORDER days before the order's CREATED_DATE or more than DAYS_FROM_RECEIPT
+    days from every RECEIPT_DATE. Validation only: never a fill, an exception or a status change."""
+    rows = po.get("cited") or []
+    receipts = sorted({text(r.get("RECEIPT_DATE")) for r in rows} - {""})
+    blank = sum(not text(r.get("RECEIPT_DATE")) for r in rows)
+    out = {"value": ", ".join(receipts) or None, "reason": "", "flag": None, "rule": "POG-010",
+           "source": RECEIPT_DATE_SOURCE, "reference": _refs(rows) if rows else "", "evidence_kind": EVIDENCE_RECEIPT_DATE}
+    if not rows:
+        out["reason"] = "No POGRN order rows cited for Order No"
+        return out
+    unreceived = po.get("source") == ORDERED_NOT_RECEIVED
+    out["reason"] = (f"{len(receipts)} receipt date(s) on {len(rows)} cited rows"
+                     + (f", {blank} blank" if blank else "")
+                     + ("; ordered, not received (POG-008): no receipt expected" if unreceived and not receipts else ""))
+    invoiced = _day(document_date)
+    if not invoiced:
+        return out
+    flags = []
+    created = _day(order_date.get("value"))
+    if created and (created - invoiced).days > DAYS_BEFORE_ORDER:
+        flags.append(f"Invoice Date is {(created - invoiced).days} days before the order's CREATED_DATE "
+                     f"(limit {DAYS_BEFORE_ORDER})")
+    days = [abs((invoiced - d).days) for d in map(_day, receipts) if d]
+    if days and min(days) > DAYS_FROM_RECEIPT:
+        flags.append(f"Invoice Date is {min(days)} days from the nearest RECEIPT_DATE (limit {DAYS_FROM_RECEIPT})")
+    out["flag"] = "; ".join(flags) or None
+    return out
+
+
 # --------------------------------------------------------------------------- currency
 
 
@@ -1817,6 +1860,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         "supplier_candidates": candidates, "missing_mandatory": missing,
         "po": {"order": po["order"], "source": po["source"], "status": po["status"], "value_source": value_source},
         "order_date": order_date,
+        "receipt_date": check_receipt_dates(po, order_date, document_date),
         "ebs_supplier_code": key or "/".join(sorted(keys)), "entity_hint": hint, "config_version": config.version,
         "item_resolution": resolution, "po_candidates": po["candidates"],
         "supplier_site_candidates": [] if supplier_site and not run.owner_pick else run.site_candidates,

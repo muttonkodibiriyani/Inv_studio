@@ -388,6 +388,43 @@ def test_D76_order_date_is_the_cited_rows_created_date_text_only_when_constant()
     assert unreceived["header"]["Order No"] == "13000005" and unreceived["order_date"]["value"] == "2026-01-05 00:00:00"
 
 
+def received(rows, created, *receipts):
+    """Synthetic CREATED_DATE and RECEIPT_DATE cell text per row (the last receipt repeats)."""
+    return [{**row, "CREATED_DATE": created, "RECEIPT_DATE": receipts[min(i, len(receipts) - 1)]}
+            for i, row in enumerate(dated(rows, created))]
+
+
+def test_D83_receipt_date_check_only_flags_never_fills_or_changes_the_status():
+    # The invoice is dated 2026-01-15. The receipt text is listed exactly; within the limits there is no flag.
+    plain = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-01-17T00:00:00"))
+    check = plain["receipt_date"]
+    assert check["value"] == "2026-01-17T00:00:00" and check["flag"] is None and check["rule"] == "POG-010"
+    assert check["evidence_kind"] == fr.EVIDENCE_RECEIPT_DATE and check["reference"] == plain["order_date"]["reference"]
+    assert "1 receipt date(s) on 2 cited rows" in check["reason"]
+    assert not [x for x in plain["lineage"] if x["target"] == "Receipt Date"]
+    # Invoice more than 7 days before the order was created, or more than 30 days from every receipt: flagged only.
+    early = run(rows=received(both("13000003", "38091"), "2026-01-23T00:00:00", "2026-01-24T00:00:00"))
+    assert "8 days before the order's CREATED_DATE" in early["receipt_date"]["flag"]
+    far = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-02-15T00:00:00",
+                            "2026-02-20T00:00:00"))
+    assert far["receipt_date"]["value"] == "2026-02-15T00:00:00, 2026-02-20T00:00:00"
+    assert "31 days from the nearest RECEIPT_DATE" in far["receipt_date"]["flag"]
+    edge = run(rows=received(both("13000003", "38091"), "2026-01-22T00:00:00", "2026-02-14T00:00:00"))
+    assert edge["receipt_date"]["flag"] is None  # exactly 7 and 30 days: within the limits
+    for flagged in (early, far):
+        assert flagged["status"] == plain["status"] and types(flagged) == types(plain)
+        assert flagged["header"] == plain["header"] and flagged["lines"] == plain["lines"]
+    # POG-008 blank receipts are expected; an empty Order Date has nothing to compare.
+    unreceived = run(rows=received(ordered("13000005", "38091", ref=7), "2026-01-10T00:00:00", ""))
+    assert unreceived["receipt_date"]["flag"] is None and unreceived["receipt_date"]["value"] is None
+    assert "no receipt expected" in unreceived["receipt_date"]["reason"]
+    undated = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-01-17T00:00:00")[:1]
+                  + [{**both("13000003", "38091")[1], "CREATED_DATE": "2026-03-01T00:00:00"}])
+    assert undated["order_date"]["value"] is None
+    missing = run(rows=[pogrn("13000001", "38091", "6", "70")])
+    assert missing["receipt_date"]["flag"] is None and missing["receipt_date"]["reference"] == ""
+
+
 def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     # Decision 16: within the 6-character code, POG-001 picks the one order/location whose quantity and value agree.
     picked = run(rows=POGRN + both("13000003", "38091", q1="9"))

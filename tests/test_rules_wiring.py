@@ -155,6 +155,14 @@ def test_order_date_is_shown_as_evidence_only_never_as_a_field():
     view = rules_view(approved_result(order_date=date))
     assert view["order_date"] == date and not [k for k in view["fields"] if "order_date" in k.lower()]
     assert "order_date" not in rules_view(approved_result())
+    # Decision 83: a POG-010 flag is a non-blocking Buyer warning; the status and the fields stay as they are.
+    flag = {**date, "rule": "POG-010", "flag": "Invoice Date is 31 days from the nearest RECEIPT_DATE (limit 30)"}
+    flagged = rules_view(approved_result(receipt_date=flag))
+    warning = [i for i in flagged["issues"] if i["rule"] == "POG-010"]
+    assert warning == [{**warning[0], "owner": "Buyer", "blocking": False, "level": "warning"}]
+    assert flagged["status"] == "Approved" and flagged["fields"] == view["fields"] and flagged["receipt_date"] == flag
+    assert not [i for i in rules_view(approved_result(receipt_date={**flag, "flag": None}))["issues"]
+                if i["rule"] == "POG-010"]
 
 
 def job(text=PRINTED):
