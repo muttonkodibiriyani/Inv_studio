@@ -22,6 +22,7 @@ function evidenceText(evidence) {
       : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
         : entry.kind === "owner_rule" ? (/^owner rule\b/i.test(entry.reference || "") ? entry.reference : `owner rule · ${entry.reference}`)
         : entry.kind === "selected" ? `selected by rule, not printed · ${entry.reference}`
+        : entry.kind === "owner_entry" && entry.rule === "OWNER-PICK" ? "from the reviewer's supplier-code pick"
         : entry.kind === "owner_entry" ? `entered by reviewer${entry.original ? ` · ${entry.original}` : ""}`
         : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
           : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
@@ -34,8 +35,9 @@ const RULES_REQUIRED_HEADER = new Set(["number", "site", "po", "location", "loca
 const RULES_REQUIRED_LINE = new Set(["Item", "Unit Cost", "Quantity", "Unit Tax Code"]);
 const RULES_ENTRY_HINT = { location_type: "Store (S) or Warehouse (W)", date: "YYYY-MM-DD" };
 
+// A site the rules filled from the reviewer's supplier-code pick is not a typed entry: "Clear pick" undoes it.
 function enteredByReviewer(cell) {
-  return (cell?.evidence || []).some((entry) => entry.kind === "owner_entry");
+  return (cell?.evidence || []).some((entry) => entry.kind === "owner_entry" && entry.rule !== "OWNER-PICK");
 }
 
 function rulesEntry(cell, label, scope, name, line) {
@@ -262,6 +264,7 @@ function renderRulesResult(job) {
     } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
     dd.append(...readerNotes(job, "header", key));
     if ((empty && RULES_REQUIRED_HEADER.has(key)) || enteredByReviewer(field)) dd.append(rulesEntry(field, field.label, "header", key));
+    if (key === "site") renderSupplierPick(dd, job);
     if (field.target === "Order No" && Number(rules.po_candidates) > 1) {
       dd.append(make("small", "rules-flagged", `Ambiguous: ${rules.po_candidates} candidate orders — owner review`));
     }
@@ -275,6 +278,53 @@ function renderRulesResult(job) {
     ["Item", "UPC", "Unit Cost", "Quantity", "Unit Tax Code"].forEach((name) => tr.append(rulesCell(line.cells?.[name], name, line.line)));
     body.append(tr);
   });
+}
+
+// When the rules leave 2+ supplier codes, the reviewer picks one: a click saves the form with that code and the
+// rules re-run on it (decision 41). The candidates stay listed with the pick marked; "Clear pick" sends "".
+function renderSupplierPick(dd, job) {
+  const candidates = job.rules?.supplier_site_candidates || [];
+  if (candidates.length < 2) return;
+  const picked = job.owner_supplier_code ? String(job.owner_supplier_code) : "";
+  const locked = ["queued", "processing", "exported"].includes(job.status);
+  const box = make("div", "supplier-pick");
+  box.append(make("small", "", picked
+    ? `Supplier code ${picked} picked at review · the rules filled the site from it`
+    : `${candidates.length} supplier codes match this supplier · pick the right one`));
+  const options = make("div", "supplier-pick-options");
+  candidates.forEach((candidate) => {
+    const code = String(candidate.supplier_code ?? "");
+    const sites = candidate.sites || [];
+    const first = sites[0] || {};
+    const button = make("button", `supplier-pick-option${code === picked ? " picked" : ""}`);
+    button.type = "button";
+    button.dataset.supplierCode = code;
+    button.setAttribute("aria-pressed", String(code === picked));
+    button.setAttribute("aria-label", `Pick supplier code ${code}`);
+    const where = [first.site_name || first.entity || "", sites.length > 1 ? `+${sites.length - 1} more` : ""].filter(Boolean).join(" ");
+    button.append(make("strong", "", code), make("span", "", where || candidate.location || ""));
+    button.title = [candidate.reason, ...sites.map((site) => [site.supplier_site, site.site_name].filter(Boolean).join(" · "))].filter(Boolean).join("\n");
+    button.disabled = locked;
+    button.addEventListener("click", () => { if (code !== picked) pickSupplier(code); });
+    options.append(button);
+  });
+  if (picked) {
+    const clear = make("button", "button button-quiet supplier-pick-clear", "Clear pick");
+    clear.type = "button";
+    clear.disabled = locked;
+    clear.addEventListener("click", () => pickSupplier(""));
+    options.append(clear);
+  }
+  box.append(options);
+  dd.append(box);
+}
+
+async function pickSupplier(code) {
+  $$(".supplier-pick button").forEach((button) => { button.disabled = true; });
+  const done = code ? `Supplier code ${code} picked. The rules re-ran with it.` : "Supplier code pick cleared. The rules re-ran.";
+  if (!(await submitReview({ supplier_code: code, confirm: false }, done))) {
+    $$(".supplier-pick button").forEach((button) => { button.disabled = false; });
+  }
 }
 
 function draftValue(job, field, fallback) {
@@ -1462,8 +1512,9 @@ function collectInvoice() {
   return invoice;
 }
 
-async function saveReview() {
-  if (!app.currentJob) return;
+// Saves the form; extra fields (a supplier-code pick) ride on the same request. Resolves true once saved.
+async function submitReview(extra = {}, done = "") {
+  if (!app.currentJob) return false;
   const button = $("#save-review");
   button.disabled = true;
   button.textContent = "Saving…";
@@ -1475,15 +1526,19 @@ async function saveReview() {
         revision: app.currentJob.revision,
         confirm: $("#confirm-review").checked,
         ...(rulesJob(app.currentJob) ? { entries: collectEntries() } : {}),
+        ...extra,
       },
     });
     app.currentJob = job;
     replaceJobSummary(job);
     renderSelectedJob(job);
-    notify(job.validation?.ready ? "Review confirmed. This invoice is ready to export." : "Saved and revalidated. Resolve the listed issues before export.", job.validation?.ready ? "success" : "error");
+    if (done) notify(done, "success");
+    else notify(job.validation?.ready ? "Review confirmed. This invoice is ready to export." : "Saved and revalidated. Resolve the listed issues before export.", job.validation?.ready ? "success" : "error");
+    return true;
   } catch (error) {
     notify(error.message, "error", 7000);
     if (error.message.includes("changed")) await selectJob(app.currentJob.id);
+    return false;
   } finally {
     button.textContent = "Save & revalidate";
     button.disabled = false;
@@ -2805,7 +2860,7 @@ function bindEvents() {
   $("#add-line").addEventListener("click", () => { addLine(); markReviewDirty(); });
   $("#invoice-form").addEventListener("input", markReviewDirty);
   $("#confirm-review").addEventListener("change", markReviewDirty);
-  $("#save-review").addEventListener("click", saveReview);
+  $("#save-review").addEventListener("click", () => submitReview());
   $("#export-job").addEventListener("click", exportCurrentJob);
   $("#batch-review").addEventListener("click", openBatchReview);
   $("#confirm-batch-review").addEventListener("click", downloadBatchReview);

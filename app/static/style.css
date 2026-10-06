@@ -502,6 +502,14 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .rules-fields dd small, .rules-lines small { display: block; color: var(--muted); font-size: 10px; }
 .rules-entry { display: block; width: 100%; max-width: 220px; margin-top: 4px; padding: 4px 6px; font: inherit; font-size: 11px; border: 1px solid var(--danger); border-radius: 6px; }
 .rules-flagged { color: var(--danger); font-weight: 700; }
+.supplier-pick { margin-top: 6px; }
+.supplier-pick-options { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin-top: 5px; }
+.supplier-pick-option { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: var(--paper); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
+.supplier-pick-option span { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.supplier-pick-option:hover:not(:disabled) { border-color: var(--forest); }
+.supplier-pick-option.picked { border-color: var(--forest); background: var(--mint); color: var(--mint-ink); cursor: default; }
+.supplier-pick-option:disabled { opacity: .6; cursor: default; }
+.supplier-pick-clear { min-height: 0; padding: 6px 10px; font-size: 11px; }
 .rules-item-rate { margin: 0 0 8px; font-size: 11px; }
 .rules-item-rate.owner-review { padding: 6px 9px; color: var(--danger); background: var(--danger-bg); border-radius: 7px; font-weight: 700; }
 .provenance-list { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; margin: 0; font-size: 10px; }
