@@ -143,6 +143,26 @@ def test_printed_evidence_needs_text_and_equal_value():
     assert status(tc.check_view(v, sources()), "Header", "Document") == ("mismatch", "")
 
 
+def test_an_ai_value_with_no_box_is_not_verified_from_the_page_text():
+    # The AI gap-filled a quantity quoting just '5': the page text holds a '5', but nothing locates it on the page.
+    def quantity(source, reference):
+        cells = line(1)
+        cells["cells"]["Quantity"] = field("5", ev(source, reference, "5", "printed"))
+        return tc.check_view(view(lines=[cells]), sources())
+    unboxed = ev("Invoice (ai)", "page 1", "5", "printed")
+    assert tc.check_evidence("5", unboxed, sources(), None)[0] == tc.VERIFIED
+    r = quantity("Invoice (ai)", "page 1")
+    cell = next(c for c in r["cells"] if c["column"] == "Quantity")
+    assert (cell["status"], cell["sub"], cell["reason"]) == ("unverifiable", "", tc.AI_UNLOCATED_REASON)
+    # An engine value with a box is verified as before, and so is an AI value the reader located with a box.
+    for source in ("Invoice (ocr)", "Invoice (ai)"):
+        b = quantity(source, "page 1 box [1, 2, 3, 4]")
+        assert status(b, "Details", "Quantity", 1) == ("verified", "") and not tc.issues(b)
+    # The existing unverifiable status: one cell to check, and only the review-level issue a confirm accepts.
+    assert r["metric"]["needs_checking"] == 1 and r["metric"]["buckets"]["unverifiable"] == 1
+    assert [(i["code"], i["level"]) for i in tc.issues(r)] == [("Target Unverified", "review")]
+
+
 def test_location_type_master_and_prefix_fallback():
     v = view(fields={"location_type": field("Store (S)", ev("location master", "", "800001", "rule"))})
     assert status(tc.check_view(v, sources()), "Header", "Location Type") == ("mismatch", "")

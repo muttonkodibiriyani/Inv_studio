@@ -291,10 +291,16 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
         return _cell(sheet, column, line, value, MISMATCH, UNATTRIBUTED,
                      "Owner entry without a matching stored entry, actor and time", first)
     status, sub = check_evidence(value, first, sources, location)
+    located = None
+    if status == VERIFIED and _ai_unlocated(first):
+        # A short AI value (e.g. a quantity '2') matches the page text almost anywhere: without a box it is not located.
+        status, sub, located = MISMATCH, UNVERIFIABLE, AI_UNLOCATED_REASON
     reason = {MISMATCH: "Evidence does not hold the value", UNVERIFIABLE: "evidence not re-checkable",
               DATA_GAP: "Source row malformed in the owner extract",
               OVER_CITED: "Some cited rows do not hold the value"}.get(sub or status, "")
-    if sub == UNVERIFIABLE and _ai_scan(first):
+    if located:
+        reason = located
+    elif sub == UNVERIFIABLE and _ai_scan(first):
         reason = SCAN_REASON
     elif status == VERIFIED and str(first.get("source") or "").startswith(SELECTED):
         reason = "Selected by POG-001 from the cited POGRN rows; not printed on the invoice"
@@ -304,6 +310,13 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
 SELECTED = "Selected by POG-001"  # RULES 7ae7836: Order No picked among candidates (decision 16)
 PRINTED_SOURCE = "Printed on invoice"  # matching.printed_evidence label (e.g. a multi-number totals row)
 SCAN_REASON = "evidence not re-checkable: read by AI from a scan; no box to re-check"
+AI_SOURCE = "Invoice (ai)"
+AI_UNLOCATED_REASON = "AI value not located on the page"
+
+
+def _ai_unlocated(evidence):
+    """An AI read with no box: its quote may be found in the page text, but not at a located position."""
+    return str(evidence.get("source") or "") == AI_SOURCE and " box " not in f"{evidence.get('reference') or ''} "
 
 
 def _ai_scan(evidence):
