@@ -775,10 +775,11 @@ def create_app(data_dir=None):
         if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")
         views=[];included=[];skipped=[]
         for request in body.jobs:
+            # Before ensure_rules, which 404s an unknown id: a deleted invoice is skipped, not a failed draft.
+            if not store.job(request.id):skipped.append(({"id":request.id,"filename":""},"Invoice not found"));continue
             # The same refresh as opening the invoice; it returns early on exported or unfinished invoices.
             ensure_rules(request.id)
             j=store.job(request.id)
-            if not j:skipped.append(({"id":request.id,"filename":""},"Invoice not found"));continue
             if j["status"] in ("queued","processing","error"):reason="Extraction has not finished"
             elif j["revision"]!=request.revision:reason="Invoice changed. Refresh before downloading."
             elif not fresh_rules(j):reason="No current fine-rules result for this revision"
