@@ -121,7 +121,7 @@ def ai_scan_read(lines=None,**header):
     lines=lines if lines is not None else [
         {"gtin":CODE,"description":"Widget","qty":"2","price":"5.00","net_amount":"10.00","page":1},
         {"gtin":OTHER,"description":"Gadget","qty":"1","price":"5.00","net_amount":"5.00","page":1}]
-    return {"number":"SCAN-1","date":"2026-01-15","po":"PO-1","net":"15.00","tax":"0.75","lines":lines,**header}
+    return {"supplier_name":"SYN Supplier","number":"SCAN-1","date":"2026-01-15","po":"PO-1","net":"15.00","tax":"0.75","lines":lines,**header}
 
 
 def run_scan(monkeypatch,tmp_path,ai_invoice,local=None,ocr_tokens=(),paddle_error=None,ai_evidence=None):

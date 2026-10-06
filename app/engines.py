@@ -363,6 +363,61 @@ def guard_header(invoice,evidence,header_readers,source,text):
     return invoice,evidence
 
 
+# Header fields every invoice prints: empty means the reader missed it (D143).
+ALWAYS_PRINTED=("supplier_name","number","date","net")
+NOT_READ_ALWAYS="printed on every invoice, no value read"
+# Line columns flagged when their printed heading was found, with a generic column name for the reason.
+LINE_COLUMNS={"sku":"SKU","gtin":"Barcode","description":"Description","qty":"Quantity","price":"Price","net_amount":"Line amount"}
+_PO_LABEL=re.compile(r"(?i)\b(?:customer\s+)?(?:p\.?\s*o\.?\s*(?:no\b\.?|number\b|#)|lpo\b|purchase\s+order\s*(?:no\b\.?|number\b|#|:))")
+
+
+def _line_columns_of(text,tables,boxes,headings=False):
+    """The line columns printed on the page. With headings (a scan with lines), an empty table-route set
+    falls back to the heading words in the OCR boxes. Raises: the caller records the failure."""
+    from .docling_extract import heading_columns,line_columns
+    columns=line_columns(text,tables,boxes) or (heading_columns(boxes) if headings else set())
+    return columns&set(LINE_COLUMNS)
+
+
+def _po_label(text):
+    """The first printed PO label on a line that is not a P.O. Box address, else None."""
+    for line in str(text or "").splitlines():
+        match=_PO_LABEL.search(line)
+        if match and not scan_guard._PO_BOX.search(line):return " ".join(match.group(0).split()).rstrip(":")
+    return None
+
+
+def guard_printed(invoice,evidence,text,columns,source):
+    """Flag a printed field the readers left empty with code not_read; runs last, on the final invoice.
+
+    Writes only where the value is empty and never replaces a review that already carries a code.
+    evidence.lines gets one entry per invoice line.
+    """
+    evidence=dict(evidence or {});header=dict(evidence.get("header") or {})
+    def flag(entries,key,line,reason):
+        entry=entries.get(key)
+        if isinstance(entry,dict) and (entry.get("review") or {}).get("code"):return
+        if isinstance(entry,dict) and entry.get("review"):
+            entries[key]=dict(entry);entries[key]["review"]=dict(entry["review"],code=scan_guard.TAX_UNREAD_CODE)
+        else:entries[key]=_review(entry,line,source,reason,None,scan_guard.TAX_UNREAD_CODE)
+    for field in ALWAYS_PRINTED:
+        if invoice.get(field) in (None,""):flag(header,field,None,NOT_READ_ALWAYS)
+    label=_po_label(text) if invoice.get("po") in (None,"") else None
+    if label and not (header.get("po") or {}).get("review"):
+        flag(header,"po",None,f"'{label}' label printed, no value read")
+    evidence["header"]=header
+    lines=invoice.get("lines") or []
+    rows=[dict(row) if isinstance(row,dict) else {} for row in (evidence.get("lines") or [])]
+    rows+=[{} for _ in range(len(lines)-len(rows))]
+    for n,line in enumerate(lines):
+        for field,name in LINE_COLUMNS.items():
+            if field not in columns or line.get(field) not in (None,""):continue
+            if field=="gtin" and line.get("barcode_unchecked"):continue
+            flag(rows[n],field,line,f"{name} column present, cell empty")
+    evidence["lines"]=rows
+    return evidence
+
+
 def _absent_fields(evidence):
     """Job-level read-time facts for empty header fields: absent_fields (not printed) and each field's reason_code."""
     codes={field:entry["review"]["code"] for field,entry in ((evidence or {}).get("header") or {}).items()
@@ -377,7 +432,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
     # A scan (no usable text layer) is told by the PDF's own text; its OCR boxes corroborate AI barcodes.
     native_chars=None;ocr_boxes=[];scan=False;ai_reason=None
     # The text and boxes of the selected local read: the target check re-checks its values against them.
-    selected_page=None
+    selected_page=None;selected_tables=[];page_tables=[]
     cross_check=bool(getattr(options,"ai_cross_check",False)) or os.getenv("INV_STUDIO_AI_CROSS_CHECK","0")=="1"
     def call_ai(role):
         """One AI read: (candidate, its own header evidence, completeness) with a trace entry, or None."""
@@ -499,7 +554,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 result=local_read(reader_engine,path,store.root,options.language)
             candidate=Invoice.model_validate(result["invoice"]) if result.get("invoice") else None
             score,missing=quality(candidate)
-            if len(result["text"])>len(text):text=result["text"];boxes=result.get("boxes",[])
+            if len(result["text"])>len(text):text=result["text"];boxes=result.get("boxes",[]);page_tables=result.get("tables") or []
             native_suitable,native_issues=(native_pdf_quality(candidate,result["text"])
                 if engine=="native_pdf_text" else (False,[]))
             native_reconciliation=(_native_reconciliation(candidate,result["text"])
@@ -537,6 +592,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 best_source="ocr" if engine=="paddleocr" else "native"
                 best_evidence=build_evidence(result["invoice"],result.get("boxes",[]),best_source)
                 selected_page=(result["text"],result.get("boxes",[]))
+                selected_tables=result.get("tables") or []
             progress(engine,"Text reading finished",{"trace":list(trace),"characters":len(text)})
             if engine=="native_pdf_text":
                 if native_suitable:
@@ -629,6 +685,13 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         # A later reader that lost on score (e.g. Docling after an unreconciled PaddleOCR read) must not
         # replace the selected reader's text and boxes.
         text,boxes=selected_page
+    if best is not None:
+        tables=selected_tables if selected_page is not None else page_tables
+        try:columns=_line_columns_of(text,tables,boxes or ocr_boxes,headings=scan and bool(invoice.get("lines")))
+        except Exception as e:
+            # Line flags could not be placed: say so rather than leave the empty cells silent.
+            columns=set();trace.append({"engine":"guard_printed","status":"columns_failed","reason":type(e).__name__})
+        best_evidence=guard_printed(invoice,best_evidence,text,columns,best_source)
     return {"invoice":invoice,"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
             "document_type_hint":document_type_hint,"extraction_note":extraction_note,
