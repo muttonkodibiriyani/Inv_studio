@@ -132,6 +132,7 @@
               </div>
               <div id="batch-controls" class="batch-controls" hidden>
                 <div class="batch-selection">
+                  <label class="select-all"><input id="select-all-jobs" type="checkbox" disabled> Select all</label>
                   <div><button id="select-processed" class="link-button" type="button">Select processed</button><button id="select-ready" class="link-button" type="button">Select approved</button><button id="select-all-finished" class="link-button" type="button">Select all finished</button></div>
                   <span id="selected-count">0 selected</span>
                   <small id="selected-detail">Select processed invoices for one review workbook.</small>
@@ -140,6 +141,7 @@
                   <button id="batch-review" class="button button-secondary button-small" type="button" disabled>Download review workbook</button>
                   <button id="batch-fine-rules" class="button button-secondary button-small" type="button" disabled>Run ULTA rules</button>
                   <button id="batch-export" class="button button-primary button-small" type="button" disabled>Export approved</button>
+                  <button id="batch-draft" class="button button-secondary button-small" type="button" disabled>Export selected (draft)</button>
                   <button id="batch-delete" class="button button-quiet button-small danger-text" type="button" disabled>Delete selected…</button>
                 </div>
               </div>
@@ -642,6 +644,14 @@
         <div class="dialog-header"><div><p class="eyebrow">Combined extracted facts</p><h2 id="batch-review-title">Download one review workbook?</h2><p><span id="batch-review-count">0</span> saved invoice records will be combined into one Excel file.</p></div><button class="icon-button" type="button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5l-10 10"/></svg></button></div>
         <div class="draft-warning" role="note"><strong>EXTRACTION · REVIEW ONLY</strong><span>Blank or unmatched fields stay blank. This download does not approve invoices, reserve receipts or write to the approved export ledger. Save each edited invoice before continuing.</span></div>
         <div class="dialog-actions"><button class="button button-quiet" type="button" value="cancel">Cancel</button><button id="confirm-batch-review" class="button button-primary" type="button">Download combined review Excel</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="batch-draft-dialog" aria-labelledby="batch-draft-title">
+      <form method="dialog" class="dialog-shell small-dialog">
+        <div class="dialog-header"><div><p class="eyebrow">Target workbook · draft</p><h2 id="batch-draft-title">Export the selected invoices as a draft?</h2><p><span id="batch-draft-count">0</span> go into one target workbook.<span id="batch-draft-skipped" hidden></span></p></div><button class="icon-button" type="button" value="cancel" aria-label="Close"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m5 5 10 10M15 5l-10 10"/></svg></button></div>
+        <div class="draft-warning" role="note"><strong>DRAFT · NOT EXPORTED</strong><span>Same sheets and layout as Export approved. No invoice is marked exported, approved or confirmed. An empty cell means the rules have no evidenced value for it; nothing is filled in to look complete.</span></div>
+        <div class="dialog-actions"><button class="button button-quiet" type="button" value="cancel">Cancel</button><button id="confirm-batch-draft" class="button button-primary" type="button">Download draft target workbook</button></div>
       </form>
     </dialog>
 

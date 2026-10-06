@@ -766,6 +766,47 @@ def create_app(data_dir=None):
         store.audit("extraction_batch_downloaded",{"invoices":snapshots,"approved":False,"count":len(entries)})
         return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":'attachment; filename="EXTRACTION_REVIEW_ONLY_BATCH.xlsx"'})
 
+    @app.post("/api/exports/target-draft")
+    def download_target_draft(body:Batch):
+        """The target workbook for selected invoices nobody approved yet (decisions 67/70/72): the export's own builder
+        in draft mode, so an empty cell is one the export would refuse. Read-only for the jobs: no export, no revision
+        bump, no learning, no accuracy record. An invoice without current rules is skipped with its reason."""
+        if demo_references:raise HTTPException(409,"The draft target workbook needs the fine rules")
+        if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")
+        views=[];included=[];skipped=[]
+        for request in body.jobs:
+            # The same refresh as opening the invoice; it returns early on exported or unfinished invoices.
+            ensure_rules(request.id)
+            j=store.job(request.id)
+            if not j:skipped.append(({"id":request.id,"filename":""},"Invoice not found"));continue
+            if j["status"] in ("queued","processing","error"):reason="Extraction has not finished"
+            elif j["revision"]!=request.revision:reason="Invoice changed. Refresh before downloading."
+            elif not fresh_rules(j):reason="No current fine-rules result for this revision"
+            else:reason=None
+            if reason:skipped.append((j,reason));continue
+            views.append(j["rules"]);included.append(j)
+        if not views:raise HTTPException(409,"None of the selected invoices has a current fine-rules result. "+skipped[0][1])
+        content,_=rules_workbook(views,target_upc(),draft=True)
+        content,_=with_checks_sheet(content,views)
+        content=draft_disclosure(content,skipped)
+        store.audit("target_draft_downloaded",{"approved":False,"count":len(included),
+                    "invoices":[{"job_id":j["id"],"revision":j["revision"],"transaction_number":n} for n,j in enumerate(included,1)],
+                    "skipped":[{"job_id":j["id"],"reason":r} for j,r in skipped]})
+        stamp=datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="DRAFT_Target_{stamp}.xlsx"',
+                        "Cache-Control":"no-store","X-Draft-Included":str(len(included)),"X-Draft-Skipped":str(len(skipped))})
+    def draft_disclosure(content,skipped):
+        """The Checks sheet says the workbook is a draft and lists each skipped invoice with its reason."""
+        from openpyxl import load_workbook
+        book=load_workbook(io.BytesIO(content));sheet=book["Checks"]
+        rows=[("(draft)","Draft","Not exported, approved or confirmed. An empty cell has no evidenced value yet.")]
+        rows+=[("(skipped)",j.get("filename") or j["id"],reason) for j,reason in skipped]
+        for kind,column,reason in rows:
+            sheet.append([None]*len(tc.CHECKS_COLUMNS));n=sheet.max_row
+            for name,value in (("Sheet",kind),("Column",column),("Status","Draft" if kind=="(draft)" else "Skipped"),("Reason",reason)):
+                cell=sheet.cell(n,tc.CHECKS_COLUMNS.index(name)+1);cell.value=str(value);cell.data_type="s"
+        book.properties.title="DRAFT target workbook";buffer=io.BytesIO();book.save(buffer);return buffer.getvalue()
+
     @app.post("/api/exports/batch")
     def export_batch(body:Batch):
         if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")

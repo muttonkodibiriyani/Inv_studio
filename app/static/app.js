@@ -916,6 +916,12 @@ function isSelectableInvoice(job) {
   return Boolean(job.id) && !["queued", "processing", "deleting"].includes(job.status);
 }
 
+// Decision 64: "Select all" covers the selectable invoices in the list as shown, so a search narrows it.
+function visibleSelectableJobs() {
+  const visible = new Set(app.visibleJobIds || []);
+  return (app.state?.jobs || []).filter((job) => visible.has(job.id) && isSelectableInvoice(job));
+}
+
 function navigate(sectionName) {
   $$(".page-section").forEach((section) => {
     const active = section.id === `${sectionName}-section`;
@@ -972,6 +978,7 @@ function renderJobs() {
   const now = new Date();
   const list = $("#job-list");
   list.replaceChildren();
+  app.visibleJobIds = filtered.map((job) => job.id);
 
   filtered.forEach((job) => {
     const row = make("div", `job-row${job.id === app.selectedJobId ? " active" : ""}`);
@@ -1032,8 +1039,16 @@ function updateBatchControls() {
   $("#batch-review").disabled = valid.length === 0 || reviewableSelected !== valid.length;
   $("#batch-fine-rules").disabled = valid.length === 0 || reviewableSelected !== valid.length;
   $("#batch-export").disabled = valid.length === 0 || approvedSelected !== valid.length || app.reviewDirty;
+  // Decision 67: the draft needs only one selected invoice with extracted data; the others are left out, never blocking it.
+  $("#batch-draft").disabled = reviewableSelected === 0;
   $("#batch-delete").disabled = valid.length === 0;
   $("#select-all-finished").disabled = !jobs.some(isSelectableInvoice);
+  const visible = visibleSelectableJobs();
+  const ticked = visible.filter((job) => app.selectedForBatch.has(job.id)).length;
+  const selectAll = $("#select-all-jobs");
+  selectAll.checked = visible.length > 0 && ticked === visible.length;
+  selectAll.indeterminate = ticked > 0 && ticked < visible.length;
+  selectAll.disabled = visible.length === 0;
   const processed = jobs.filter(isBatchReviewable);
   const allProcessedSelected = processed.length > 0 && processed.every((job) => app.selectedForBatch.has(job.id));
   $("#select-processed").textContent = allProcessedSelected ? "Clear selection" : `Select processed${processed.length ? ` (${processed.length})` : ""}`;
@@ -1669,6 +1684,56 @@ async function downloadBatchReview() {
   } finally {
     button.disabled = false;
     button.textContent = "Download combined review Excel";
+  }
+}
+
+// Decision 70: the target workbook for the selected invoices without approving them. The server builds it read-only
+// (no export record, no revision bump, nothing learned); a cell the real export would refuse stays empty.
+function openBatchDraft() {
+  const jobs = selectedBatchReviewJobs();
+  if (!jobs.length) return;
+  if (app.reviewDirty) {
+    notify("Save the current invoice before exporting a draft. Your unsaved edits are still in the form.", "error", 8000);
+    $("#save-review").focus();
+    return;
+  }
+  const skipped = app.selectedForBatch.size - jobs.length;
+  $("#batch-draft-count").textContent = `${jobs.length} invoice${jobs.length === 1 ? "" : "s"}`;
+  $("#batch-draft-skipped").textContent = skipped ? ` ${skipped} selected without extracted data ${skipped === 1 ? "is" : "are"} left out.` : "";
+  $("#batch-draft-skipped").hidden = !skipped;
+  $("#batch-draft-dialog").showModal();
+}
+
+async function downloadBatchDraft() {
+  const jobs = selectedBatchReviewJobs();
+  if (!jobs.length || app.reviewDirty) {
+    $("#batch-draft-dialog").close();
+    if (app.reviewDirty) notify("Save the current invoice before exporting a draft.", "error", 8000);
+    return;
+  }
+  const button = $("#confirm-batch-draft");
+  button.disabled = true;
+  button.textContent = "Preparing…";
+  try {
+    const response = await studioFetch("/api/exports/target-draft", {
+      method: "POST",
+      body: { jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })) },
+    });
+    if (!response.ok) throw await responseError(response);
+    const disposition = response.headers.get("content-disposition") || "";
+    saveBlob(await response.blob(), dispositionFilename(disposition, "DRAFT_Target.xlsx"));
+    $("#batch-draft-dialog").close();
+    // Decision 72: the server leaves out any invoice without fresh rules and says how many, with the reasons in Checks.
+    const included = Number(response.headers.get("x-draft-included") ?? jobs.length);
+    const skipped = Number(response.headers.get("x-draft-skipped") ?? 0);
+    notify(`${included} invoice${included === 1 ? "" : "s"} in one draft target workbook${skipped ? `; ${skipped} left out, see the Checks sheet` : ""}. Nothing was exported or approved.`, skipped ? "warning" : "success", skipped ? 10000 : undefined);
+    // The server's rules refresh can rewrite rules or reset "reviewed" on a stale invoice, so the inbox reloads to show it.
+    await loadState().catch(() => {});
+  } catch (error) {
+    notify(error.message, "error", 8000);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Download draft target workbook";
   }
 }
 
@@ -2900,6 +2965,8 @@ function bindEvents() {
   $("#batch-review").addEventListener("click", openBatchReview);
   $("#confirm-batch-review").addEventListener("click", downloadBatchReview);
   $("#batch-export").addEventListener("click", exportBatch);
+  $("#batch-draft").addEventListener("click", openBatchDraft);
+  $("#confirm-batch-draft").addEventListener("click", downloadBatchDraft);
   $("#batch-fine-rules").addEventListener("click", openFineRules);
   $("#fine-rules-review").addEventListener("click", () => downloadFineRules("review"));
   $("#fine-rules-target").addEventListener("click", () => downloadFineRules("target"));
@@ -2907,6 +2974,10 @@ function bindEvents() {
   $("#confirm-delete-invoices").addEventListener("click", deleteInvoices);
   $("#delete-invoice-acknowledge").addEventListener("change", () => {
     $("#confirm-delete-invoices").disabled = !$("#delete-invoice-acknowledge").checked;
+  });
+  $("#select-all-jobs").addEventListener("change", (event) => {
+    visibleSelectableJobs().forEach((job) => (event.target.checked ? app.selectedForBatch.add(job.id) : app.selectedForBatch.delete(job.id)));
+    renderJobs();
   });
   $("#select-all-finished").addEventListener("click", () => {
     const finished = app.state.jobs.filter(isSelectableInvoice);
