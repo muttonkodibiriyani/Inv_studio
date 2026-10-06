@@ -58,6 +58,10 @@ BUYER_RULE = "BUYER-NAME"
 BUYER_RULE_EVIDENCE = "owner rule BUYER-NAME (2026-10-05)"
 EVIDENCE_PRINTED, EVIDENCE_OWNER_RULE = "printed", "owner_rule"
 EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not printed on the invoice
+# Decision 41: the owner's pick among the R-006 supplier-code candidates; cells resolved through it say so.
+OWNER_PICK, EVIDENCE_OWNER_ENTRY = "OWNER-PICK", "owner_entry"
+OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", "Market", "Currency", "Tax Code",
+                      "Unit Tax Code"}
 EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
 
@@ -527,6 +531,7 @@ class Run:
         self.lineage = []
         # R-006: cited supplier-code candidates offered for the reviewer's pick; never a filled value.
         self.site_candidates = []
+        self.owner_pick = None
 
     def exception(self, kind, description, rule, line=None, evidence=None, proposed=None, owner="Accounts payable"):
         # 03_Mandatory_Checklist: the owner's Failure Status is shown; the engine rule id stays in Rule ID.
@@ -549,6 +554,8 @@ class Run:
                   "confidence": confidence}
         if evidence_kind:
             record["evidence_kind"] = evidence_kind
+        if self.owner_pick and target in OWNER_PICK_DERIVED and rule != OWNER_PICK:
+            record["assisted_by"] = OWNER_PICK
         self.lineage.append(record)
 
 
@@ -776,6 +783,25 @@ def code_by_market(run, families, deliver_to):
     return None
 
 
+def owner_pick(run, code):
+    """Decision 41: the owner's Supplier CODE pick, used only when it is one of the candidates R-006 offered in this
+    same run. It replaces the R-006 exception and is cited as an owner entry; anything else is ignored and said."""
+    code = text(code)
+    chosen = next((c for c in run.site_candidates if c["supplier_code"] == code), None)
+    if chosen is None:
+        run.exception("Supplier Exception", "Owner supplier-code pick is not one of this run's candidates; ignored",
+                      OWNER_PICK, evidence=f"{len(run.site_candidates)} candidates", owner="Supplier operations")
+        return None
+    if run.exceptions and run.exceptions[-1]["Rule ID"] == "R-006":
+        run.exceptions.pop()  # the 'market/entity does not settle it' exception code_by_market just raised
+    run.owner_pick = code
+    references = [chosen["location_reference"]] + [s["reference"] for s in chosen["sites"]]
+    run.trace("Supplier Code", code, OWNER_PICK, f"Owner pick among the {len(run.site_candidates)} R-006 candidate "
+              "supplier codes", reference=", ".join(r for r in references if r), confidence="Owner entry",
+              evidence_kind=EVIDENCE_OWNER_ENTRY)
+    return [s["supplier_site"] for s in chosen["sites"]]
+
+
 def _site_names(source, site, rows):
     """The site's Item Master SUPPLIER_NAMEs and only the rows of that site (cited as its lineage)."""
     rows = [r for r in rows if text(r.get("SUPPLIER")) == site]
@@ -786,7 +812,7 @@ def _site_names(source, site, rows):
     return names, rows
 
 
-def resolve_supplier(run, source, matches, candidates, deliver_to=None):
+def resolve_supplier(run, source, matches, candidates, deliver_to=None, owner_code=None):
     """SUP-001 / SUP-003, R-006 / ALG-002 / ALG-005: supplier site from the Item Master item-supplier relation.
 
     Returns (site, SUPPLIER_NAME, family). When several Active sites of one supplier family remain, the
@@ -803,12 +829,17 @@ def resolve_supplier(run, source, matches, candidates, deliver_to=None):
         family_sites = next(iter(families.values()))
     elif len(families) > 1:
         settled = code_by_market(run, families, deliver_to)
+        picked = None if settled or not owner_code else owner_pick(run, owner_code)
         if settled:
             family_sites = set(next(iter(settled.values())))
             market_ref = f"LOCATIONS {deliver_to[0]}|{run.config.version}"
+        elif picked:
+            family_sites = set(picked)
         else:
             run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES",
                           "SUP-001", evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+    if owner_code and not run.owner_pick and not (len(families) > 1 and not settled):
+        owner_pick(run, owner_code)  # no candidates this run: ignored, and said
     name_sites |= family_sites
     item_sites = None
     for m in matches:
@@ -827,9 +858,13 @@ def resolve_supplier(run, source, matches, candidates, deliver_to=None):
         names, site_rows = _site_names(source, site, rows)
         name = next(iter(names)) if len(names) == 1 else None
         bridged = site in family_sites
-        run.trace("Supplier Site", site, "SUP-003", "Item Master SUPPLIER" + (" via SUPPLIER SITES" if bridged else ""),
+        picked = bridged and run.owner_pick
+        run.trace("Supplier Site", site, OWNER_PICK if picked else "SUP-003",
+                  "Item Master SUPPLIER" + (" via SUPPLIER SITES" if bridged else "") +
+                  (f" of the owner-picked Supplier CODE {run.owner_pick}" if picked else ""),
                   reference=", ".join(x for x in (_refs(site_rows), f"{site}|{version}" if bridged else "",
-                                                  market_ref if bridged else "") if x))
+                                                  market_ref if bridged else "") if x),
+                  confidence="Owner entry" if picked else "Exact", evidence_kind=EVIDENCE_OWNER_ENTRY if picked else None)
         if name is None:
             run.exception("Supplier Exception", "Supplier site has no single SUPPLIER_NAME in the Item Master",
                           "R-006", evidence=", ".join(sorted(names)), owner="Supplier operations")
@@ -1370,8 +1405,9 @@ def item_resolution(run, matches, group):
 
 
 def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=(), page_count=None,
-                transaction=1, seen_documents=None):
-    """Run the whole rule chain for one invoice (ALG-028: every invoice, every rule)."""
+                transaction=1, seen_documents=None, owner_supplier_code=None):
+    """Run the whole rule chain for one invoice (ALG-028: every invoice, every rule). ``owner_supplier_code`` is
+    the owner's pick among the R-006 candidates of an earlier run (decision 41)."""
     config = config or RulesConfig()
     run = Run(invoice, config, filename)
     scan = scan_pages(text_value, boxes, page_count)
@@ -1410,10 +1446,12 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     probe = Run(invoice, config, filename)
     probe_matches = [match_line(probe, n, line, source, first_names or None) for n, line in enumerate(invoice.lines, 1)]
     deliver_to = deliver_to_location(invoice, scan, config)
-    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates, deliver_to)
+    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates, deliver_to,
+                                                        owner_supplier_code)
     sites = {probe_site} if probe_site else (set(probe_family) if probe_family else (first_names or None))
     matches = [match_line(run, n, line, source, sites) for n, line in enumerate(invoice.lines, 1)]
-    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates, deliver_to)
+    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates, deliver_to,
+                                                          owner_supplier_code)
     if supplier_site:
         # Re-check items under the resolved supplier where the first pass was unconstrained.
         for m in matches:
@@ -1579,7 +1617,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         "po": {"order": po["order"], "source": po["source"], "status": po["status"], "value_source": value_source},
         "ebs_supplier_code": key or "/".join(sorted(keys)), "entity_hint": hint, "config_version": config.version,
         "item_resolution": resolution, "po_candidates": po["candidates"],
-        "supplier_site_candidates": [] if supplier_site else run.site_candidates,
+        "supplier_site_candidates": [] if supplier_site and not run.owner_pick else run.site_candidates,
     }
 
 
@@ -1634,7 +1672,8 @@ def run_batch(entries, source, config=None):
     for transaction, entry in enumerate(entries, 1):
         try:
             result = run_invoice(entry["invoice"], source, config, entry.get("filename", ""), entry.get("text", ""),
-                                 entry.get("boxes", ()), entry.get("page_count"), transaction, seen)
+                                 entry.get("boxes", ()), entry.get("page_count"), transaction, seen,
+                                 entry.get("owner_supplier_code"))
         except Exception as error:  # isolated per invoice; the error is the evidence
             result = {"status": "Blocked", "filename": entry.get("filename", ""), "transaction": transaction,
                       "header": {"Document": text(entry["invoice"].number), "Validation Status": "Blocked"},

@@ -853,6 +853,50 @@ def test_02A_line_below_quantity_x_cost_is_explained_by_a_printed_invoice_discou
     assert unit_cost_lines("45", "10", "55", printed) == [1]
 
 
+def test_owner_pick_among_the_R_006_candidates_runs_the_cascade_and_is_cited_as_an_owner_entry():
+    items = ITEMS + [item(p, b, v, site="92006", name="DEF002RB2SAR", ref=r)
+                     for p, b, v, r in (("345000001", "ULT_0012345678905", "100001", 7),
+                                        ("345000002", "ULT_0098765432109", "100002", 8))]
+    sites = [{"supplier_site": s, "currency": c, "status": "Active", "supplier_code": code,
+              "supplier_name": "ABC Trading LLC", "site_name": n}
+             for s, c, code, n in (("22001", "KWD", "1", "ABC001RA1KWD"), ("92006", "SAR", "2", "DEF002RB2SAR"))]
+    master = {"38091": {"type": fr.STORE, "market": "Kuwait", "entity_currency": "RA1KWD"}}
+    config = {**CONFIG, "supplier_sites": sites, "location_master": master}
+
+    def picked(code, text_value="Deliver To: Store Name"):
+        entry = {"invoice": invoice(po=None), "text": text_value, "owner_supplier_code": code}
+        return fr.run_batch([entry], fr.RowsSource(items, POGRN), fr.RulesConfig.from_dict(config))[0]
+
+    def rules(result):
+        return [(e["Rule ID"], e["Description"]) for e in result["exceptions"]]
+
+    unpicked = picked(None)
+    assert unpicked["header"]["Supplier Site"] == "" and len(unpicked["supplier_site_candidates"]) == 2
+    assert run(invoice(po=None), items=items, config=config, text_value="Deliver To: Store Name") == unpicked
+    assert picked("") == unpicked
+
+    one = picked("1")
+    header = one["header"]
+    assert (header["Supplier Site"], header["Order No"], header["Location"]) == ("22001", "13000001", "38091")
+    lineage = {x["target"]: x for x in one["lineage"] if x["line"] is None}
+    assert lineage["Supplier Code"]["rule"] == "OWNER-PICK" and lineage["Supplier Code"]["value"] == "1"
+    assert lineage["Supplier Code"]["evidence_kind"] == "owner_entry"
+    assert "22001|test-1" in lineage["Supplier Code"]["reference"]
+    assert lineage["Supplier Site"]["rule"] == "OWNER-PICK" and lineage["Supplier Site"]["evidence_kind"] == "owner_entry"
+    assert lineage["Order No"]["assisted_by"] == "OWNER-PICK" and lineage["Location"]["assisted_by"] == "OWNER-PICK"
+    assert "assisted_by" not in lineage["Document"] and "R-006" not in [x["rule"] for x in one["lineage"]]
+    assert not [r for r in rules(one) if r[0] in ("R-006", "SUP-001", "OWNER-PICK")]
+    assert [c["supplier_code"] for c in one["supplier_site_candidates"]] == ["1", "2"]
+    assert picked("2")["header"]["Supplier Site"] == "92006" and picked("2")["header"]["Order No"] == ""
+
+    stray = picked("9")
+    assert stray["header"] == unpicked["header"] and stray["lineage"] == unpicked["lineage"]
+    ignored = ("OWNER-PICK", "Owner supplier-code pick is not one of this run's candidates; ignored")
+    assert [r for r in rules(stray) if r != ignored] == rules(unpicked) and rules(stray).count(ignored) == 1
+    settled = picked("2", "Deliver To: Store 38091")
+    assert settled["header"]["Supplier Site"] == "22001" and rules(settled).count(ignored) == 1
+
+
 def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     traced = run(text_value="Net 70.000\fTax 0\nTotal 70")
     refs = {x["target"]: x["reference"] for x in traced["lineage"]}
