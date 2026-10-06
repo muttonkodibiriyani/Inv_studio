@@ -236,6 +236,7 @@ def test_description_metadata_is_separated_and_not_joined_to_product_name(flatte
     assert result["lines"][0] == {
         "description": "Synthetic Face Cream Model 50 ml",
         "sku": "SYN-CREAM-50",
+        "part_code": "PR-001234567890-OP",
         "qty": "3",
         "uom": "Nos",
         "price": "9.00",

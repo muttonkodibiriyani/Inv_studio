@@ -609,7 +609,7 @@ def create_app(data_dir=None):
             else:
                 # Line entries are keyed by line number; they do not survive a change to the lines.
                 entries=owner_entries(j.get("owner_entries"))
-                if body.invoice.model_dump(mode="json")["lines"]!=j["invoice"].get("lines"):entries["lines"]={}
+                if body.invoice.model_dump(mode="json")["lines"]!=stored_lines(j):entries["lines"]={}
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
             pick=supplier_pick(j,body)
             picked_by=j.get("owner_supplier_pick") if pick and pick==j.get("owner_supplier_code") else {"actor":actor.get(),"at":datetime.now(timezone.utc).isoformat()} if pick else None
@@ -685,12 +685,16 @@ def create_app(data_dir=None):
         learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
+    def stored_lines(j):
+        """The job's lines in the current model's shape: a job saved before a field was added (part_code, FT3) compares
+        equal to the same lines read or saved now, so an unchanged save or re-read keeps its line entries (decision 65)."""
+        return Invoice.model_validate(j["invoice"]).model_dump(mode="json")["lines"] if j.get("invoice") else None
     def reread_entries(j,lines):
         """Line entries are keyed by line number, so a re-read that changes the lines drops them; header
         entries stay. Returns the job fields to keep and the count of cleared line cells, or None."""
         entries=j.get("owner_entries") or {}
         cleared=sum(len(cells or {}) for cells in (entries.get("lines") or {}).values())
-        if not cleared or lines==(j.get("invoice") or {}).get("lines"):return None
+        if not cleared or lines==stored_lines(j):return None
         attribution={k:v for k,v in (j.get("owner_entry_attribution") or {}).items() if not k.startswith("line:")}
         return {"owner_entries":{**entries,"lines":{}},"owner_entry_attribution":attribution},cleared
     def entry_attribution(before,after,previous):

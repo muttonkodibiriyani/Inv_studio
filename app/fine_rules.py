@@ -650,14 +650,23 @@ def upc_valid(value):
     return (10 - total % 10) % 10 == int(value[11])
 
 
-def variant_upc(line):
-    """The UPC inside a printed supplier variant code, when the barcode column is empty and the whole VPN-column
-    value has one of the variant shapes around a check-digit-valid UPC; otherwise None."""
+def variant_code(line):
+    """(UPC, printed code) for a printed supplier variant code, when the barcode column is empty and the whole
+    part-code cell, else the whole VPN-column value, has one of the variant shapes around a check-digit-valid UPC;
+    otherwise (None, None)."""
     if text(getattr(line, "gtin", None)):
-        return None
-    match = _VARIANT_CODE.fullmatch(text(getattr(line, "sku", None)))
-    core = match and (match.group(1) or match.group(2))
-    return core if core and upc_valid(core) else None
+        return None, None
+    for printed in (text(getattr(line, "part_code", None)), text(getattr(line, "sku", None))):
+        match = _VARIANT_CODE.fullmatch(printed)
+        core = match and (match.group(1) or match.group(2))
+        if core and upc_valid(core):
+            return core, printed
+    return None, None
+
+
+def variant_upc(line):
+    """The UPC inside a printed supplier variant code (see variant_code); otherwise None."""
+    return variant_code(line)[0]
 
 
 def match_line(run, n, line, source, sites=None):
@@ -687,11 +696,12 @@ def match_line(run, n, line, source, sites=None):
             vpns = [{**printed_vpn, "value": variant, "printed": printed_vpn["value"]}]
             vpn_hits = {variant: (vpns[0], rows)}
     supplier_code = None
-    if not barcode_hits and not vpn_hits and not ocr and (core := variant_upc(line)):
+    core, printed = variant_code(line)
+    if not barcode_hits and not vpn_hits and not ocr and core:
         # Only after both exact routes found nothing; the whole master must agree on one ITEM_PARENT.
         rows = [r for r in source.items_by_barcode(core) if strip_ult(r.get("ITEM")) == core]
         if len(_unique_parents(rows)) == 1:
-            supplier_code = {"value": core, "origin": "supplier variant", "printed": text(line.sku)}
+            supplier_code = {"value": core, "origin": "supplier variant", "printed": printed}
             barcodes = barcodes + [supplier_code]
             barcode_hits = {core: (supplier_code, rows)}
 

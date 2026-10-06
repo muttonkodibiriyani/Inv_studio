@@ -1210,3 +1210,29 @@ def test_supplier_variant_code_never_on_other_shapes_bad_check_digits_or_ambiguo
     assert fr.upc_valid("777123456785") and not fr.upc_valid("777123456786") and not fr.upc_valid("77712345678")
     assert fr.variant_upc(Line(sku="777123456785-AB", description="x")) == "777123456785"
     assert fr.variant_upc(Line(gtin="1", sku="AB-777123456785", description="x")) is None
+
+
+def test_supplier_variant_code_reads_the_part_code_cell_first_then_the_vpn_column():
+    def first_line(**cells):
+        result = run(invoice(lines=lines(first={"gtin": None, "description": "Velvet Blush", **cells})),
+                     items=VARIANT_ITEMS)
+        return result, result["lines"][0]
+    # Part-code cell holds the whole variant code, VPN column holds a supplier number: the part code routes.
+    result, first = first_line(part_code="AB-777123456785", sku="SV9999")
+    assert first["Item"] == "345000020" and first["Match Method"] == "Barcode supplier variant"
+    trace = next(t for t in result["lineage"] if t["target"] == "Item" and t["line"] == 1)
+    assert trace["original"] == "AB-777123456785"
+    # Part code that is not a variant shape: the VPN column is still tried, and its printed code is kept.
+    result, first = first_line(part_code="X-1", sku="777123456785-AB")
+    assert first["Item"] == "345000020"
+    trace = next(t for t in result["lineage"] if t["target"] == "Item" and t["line"] == 1)
+    assert trace["original"] == "777123456785-AB"
+    # A variant code embedded in a longer part-code cell is never cut out: no fill.
+    _, first = first_line(part_code="AB-777123456785 Velvet Blush", sku=None)
+    assert first["Item"] == "" and first["Match Method"] != "Barcode supplier variant"
+    # A filled barcode column (no master hit) still blocks the route, even with a variant part code.
+    result, first = first_line(gtin="012345678912", part_code="AB-777123456785", sku=None)
+    assert first["Item"] == "" and "ALG-016-VAR" not in [e["Rule ID"] for e in result["exceptions"]]
+    assert fr.variant_code(Line(part_code="777123456785-AB", sku="AB-777123456785", description="x")) == \
+        ("777123456785", "777123456785-AB")
+    assert fr.variant_code(Line(gtin="1", part_code="AB-777123456785", description="x")) == (None, None)

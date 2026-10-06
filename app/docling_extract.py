@@ -925,6 +925,9 @@ def extract_invoice_from_tables(
                         values.pop("sku", None)
                     else:
                         values["sku"] = printed_sku
+            if part_code and not re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
+                # Kept even when the description's printed code already set sku.
+                values["part_code"] = part_code
             if part_code and "gtin" not in values:
                 values.setdefault("sku", part_code)
             identity = any(values.get(key) for key in ("sku", "gtin", "description"))
@@ -981,7 +984,7 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
-                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount", "_other_amount"):
+                    for field in ("sku", "gtin", "part_code", "uom", "net_amount", "tax_amount", "_other_amount"):
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
