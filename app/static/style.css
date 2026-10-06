@@ -868,3 +868,26 @@ dialog:has(.fine-rules-dialog) { width: min(1180px, calc(100vw - 28px)); }
 @media (max-width: 700px) {
   .fine-rules-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+
+/* Target-sheet check: review panel, inbox chip, accuracy screen */
+.target-check { margin: 0 0 12px; padding: 9px 12px; background: #fafcfb; border: 1px solid var(--line); border-radius: 9px; font-size: 11px; }
+.target-check.holds { border-color: var(--warning); }
+.target-check > summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; cursor: pointer; }
+.target-check-checks { display: grid; gap: 4px; margin: 10px 0; }
+.target-check-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 0; }
+.target-check-row small { color: var(--muted); }
+.target-group { margin-top: 6px; }
+.target-group > summary { cursor: pointer; font-weight: 700; }
+.target-group.needs_checking > summary { color: var(--danger); }
+.target-cells { min-width: 560px; font-size: 10px; }
+.target-cells td { overflow-wrap: anywhere; }
+.target-chip { flex: 0 0 auto; padding: 1px 6px; border-radius: 99px; font-size: 9px; font-weight: 800; }
+.target-chip.success { color: var(--success); background: var(--success-bg); }
+.target-chip.warning { color: var(--warning); background: var(--warning-bg); }
+.reader-badge { display: inline-block; margin-top: 2px; padding: 0 5px; color: #52605d; background: var(--soft); border: 1px solid var(--line); border-radius: 5px; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+.accuracy-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; margin-bottom: 12px; }
+.accuracy-controls label { display: grid; gap: 4px; font-size: 10px; font-weight: 700; color: var(--muted); }
+.accuracy-overall { margin: 0 0 12px; font-weight: 700; }
+.accuracy-tables { display: grid; gap: 16px; }
+.accuracy-table { min-width: 480px; font-size: 11px; }
+.accuracy-table caption { margin-bottom: 6px; font-weight: 800; text-align: left; }

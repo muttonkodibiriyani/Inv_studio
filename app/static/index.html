@@ -62,6 +62,10 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg>
             <span>References</span>
           </button>
+          <button class="nav-item" type="button" data-nav="accuracy" title="Target-sheet accuracy">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 20h16M7 16v-5M12 16V7M17 16v-8"/></svg>
+            <span>Accuracy</span>
+          </button>
           <button class="nav-item" type="button" data-nav="engines" title="Engines &amp; AI">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1M8 12a4 4 0 1 0 8 0 4 4 0 0 0-8 0z"/></svg>
             <span>Engines &amp; AI</span>
@@ -255,6 +259,11 @@
                     </div>
                     <form id="invoice-form">
                       <div id="validation-summary" class="validation-summary" hidden></div>
+                      <details id="target-check" class="target-check" hidden>
+                        <summary><strong id="target-check-line"></strong><span id="target-check-hold"></span></summary>
+                        <div id="target-check-checks" class="target-check-checks"></div>
+                        <div id="target-check-cells" class="target-check-cells"></div>
+                      </details>
                       <fieldset>
                         <legend>Header</legend>
                         <div id="header-fields" class="field-grid"></div>
@@ -457,6 +466,28 @@
                 <p class="disclosure small">The token is stored encrypted and is never displayed after import. Local installations also need the Claude CLI installed; the hosted worker includes its pinned CLI.</p>
               </form>
             </article>
+          </div>
+        </section>
+
+        <section id="accuracy-section" class="page-section" aria-labelledby="accuracy-title" hidden>
+          <div class="page-heading">
+            <div><p class="eyebrow">Target sheet</p><h1 id="accuracy-title">Accuracy against owner confirms</h1><p>Each confirmed invoice records, per field, the status before confirm and whether the owner changed it. No values are stored.</p></div>
+          </div>
+          <div class="card settings-card wide">
+            <div class="accuracy-controls">
+              <div class="sort-toggle" role="group" aria-label="Period">
+                <button type="button" data-accuracy-period="7d" aria-pressed="false">7 days</button>
+                <button type="button" data-accuracy-period="30d" aria-pressed="false">30 days</button>
+                <button type="button" data-accuracy-period="all" aria-pressed="true">All</button>
+              </div>
+              <label>Supplier code<select id="accuracy-supplier"><option value="">All suppliers</option></select></label>
+            </div>
+            <p id="accuracy-overall" class="accuracy-overall"></p>
+            <div class="accuracy-tables">
+              <div class="table-scroll"><table class="line-table accuracy-table"><caption>By field</caption><thead><tr><th scope="col">Field</th><th scope="col">Cells</th><th scope="col">Unchanged</th><th scope="col">Changed</th><th scope="col">Accuracy</th></tr></thead><tbody id="accuracy-fields"></tbody></table></div>
+              <div class="table-scroll"><table class="line-table accuracy-table"><caption>By status before confirm</caption><thead><tr><th scope="col">Status</th><th scope="col">Cells</th><th scope="col">Unchanged</th><th scope="col">Changed</th><th scope="col">Accuracy</th></tr></thead><tbody id="accuracy-statuses"></tbody></table></div>
+              <div class="table-scroll"><table class="line-table accuracy-table"><caption>By supplier code</caption><thead><tr><th scope="col">Supplier code</th><th scope="col">Cells</th><th scope="col">Unchanged</th><th scope="col">Changed</th><th scope="col">Accuracy</th></tr></thead><tbody id="accuracy-suppliers"></tbody></table></div>
+            </div>
           </div>
         </section>
       </main>

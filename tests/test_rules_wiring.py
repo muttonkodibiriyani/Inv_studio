@@ -14,7 +14,8 @@ from app.matching import extraction_evidence, printed_evidence, rules_validation
 from tests.test_fine_rules_api import CONFIG, INVOICE, imported
 
 H = {"x-studio-request": "1"}
-PRINTED = "Total before tax 70.00\nVAT 0.00"
+# The target check re-reads printed evidence: the synthetic text prints what the invoice model holds.
+PRINTED = "Invoice INV-API dated 15/01/2026\nLine 1 qty 3 unit 10\nLine 2 qty 2 unit 20\nTotal before tax 70.00\nVAT 0.00"
 
 
 def lineage(target, value, source, reference="", line=None):

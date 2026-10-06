@@ -25,6 +25,7 @@ from .authentication import CloudIdentity, actor
 from .engines import capabilities, process
 from .learned import LearnedStore
 from .excel import UPC_MODES, workbook, batch_workbook, rules_workbook
+from . import target_check as tc
 from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
 from .deletion import DeletionError, delete_invoices
@@ -267,16 +268,26 @@ def create_app(data_dir=None):
     def rules_signature(c):
         # The stored result is stale once the mapping tables or the imported catalog change.
         sources=[r[0] for r in c.execute("SELECT payload FROM lookup_sources ORDER BY id")]
-        return hashlib.sha256(json.dumps([store.get("fine_rules_config",{},c),sources],sort_keys=True,default=str).encode()).hexdigest()
+        # The UPC export mode decides what the target check scores in the Details UPC column.
+        return hashlib.sha256(json.dumps([store.get("fine_rules_config",{},c),sources,target_upc(c)],sort_keys=True,default=str).encode()).hexdigest()
     def compute_rules(invoice,j,entries=None):
         """ONE fine-rules run for this invoice; review fields, banner and download all read its view."""
         with store.connection() as c:config=store.get("fine_rules_config",{},c);signature=rules_signature(c)
         entry={"invoice":invoice,"filename":j["filename"],"text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":j["id"]}
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
-        view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),
-                        j.get("owner_entries") if entries is None else entries)
+        entries=j.get("owner_entries") if entries is None else entries
+        view=rules_view(plain(result),entry["text"],entry["boxes"],j.get("evidence"),entries)
         view.update(signature=signature,evidence_hash=evidence_hash(j),computed_at=datetime.now(timezone.utc).isoformat())
+        attach_target_check(view,config,entry["text"],entries,j.get("owner_entry_attribution"))
         return view
+    def attach_target_check(view,config,text,entries,attribution):
+        """Read-only target-sheet check (app/target_check): deterministic, no AI or cloud call; the owner config
+        (buyer_name included) is compared in memory only. Its failures are review-level issues (decision 12)."""
+        sources=tc.Sources(tc.store_rows(store),config,text,tc.store_site_rows(store))
+        with store.connection() as c:upc=target_upc(c)
+        result=tc.check_view(view,sources,upc=upc,entries=entries,attribution=attribution)
+        view["target_check"]=result
+        view["issues"]=[*view.get("issues",[]),*tc.issues(result)]
     def evidence_hash(j):
         # Extraction evidence (boxes from a deferred OCR pass) can arrive without a revision change.
         return hashlib.sha256(json.dumps(j.get("evidence") or {},sort_keys=True,default=str).encode()).hexdigest()
@@ -299,6 +310,7 @@ def create_app(data_dir=None):
             reset=bool(current.get("reviewed")) and accepted_ids(current.get("rules"))!=accepted_ids(view)
             if reset:current["reviewed"]=False
             current["rules"]=view
+            if not current.get("target_system") and not current.get("owner_entries"):current["target_system"]=view["target_check"]
             evaluate(current,c);store.job(jid,current,c)
             if reset:store.audit("review_reset",{"job_id":jid,"revision":current["revision"],"reason":"fine rules issues changed"},c)
             store.audit("fine_rules_applied",{"job_id":jid,"revision":current["revision"],"status":view["status"],
@@ -338,7 +350,9 @@ def create_app(data_dir=None):
                             extraction_status=outcome,
                             status="review" if unchanged else "error",reviewed=False,progress=None,revision=job["revision"]+1,
                             error=None if unchanged else "Rules or references changed during extraction. Review a new processing plan and retry.")
-                if view is not None:job["rules"]={**view,"revision":job["revision"]}
+                if view is not None:
+                    job["rules"]={**view,"revision":job["revision"]}
+                    if not job.get("owner_entries"):job["target_system"]=view["target_check"]
                 evaluate(job,c);store.job(jid,job,c)
                 store.audit(outcome,{"job_id":jid,"engine":job["selected_engine"],"trace":job["trace"],
                             "header_fields":header_fields,"line_items":extracted_lines,
@@ -403,9 +417,12 @@ def create_app(data_dir=None):
         except Exception:slots.release();raise
 
     def public(j,full=True):
-        j={k:v for k,v in j.items() if k!="path"}
+        # The confirm-time snapshot and records are served by the target-check endpoints, not with every job.
+        j={k:v for k,v in j.items() if k not in ("path","target_system","target_accuracy")}
         if not full:
             j.pop("text",None);j.pop("boxes",None)
+            check=(j.get("rules") or {}).get("target_check")
+            if check:j["rules"]={**j["rules"],"target_check":{k:check[k] for k in ("counts","metric","holds","summary","upc")}}
         return j
 
     @app.get("/api/public-config")
@@ -520,14 +537,22 @@ def create_app(data_dir=None):
                 # Line entries are keyed by line number; they do not survive a change to the lines.
                 entries=owner_entries(j.get("owner_entries"))
                 if body.invoice.model_dump(mode="json")["lines"]!=j["invoice"].get("lines"):entries["lines"]={}
-            view=compute_rules(body.invoice,j,entries)
+            attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
+            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution},entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
             inv,provenance=enrich(body.invoice,references(c)) if demo_references else (body.invoice,[])
             before=j["invoice"]
             j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
-            if view is not None:j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries
+            if view is not None:
+                j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries;j["owner_entry_attribution"]=attribution
+                if body.confirm:
+                    # Confirm-time accuracy: per field, its status before and changed yes/no; never a value.
+                    supplier=(view["fields"].get("site") or {}).get("value") or ""
+                    j["target_accuracy"]=[{**r,"job_id":jid} for r in tc.confirm_records(j.get("target_system"),view["target_check"],supplier)]
+                    store.audit("target_check_confirmed",{"job_id":jid,"revision":j["revision"],**tc.log_fields(view["target_check"]),
+                                "changed":sorted({r["field"] for r in j["target_accuracy"] if r["changed"]})},c)
             # Keep original derivation evidence, add new derivations and record edits separately.
             j["provenance"]+=provenance
             evaluate(j,c);store.job(jid,j,c)
@@ -573,15 +598,43 @@ def create_app(data_dir=None):
             else:
                 accepted=j["validation"].get("accepted",[])
                 content,evidence=rules_workbook([{**j["rules"],"owner_accepted":accepted}],target_upc(c))
+                content,target=with_checks_sheet(content,[j["rules"]])
                 receipt={"id":eid,"job_id":jid,"invoice_key":rules_key(j["rules"]),"number":inv.number,"created_at":datetime.now(timezone.utc).isoformat(),
                          "source":"fine_rules","rules_signature":j["rules"]["signature"],"rules_revision":j["rules"]["revision"],
                          "rules_status":j["rules"]["status"],"owner_accepted":accepted,"owner_entries":j.get("owner_entries") or {},
-                         "allocations":[],"evidence":evidence.get(1,{})}
+                         "allocations":[],"evidence":evidence.get(1,{}),"target_check":target[1]}
             c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(eid,key(inv),jid,json.dumps(receipt),content))
             j.update(status="exported",export_id=eid,revision=j["revision"]+1);store.job(jid,j,c);store.audit("exported",audit_receipt(receipt),c)
         learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
+    def entry_attribution(before,after,previous):
+        """Actor and time per owner entry; an unchanged entry keeps its first attribution."""
+        before,previous,out=before or {},previous or {},{}
+        now=datetime.now(timezone.utc).isoformat()
+        for name,value in (after.get("header") or {}).items():
+            k=f"header:{name}"
+            out[k]=previous[k] if k in previous and (before.get("header") or {}).get(name)==value else {"actor":actor.get(),"at":now}
+        for line,cells in (after.get("lines") or {}).items():
+            for name,value in cells.items():
+                k=f"line:{line}:{name}"
+                old=((before.get("lines") or {}).get(str(line)) or {}).get(name)
+                out[k]=previous[k] if k in previous and old==value else {"actor":actor.get(),"at":now}
+        return out
+    def with_checks_sheet(content,views):
+        """Append the 'Checks' sheet (cells by status with evidence, row and workbook checks) to a written
+        target workbook; returns it with each transaction's target-sheet accuracy for its receipt (counts only)."""
+        results=[]
+        for n,view in enumerate(views,1):
+            check=view.get("target_check") or {}
+            cells=[{**x,"value":str(n)} if x["column"]=="Transaction Number" else x for x in check.get("cells",[])]
+            results.append({**check,"transaction":n,"cells":cells,"checks":check.get("checks",[])})
+        currencies=[((v.get("fields") or {}).get("currency") or {}).get("value") for v in views]
+        content,workbook_checks=tc.add_checks_sheet(content,results,currencies)
+        receipts={r["transaction"]:{"summary":r.get("summary",""),"counts":r.get("counts",{}),"metric":r.get("metric",{}),
+                  "checks":{k["check"]:k["status"] for k in r["checks"]},
+                  "workbook_checks":{k["check"]:k["status"] for k in workbook_checks}} for r in results}
+        return content,receipts
     def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
     def audit_receipt(receipt):
         # Cell evidence holds owner rows; the audit keeps its size, the receipt keeps the rows.
@@ -651,9 +704,10 @@ def create_app(data_dir=None):
             if demo_references:content=batch_workbook(entries)
             else:
                 content,evidence=rules_workbook(entries,target_upc(c))
+                content,target=with_checks_sheet(content,entries)
                 for _,receipt in selected:
                     row=receipt["transaction_number"];receipt["source"]="fine_rules"
-                    receipt["evidence"]=evidence.get(row,{})
+                    receipt["evidence"]=evidence.get(row,{});receipt["target_check"]=target[row]
             c.execute("INSERT INTO batches VALUES (?,?,?)",(batch_id,json.dumps([r for _,r in selected]),content))
             for j,receipt in selected:
                 c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(receipt["id"],receipt["invoice_key"],j["id"],json.dumps(receipt),content))
@@ -667,6 +721,25 @@ def create_app(data_dir=None):
         with store.connection() as c:r=c.execute("SELECT workbook FROM batches WHERE id=?",(bid,)).fetchone()
         if not r:raise HTTPException(404,"Batch not found")
         return Response(bytes(r[0]),media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="Merch_Inv_Batch_{bid[:8]}.xlsx"'})
+
+    @app.get("/api/jobs/{jid}/target-check")
+    def target_check(jid:str):
+        """Read-only: the invoice's target-sheet cells by status with evidence, its row checks and the owner line."""
+        ensure_rules(jid)
+        j=job_or_404(jid);check=(fresh_rules(j) or {}).get("target_check")
+        if not check:raise HTTPException(409,"The target check runs with the fine rules; it is not available for this invoice yet")
+        return {"job_id":jid,"revision":j["revision"],**check,"issues":tc.issues(check),"confirmed":bool(j.get("target_accuracy"))}
+
+    @app.get("/api/target-check/accuracy")
+    def target_accuracy(supplier:str|None=None):
+        """Read-only confirm-time accuracy against owner truth (MEASURE reads this): per field and overall,
+        by status before confirm and per supplier code, for 7 days, 30 days and all time. No values."""
+        records=[];invoices=0
+        with store.connection() as c:
+            for r in c.execute("SELECT payload FROM jobs"):
+                found=json.loads(r["payload"]).get("target_accuracy") or []
+                invoices+=bool(found);records+=found
+        return {**tc.accuracy_summary(records,supplier=supplier),"invoices":invoices}
 
     @app.get("/api/jobs/{jid}/audit")
     def audit(jid:str):
