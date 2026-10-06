@@ -713,10 +713,16 @@ def match_line(run, n, line, source, sites=None):
     usable_vpn = vpn_hits
     vpn_parents = {p for _, rows in usable_vpn.values() for p in _unique_parents(_constrain(rows, sites)[0])}
 
+    # D87 (owner): barcode, then the supplier item code (VPN), then the description, last and review only. A barcode
+    # found only inside the description text ranks after the VPN column; it still decides when no VPN column hits.
+    column_vpn = any(c["origin"] == "VPN column" for c, _ in usable_vpn.values())
+    text_barcode = barcode_hits and all(c["origin"] == "description" for c, _ in barcode_hits.values())
+    ranked_barcode = set() if text_barcode and column_vpn else barcode_parents
+
     parent = None
-    if len(barcode_parents) == 1:
-        parent, result["method"], rule = next(iter(barcode_parents)), "Barcode exact", "ALG-016"
-    elif len(barcode_parents) > 1:
+    if len(ranked_barcode) == 1:
+        parent, result["method"], rule = next(iter(ranked_barcode)), "Barcode exact", "ALG-016"
+    elif len(ranked_barcode) > 1:
         run.exception("Item Exception", "Barcode matches more than one ITEM_PARENT", "ALG-016", n,
                       evidence=", ".join(sorted(barcode_parents)), owner="Item steward")
         result["candidates"] = sorted(barcode_parents)
@@ -1403,6 +1409,11 @@ def check_receipt_dates(po, order_date, document_date):
         return out
     flags = []
     created = _day(order_date.get("value"))
+    # Decision 86: a date cell that cannot be read is skipped, and the reason says so.
+    unread = ["CREATED_DATE"] if order_date.get("value") is not None and not created else []
+    unread += [f"{sum(not _day(x) for x in receipts)} RECEIPT_DATE"] if any(not _day(x) for x in receipts) else []
+    if unread:
+        out["reason"] += f"; not checked, date could not be parsed: {', '.join(unread)}"
     if created and (created - invoiced).days > DAYS_BEFORE_ORDER:
         flags.append(f"Invoice Date is {(created - invoiced).days} days before the order's CREATED_DATE "
                      f"(limit {DAYS_BEFORE_ORDER})")

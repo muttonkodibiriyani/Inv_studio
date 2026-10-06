@@ -141,6 +141,27 @@ def test_R_005_route_order_barcode_vpn_item_parent_then_description_only_as_revi
     assert fuzzy["lines"][0]["Item"] == "" and fuzzy["status"] != "Approved"
 
 
+
+def test_D87_barcode_then_vpn_then_description_last_and_review_only():
+    """D87 (owner): barcode, then the supplier item code (VPN), then the description, never by product name alone."""
+    def first(**line):
+        return run(invoice(lines=lines(first=line)))["lines"][0]
+    assert first(gtin="0012345678905", sku="100001")["Match Method"] == "Barcode exact"
+    # A barcode found only in the description text ranks after the VPN column.
+    in_text = first(gtin=None, sku="100001", description="Glow Serum Rose 0012345678905")
+    assert in_text["Item"] == "345000001" and in_text["Match Method"] == "VPN exact"
+    assert first(gtin=None, sku=None, description="Glow Serum Rose 0012345678905")["Match Method"] == "Barcode exact"
+    # The two identifiers disagree: no fill, the conflict stays.
+    other = run(invoice(lines=lines(first={"gtin": None, "sku": "100001",
+                                           "description": "Glow Serum Rose 0098765432109"})))
+    assert other["lines"][0]["Item"] == "" and "Item Conflict" in types(other, "ALG-020")
+    # A barcode cell left empty (unreadable on the page) falls to the VPN.
+    assert first(gtin=None, sku="100001")["Match Method"] == "VPN exact"
+    # The description alone never fills and is marked for review.
+    described = run(invoice(lines=lines(first={"gtin": None, "sku": None, "description": "Glow Serum Rose 30ml"})))
+    assert described["lines"][0]["Item"] == "" and described["lines"][0]["Match Method"] == "Description candidate"
+    assert "Item Exception" in types(described, "ALG-019") and described["status"] != "Approved"
+
 def test_R_006_supplier_name_to_item_master_and_several_sites_is_exception():
     by_name = run(invoice(supplier_name="ABC001RA1KWD", lines=lines(first={"gtin": "1"}, second={"gtin": "2"})))
     assert by_name["header"]["Supplier Site"] == "22001"
@@ -423,6 +444,11 @@ def test_D83_receipt_date_check_only_flags_never_fills_or_changes_the_status():
     assert undated["order_date"]["value"] is None
     missing = run(rows=[pogrn("13000001", "38091", "6", "70")])
     assert missing["receipt_date"]["flag"] is None and missing["receipt_date"]["reference"] == ""
+    # Decision 86: an unreadable receipt cell is skipped, never a flag, and the reason says it was not parsed.
+    unread = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "n/a", "2026-03-01T00:00:00"))
+    assert unread["receipt_date"]["value"] == "2026-03-01T00:00:00, n/a" and "45 days" in unread["receipt_date"]["flag"]
+    assert "date could not be parsed: 1 RECEIPT_DATE" in unread["receipt_date"]["reason"]
+    assert "could not be parsed" not in plain["receipt_date"]["reason"]
 
 
 def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
