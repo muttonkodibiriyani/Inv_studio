@@ -626,6 +626,28 @@ def ocr_vpn(source, vpns, sites):
     return hits[0] if len(hits) == 1 and len(parents) == 1 else None
 
 
+# Supplier variant code: a two-letter prefix and/or suffix around a 12-digit UPC (AA-<upc>, <upc>-AA, AA-<upc>-99/999).
+_VARIANT_CODE = re.compile(r"(?:[A-Z]{2}-(\d{12})(?:-\d{2,3})?|(\d{12})-[A-Z]{2})")
+
+
+def upc_valid(value):
+    """UPC-A check digit: 3 x the odd positions plus the even positions, 1st to 11th, completes a multiple of 10."""
+    if not re.fullmatch(r"\d{12}", value or ""):
+        return False
+    total = sum(int(d) * (3 if i % 2 == 0 else 1) for i, d in enumerate(value[:11]))
+    return (10 - total % 10) % 10 == int(value[11])
+
+
+def variant_upc(line):
+    """The UPC inside a printed supplier variant code, when the barcode column is empty and the whole VPN-column
+    value has one of the variant shapes around a check-digit-valid UPC; otherwise None."""
+    if text(getattr(line, "gtin", None)):
+        return None
+    match = _VARIANT_CODE.fullmatch(text(getattr(line, "sku", None)))
+    core = match and (match.group(1) or match.group(2))
+    return core if core and upc_valid(core) else None
+
+
 def match_line(run, n, line, source, sites=None):
     """R-003/R-005/R-015, ALG-015..ALG-021, ALG-027, ALG-029: one invoice line to one ITEM_PARENT."""
     barcodes = barcode_candidates(line)
@@ -652,6 +674,14 @@ def match_line(run, n, line, source, sites=None):
             printed_vpn, variant, rows = ocr
             vpns = [{**printed_vpn, "value": variant, "printed": printed_vpn["value"]}]
             vpn_hits = {variant: (vpns[0], rows)}
+    supplier_code = None
+    if not barcode_hits and not vpn_hits and not ocr and (core := variant_upc(line)):
+        # Only after both exact routes found nothing; the whole master must agree on one ITEM_PARENT.
+        rows = [r for r in source.items_by_barcode(core) if strip_ult(r.get("ITEM")) == core]
+        if len(_unique_parents(rows)) == 1:
+            supplier_code = {"value": core, "origin": "supplier variant", "printed": text(line.sku)}
+            barcodes = barcodes + [supplier_code]
+            barcode_hits = {core: (supplier_code, rows)}
 
     if not barcodes:
         result["checks"]["barcode"] = RECORDED_NO_BARCODE
@@ -750,9 +780,14 @@ def match_line(run, n, line, source, sites=None):
         run.exception("Item Review", f"Printed VPN {ocr[0]['value']} read by OCR matches Item Master VPN {ocr[1]} "
                       "(I/1, O/0 only); check the correction", "ALG-018-OCR", n,
                       evidence=f"printed {ocr[0]['value']} read as {ocr[1]}", owner="Item steward")
+    if supplier_code:
+        result["method"] = "Barcode supplier variant"
+        run.exception("Item Review", f"Printed supplier code {supplier_code['printed']} carries Item Master barcode "
+                      f"{supplier_code['value']}; check the item", "ALG-016-VAR", n,
+                      evidence=f"printed {supplier_code['printed']} barcode {supplier_code['value']}", owner="Item steward")
     result["status"] = "Matched"
     run.trace("Item", parent, "ALG-021", "Item Master ITEM_PARENT", reference=_refs(rows), line=n,
-              original=ocr[0]["value"] if ocr else result["barcode"] or result["vpn"])
+              original=ocr[0]["value"] if ocr else supplier_code["printed"] if supplier_code else result["barcode"] or result["vpn"])
     result["rule"] = rule
     return result
 

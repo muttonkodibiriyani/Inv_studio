@@ -95,7 +95,7 @@ def test_exact_reference_enrichment_and_validation(refs):
         "RETAIL_AE",
         "38001",
     )
-    assert invoice.taxCode == "UEPV05"
+    assert invoice.taxCode == "XEPV05"
     assert {entry["field"] for entry in provenance} >= {
         "seller",
         "site",

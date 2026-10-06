@@ -107,7 +107,7 @@ def test_e71a_line_10_leading_vpn_resolves_after_barcode_and_vpn_column_fail():
     line = {"gtin": "4006000000001", "sku": None, "description": "100002 Matte Lipstick Red 4g 12pcs 2024"}
     result = run(invoice(lines=lines(second=line)))
     assert result["lines"][1]["Item"] == "345000002" and result["lines"][1]["Match Method"] == "VPN exact"
-    other = ITEMS + [item("345000099", "ULT_7770001112223", "100002", site="22099", name="QRS001RA1KWD", ref=9)]
+    other = ITEMS + [item("345000099", "ULT_7770001112223", "100002", site="99099", name="QRS001RA1KWD", ref=9)]
     assert run(invoice(lines=lines(second=line)), items=other)["lines"][1]["Item"] == "345000002"
 
 
@@ -1025,3 +1025,49 @@ def test_ocr_read_only_for_local_ocr_or_ai_selected():
     assert not fr.ocr_read({"selected_engine": "other / model-x", "trace": [ai]})
     assert not fr.ocr_read({"selected_engine": "vertex / model-x", "trace": [{"engine": "vertex", "method": "text_only"}]})
     assert not fr.ocr_read({})
+
+
+# --------------------------------------------------------------------------- supplier variant code around a UPC
+
+VARIANT_ITEMS = ITEMS + [
+    item("345000020", "ULT_777123456785", "SV1001", desc="Velvet Blush Pink", ref=20),
+    item("345000021", "ULT_777123456792", "SV1002", desc="Velvet Blush Coral", ref=21),
+    item("345000022", "ULT_777123456792", "SV1003", desc="Velvet Blush Coral", ref=22),
+]
+
+
+def variant_lines(sku, gtin=None):
+    return lines(first={"gtin": gtin, "sku": sku, "description": "Velvet Blush"})
+
+
+def test_supplier_variant_code_fills_one_parent_with_a_review_flag():
+    for sku in ("AB-777123456785", "777123456785-AB", "AB-777123456785-99", "AB-777123456785-999"):
+        result = run(invoice(lines=variant_lines(sku)), items=VARIANT_ITEMS)
+        first = result["lines"][0]
+        assert first["Item"] == "345000020" and first["Match Method"] == "Barcode supplier variant", sku
+        flag = next(e for e in result["exceptions"] if e["Rule ID"] == "ALG-016-VAR")
+        assert (flag["Engine Type"], flag["Exception Type"], flag["Check ID"], flag["blocking"]) == \
+            ("Item Review", "Item Exception", "C-08", False)
+        assert flag["Candidates / Evidence"] == f"printed {sku} barcode 777123456785"
+        trace = next(t for t in result["lineage"] if t["target"] == "Item" and t["line"] == 1)
+        assert trace["original"] == sku and trace["reference"] == "Items!20"
+
+
+def test_supplier_variant_code_never_on_other_shapes_bad_check_digits_or_ambiguous_hits():
+    def item_of(sku, gtin=None):
+        result = run(invoice(lines=variant_lines(sku, gtin)), items=VARIANT_ITEMS)
+        assert "ALG-016-VAR" not in [e["Rule ID"] for e in result["exceptions"]], sku
+        return result["lines"][0]["Item"]
+    # Two parents share the barcode: no fill.
+    assert item_of("AB-777123456792") == ""
+    # No master row for a valid core: no fill.
+    assert item_of("AB-777123456808") == ""
+    # Wrong check digit, lower-case prefix, one-digit suffix, two letter groups, bare digits: never tried.
+    for sku in ("AB-777123456786", "ab-777123456785", "AB-777123456785-9", "AB-777123456785-CD", "777123456785"):
+        assert item_of(sku) == ""
+    # A filled barcode column wins; the variant route is never consulted.
+    assert run(invoice(lines=variant_lines("AB-777123456792", "777123456785")),
+               items=VARIANT_ITEMS)["lines"][0]["Match Method"] == "Barcode exact"
+    assert fr.upc_valid("777123456785") and not fr.upc_valid("777123456786") and not fr.upc_valid("77712345678")
+    assert fr.variant_upc(Line(sku="777123456785-AB", description="x")) == "777123456785"
+    assert fr.variant_upc(Line(gtin="1", sku="AB-777123456785", description="x")) is None
