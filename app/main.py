@@ -36,7 +36,7 @@ from .fine_rules_export import review_workbook, target_workbook
 from .fine_rules_source import LookupRulesSource
 from .product_candidates import ProductCandidates
 from .matching import accepted_ids, enrich, key, owner_entries, rules_key, rules_validation, rules_view, validate
-from .models import Invoice, Policy, ProcessingOptions, StrictModel
+from .models import Invoice, Line, Policy, ProcessingOptions, StrictModel
 from .oauth import ChatGPTAuth
 from .providers import Providers
 from .references import import_references, reference_workbook
@@ -622,7 +622,7 @@ def create_app(data_dir=None):
         return invoice.model_copy(update={"lines":lines})
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
-        view=entries=pick=None
+        view=entries=pick=None;cleared=0
         if not demo_references:
             j=job_or_404(jid);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
@@ -632,7 +632,8 @@ def create_app(data_dir=None):
             else:
                 # Line entries are keyed by line number; they do not survive a change to the lines.
                 entries=owner_entries(j.get("owner_entries"))
-                if body.invoice.model_dump(mode="json")["lines"]!=stored_lines(j):entries["lines"]={}
+                if not same_lines(body.invoice.lines,j):
+                    cleared=sum(len(cells or {}) for cells in (entries.get("lines") or {}).values());entries["lines"]={}
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
             pick=supplier_pick(j,body)
             picked_by=j.get("owner_supplier_pick") if pick and pick==j.get("owner_supplier_code") else {"actor":actor.get(),"at":datetime.now(timezone.utc).isoformat()} if pick else None
@@ -658,7 +659,8 @@ def create_app(data_dir=None):
             j["provenance"]+=provenance
             evaluate(j,c);store.job(jid,j,c)
             store.audit("reviewed" if body.confirm else "edited",{"job_id":jid,"before":before,"after":j["invoice"],"revision":j["revision"],"reference_version":references(c).get("version"),
-                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[]),"owner_supplier_pick":bool(pick)} if view is not None else {})},c)
+                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[]),"owner_supplier_pick":bool(pick),
+                           "owner_line_entries_cleared":cleared} if view is not None else {})},c)
         return public(j)
 
     @app.post("/api/jobs/{jid}/retry")
@@ -713,6 +715,14 @@ def create_app(data_dir=None):
         """The job's lines in the current model's shape: a job saved before a field was added (part_code, FT3) compares
         equal to the same lines read or saved now, so an unchanged save or re-read keeps its line entries (decision 65)."""
         return Invoice.model_validate(j["invoice"]).model_dump(mode="json")["lines"] if j.get("invoice") else None
+    def same_lines(lines,j):
+        """F1 (D132): a save keeps the line entries only when every line is the stored one, compared as Line values:
+        numbers by value (a stored 1.00 equals a sent 1) and text through text_key, so the client's trimmed,
+        newline-free text matches the stored cell. A job with no stored invoice counts as changed."""
+        if not j.get("invoice"):return False
+        old=Invoice.model_validate(j["invoice"]).lines
+        def key(line):return tuple(text_key(getattr(line,f)) for f in Line.model_fields)
+        return len(old)==len(lines) and all(key(a)==key(b) for a,b in zip(lines,old))
     def reread_entries(j,lines):
         """Line entries are keyed by line number, so a re-read that changes the lines drops them; header
         entries stay. Returns the job fields to keep and the count of cleared line cells, or None."""
