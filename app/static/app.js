@@ -361,6 +361,20 @@ function pogrnOrder(job) {
   return { value: String(field.value), source };
 }
 
+// Decision 76: Order Date is evidence only (POG-009), the CREATED_DATE text of the POGRN rows cited for Order No. The
+// note formats an ISO date for display; the exact cell text stays in the tooltip. An empty value shows its reason.
+function orderDateNote(job) {
+  const date = rulesJob(job) ? job.rules?.order_date : null;
+  if (!date) return null;
+  const raw = date.value === null || date.value === undefined ? "" : String(date.value);
+  if (!raw) return { text: `Order Date empty · ${date.reason || "no POGRN order date"}`, title: "" };
+  const iso = /^(\d{4}-\d{2}-\d{2})(?:[T ]00:00:00)?$/.exec(raw.trim());
+  const parsed = iso ? new Date(`${iso[1]}T00:00:00Z`) : null;
+  const shown = parsed && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleDateString([], { dateStyle: "medium", timeZone: "UTC" }) : raw;
+  return { text: `Order Date ${shown} · POGRN CREATED_DATE of the rows cited for Order No, evidence only`,
+    title: [raw, date.reference].filter(Boolean).join(" · ") };
+}
+
 const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const HEADER_FIELDS = [
@@ -1311,6 +1325,12 @@ function renderInvoiceForm(job) {
     }
     const order = name === "po" ? pogrnOrder(job) : null;
     if (order) wrapper.append(make("small", "po-pogrn", `Order No ${order.value} · ${order.source}`));
+    const orderDate = name === "po" ? orderDateNote(job) : null;
+    if (orderDate) {
+      const note = make("small", "po-order-date", orderDate.text);
+      if (orderDate.title) note.title = orderDate.title;
+      wrapper.append(note);
+    }
     if (name === "date_printed") {
       wrapper.append(make("small", "", invoice.date_printed
         ? "Read-only source evidence. It is never converted automatically."

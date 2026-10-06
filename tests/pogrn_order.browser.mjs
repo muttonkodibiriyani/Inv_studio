@@ -1,8 +1,9 @@
 /**
  * Playwright check that the review shows the POGRN Order No beside the reader's Purchase order (FT5a, decision 62).
  * Shown only when POG-001 found the order (printed and found, or selected by qty and value) or POG-008 matched one
- * unreceived order on items and ordered qty, as a note: the
- * Purchase order input keeps the reader's value and a save sends it unchanged. Every job is mocked synthetic data.
+ * unreceived order on items and ordered qty, as a note: the Purchase order input keeps the reader's value and a save
+ * sends it unchanged. The POG-009 Order Date (decision 76) shows under it, formatted for display with the exact cell
+ * text in the tooltip, or empty with its reason. Every job is mocked synthetic data.
  *
  *   BASE_URL=http://127.0.0.1:8765 node tests/pogrn_order.browser.mjs
  */
@@ -33,24 +34,35 @@ const ev = (kind, rule, source) => [{ kind, source, reference: "POGRN!7", origin
 const value = (v, evidence) => ({ value: v, evidence, flagged: false, reason: "" });
 const missing = { value: null, evidence: [], flagged: true, reason: "Not found" };
 const field = (label, target, cell) => ({ label, target, ...cell });
+// POG-009 Order Date (decision 76): evidence only, the CREATED_DATE text of the rows cited for Order No.
+const orderDate = (v, reason = "", reference = "POGRN!7") => ({ value: v, reason, rule: "POG-009",
+  source: "POGRN order date of the rows cited for Order No: CREATED_DATE", reference: v ? reference : "", evidence_kind: "pogrn_order_date" });
+const DATE_SOURCE = "POGRN CREATED_DATE of the rows cited for Order No, evidence only";
 
 // Synthetic jobs: the reader's Purchase order (invoice.po) and the rules' Order No (rules.fields.po).
 const cases = [
   { id: "pogrn-selected", po: "", order: value("SYN-ORD-1", ev("selected", "POG-001", "Selected by POG-001 among 3 order/location candidates")),
-    note: "Order No SYN-ORD-1 · POGRN order selected by qty and value under the supplier code, not printed" },
+    note: "Order No SYN-ORD-1 · POGRN order selected by qty and value under the supplier code, not printed",
+    date: orderDate("2026-09-28T00:00:00"), dateNote: `Order Date Sep 28, 2026 · ${DATE_SOURCE}`, dateTitle: "2026-09-28T00:00:00 · POGRN!7" },
   { id: "pogrn-printed", po: "SYN-ORD-2", order: value("SYN-ORD-2", ev("printed", "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO")),
-    note: "Order No SYN-ORD-2 · Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code" },
+    note: "Order No SYN-ORD-2 · Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code",
+    // Not ISO: shown as the cell's text, never reinterpreted.
+    date: orderDate("28/09/2026"), dateNote: `Order Date 28/09/2026 · ${DATE_SOURCE}`, dateTitle: "28/09/2026 · POGRN!7" },
   { id: "pogrn-not-received", po: "", order: value("SYN-ORD-5", ev("sheet", "POG-008", "POGRN order matched on items and ordered qty, not received: RMS_ORDER_NO")),
-    note: "Order No SYN-ORD-5 · POGRN order matched on items and ordered qty, not yet received" },
+    note: "Order No SYN-ORD-5 · POGRN order matched on items and ordered qty, not yet received",
+    date: orderDate(null, "CREATED_DATE differs across the 2 cited rows (2 values)"),
+    dateNote: "Order Date empty · CREATED_DATE differs across the 2 cited rows (2 values)", dateTitle: null },
   // A sheet citation from another rule is not a POGRN order find: no note.
   { id: "pogrn-sheet-other", po: "", order: value("SYN-ORD-6", ev("sheet", "ALG-011", "Synthetic sheet lookup")), note: null },
   // Not found in POGRN (R-024), entered by the reviewer, or empty: no note.
-  { id: "pogrn-r024", po: "SYN-ORD-3", order: value("SYN-ORD-3", ev("printed", "R-024", "Invoice PO (not in POGRN)")), note: null },
+  { id: "pogrn-r024", po: "SYN-ORD-3", order: value("SYN-ORD-3", ev("printed", "R-024", "Invoice PO (not in POGRN)")), note: null,
+    date: orderDate(null, "Order No is not a POGRN order (no rows cited)"),
+    dateNote: "Order Date empty · Order No is not a POGRN order (no rows cited)", dateTitle: null },
   { id: "pogrn-entered", po: "", order: value("SYN-ORD-4", ev("owner_entry", "OWNER-ENTRY", "Reviewer")), note: null },
   { id: "pogrn-missing", po: "", order: missing, note: null },
 ];
 const lines = [{ sku: "SYN-SKU-1", description: "Synthetic part", qty: 1, price: 10 }];
-const makeJob = ({ id, po, order }) => ({
+const makeJob = ({ id, po, order, date }) => ({
   id,
   filename: `SYNTHETIC-${id}.png`,
   size: syntheticScan.length,
@@ -75,6 +87,7 @@ const makeJob = ({ id, po, order }) => ({
     issues: [],
     item_lines: { resolved: 0, total: 1, rate: "0.0000", threshold: "0.95", owner_review: true, definition: "Synthetic definition" },
     revision: 1,
+    ...(date ? { order_date: date } : {}),
   },
   extraction_status: "fields_extracted",
   export_id: null,
@@ -128,6 +141,16 @@ try {
         assert(sameField, `${item.id}: the note sits in the Purchase order field`);
       } else {
         assert.equal(await notes.count(), 0, `${item.id}: no Order No note`);
+      }
+      const dates = page.locator("#header-fields .po-order-date");
+      if (item.dateNote) {
+        assert.equal(await dates.count(), 1, `${item.id}: one Order Date note`);
+        assert.equal((await dates.textContent()).trim(), item.dateNote, `${item.id}: Order Date note text`);
+        assert.equal(await dates.getAttribute("title"), item.dateTitle, `${item.id}: the exact cell text and rows in the tooltip`);
+        const inPo = await dates.evaluate((note) => Boolean(note.closest("label")?.querySelector('[name="po"]')));
+        assert(inPo, `${item.id}: the Order Date note sits in the Purchase order field`);
+      } else {
+        assert.equal(await dates.count(), 0, `${item.id}: no Order Date note without an order_date`);
       }
       // Display only: the input keeps the reader's value and a save sends it unchanged.
       assert.equal(await input.inputValue(), item.po, `${item.id}: Purchase order input unchanged`);
