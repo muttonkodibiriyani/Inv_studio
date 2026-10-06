@@ -361,18 +361,36 @@ function pogrnOrder(job) {
   return { value: String(field.value), source };
 }
 
-// Decision 76: Order Date is evidence only (POG-009), the CREATED_DATE text of the POGRN rows cited for Order No. The
-// note formats an ISO date for display; the exact cell text stays in the tooltip. An empty value shows its reason.
-function orderDateNote(job) {
-  const date = rulesJob(job) ? job.rules?.order_date : null;
-  if (!date) return null;
-  const raw = date.value === null || date.value === undefined ? "" : String(date.value);
-  if (!raw) return { text: `Order Date empty · ${date.reason || "no POGRN order date"}`, title: "" };
+// Decisions 76/82/83: Order Date (POG-009, CREATED_DATE) and Receipt Date(s) (POG-010, RECEIPT_DATE) are evidence only,
+// the text of the POGRN rows cited for Order No. The note formats ISO dates for display; the exact cell text stays in
+// the tooltip. An empty value shows its reason. The POG-010 flag itself shows as the non-blocking 'Date Check' issue.
+function displayDate(raw) {
   const iso = /^(\d{4}-\d{2}-\d{2})(?:[T ]00:00:00)?$/.exec(raw.trim());
   const parsed = iso ? new Date(`${iso[1]}T00:00:00Z`) : null;
-  const shown = parsed && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleDateString([], { dateStyle: "medium", timeZone: "UTC" }) : raw;
-  return { text: `Order Date ${shown} · POGRN CREATED_DATE of the rows cited for Order No, evidence only`,
-    title: [raw, date.reference].filter(Boolean).join(" · ") };
+  return parsed && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleDateString([], { dateStyle: "medium", timeZone: "UTC" }) : raw;
+}
+
+function orderDateNote(job) {
+  if (!rulesJob(job)) return null;
+  const parts = [];
+  const titles = [];
+  const add = (label, evidence, split) => {
+    if (!evidence) return;
+    const raw = evidence.value === null || evidence.value === undefined ? "" : String(evidence.value);
+    if (!raw) {
+      parts.push(`${label} empty (${evidence.reason || "no POGRN date"})`);
+      return;
+    }
+    const values = split ? raw.split(", ") : [raw];
+    parts.push(`${label} ${values.map(displayDate).join(", ")}`);
+    titles.push(`${label}: ${raw}`);
+  };
+  add("Order Date", job.rules?.order_date, false);
+  add("Receipt Date(s)", job.rules?.receipt_date, true);
+  if (!parts.length) return null;
+  const reference = job.rules?.order_date?.reference || job.rules?.receipt_date?.reference;
+  return { text: `${parts.join(" · ")} · POGRN rows cited for Order No, evidence only`,
+    title: titles.length ? [...titles, reference].filter(Boolean).join(" · ") : "" };
 }
 
 const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
