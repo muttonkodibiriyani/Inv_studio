@@ -206,3 +206,20 @@ def test_ocr_split_accents_and_apostrophes_rejoin_but_dashes_and_plus_stay():
     assert row(("L", 0), ("'", 1), ("Eau", 1)) == ["L'Eau"]
     assert row(("Gel", 0), ("+", 8), ("Oil", 8)) == ["Gel", "+", "Oil"]
     assert row(("Set", 0), ("–", 8), ("2", 8)) == ["Set", "–", "2"]
+
+
+def test_buyer_name_starting_left_of_the_issued_to_label_is_read_whole(tmp_path):
+    pages = one_page()
+    pages[0][5] = [(31, "Example Trading LLC"), (262, "Sample Retail Co Branch LLC")]
+    text, boxes, tables = read(pdf(tmp_path, pages))
+    invoice, rec = cti.extract(text, boxes)
+    assert (invoice["supplier_name"], invoice["buyer_name"]) == ("Example Trading LLC", "Sample Retail Co Branch LLC")
+    assert invoice["number"] == "ZZTI26-00000042" and len(invoice["lines"]) == 2
+
+
+def test_party_row_without_a_column_gap_still_splits_at_the_label():
+    rows = [[{"text": "Issued", "x0": 31, "x1": 60, "page": 1}, {"text": "By:", "x0": 62, "x1": 78, "page": 1},
+             {"text": "Issued", "x0": 300, "x1": 329, "page": 1}, {"text": "To:", "x0": 331, "x1": 347, "page": 1}],
+            [{"text": "Sample", "x0": 280, "x1": 310, "page": 1}, {"text": "Retail", "x0": 313, "x1": 340, "page": 1},
+             {"text": "Co", "x0": 343, "x1": 355, "page": 1}]]
+    assert cti._party_names(rows) == (None, "Retail Co")

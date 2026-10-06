@@ -38,7 +38,8 @@ FAILURE_STATUS = {
     "Supplier Exception": ("Supplier Exception", "C-03"),
     "POGRN Supplier Exception": ("POGRN Supplier Exception", "C-04"),
     "Supplier Site Exception": ("Supplier Site Exception", "C-05"),
-    "Item Exception": ("Item Exception", "C-08"), "Item Conflict": ("Item Conflict", "C-09"),
+    "Item Exception": ("Item Exception", "C-08"), "Item Review": ("Item Exception", "C-08"),
+    "Item Conflict": ("Item Conflict", "C-09"),
     "Line Exception": ("Line Parsing Exception", "C-10"),
     "Item Quantity Mismatch": ("Quantity Mismatch", "C-11"),
     "Missing PO": ("Missing/Ambiguous PO", "C-12"), "Ambiguous PO": ("Missing/Ambiguous PO", "C-12"),
@@ -58,13 +59,17 @@ BUYER_RULE = "BUYER-NAME"
 BUYER_RULE_EVIDENCE = "owner rule BUYER-NAME (2026-10-05)"
 EVIDENCE_PRINTED, EVIDENCE_OWNER_RULE = "printed", "owner_rule"
 EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not printed on the invoice
+# Decision 41: the owner's pick among the R-006 supplier-code candidates; cells resolved through it say so.
+OWNER_PICK, EVIDENCE_OWNER_ENTRY = "OWNER-PICK", "owner_entry"
+OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", "Market", "Currency", "Tax Code",
+                      "Unit Tax Code"}
 EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
 
 # Exception types whose presence still allows approval (warnings only).
 # GRN quantity differences are warnings (owner form 01a10c4d qty_cost_tolerance = invoice_flag).
 NON_BLOCKING = {"Data Quality", "Entity Hint", "Description Check", "Totals Audit", "Quantity Mismatch",
-                "Item Quantity Mismatch"}
+                "Item Quantity Mismatch", "Item Review"}
 
 # Owner form 01a10c4f (2026-10-05): item-line check; below the threshold the owner validates.
 ITEM_LINE_THRESHOLD = Decimal("0.95")
@@ -519,12 +524,16 @@ def parse_printed_date(printed, parsed):
 
 
 class Run:
-    def __init__(self, invoice, config, filename):
+    def __init__(self, invoice, config, filename, ocr_lines=False):
         self.invoice = invoice
         self.config = config
         self.filename = filename
+        self.ocr_lines = ocr_lines  # the lines were read by OCR or the AI from a scan, never from a text layer
         self.exceptions = []
         self.lineage = []
+        # R-006: cited supplier-code candidates offered for the reviewer's pick; never a filled value.
+        self.site_candidates = []
+        self.owner_pick = None
 
     def exception(self, kind, description, rule, line=None, evidence=None, proposed=None, owner="Accounts payable"):
         # 03_Mandatory_Checklist: the owner's Failure Status is shown; the engine rule id stays in Rule ID.
@@ -547,6 +556,8 @@ class Run:
                   "confidence": confidence}
         if evidence_kind:
             record["evidence_kind"] = evidence_kind
+        if self.owner_pick and target in OWNER_PICK_DERIVED and rule != OWNER_PICK:
+            record["assisted_by"] = OWNER_PICK
         self.lineage.append(record)
 
 
@@ -563,6 +574,56 @@ def _constrain(rows, sites):
         return rows, False
     narrowed = [r for r in rows if text(r.get("SUPPLIER")) in sites]
     return (narrowed, True) if narrowed else (rows, False)
+
+
+OCR_SWAPS = {"I": "1", "1": "I", "O": "0", "0": "O"}
+OCR_ENGINES = ("paddleocr", "invoice2data + PaddleOCR")
+
+
+def ocr_read(job):
+    """Decision 44: True when the selected reader is local OCR or the AI on a scan, never a text layer."""
+    selected = str(job.get("selected_engine") or "")
+    if selected in OCR_ENGINES:
+        return True
+    # The AI is selected as "<provider> / <model>"; its trace row names the provider. Engines first selects the AI
+    # only when every local reader returned nothing, so a text-layer page qualifies here only in that case.
+    return any(t.get("method") == "vision_ai" and selected.startswith(f"{t.get('engine')} /")
+               for t in job.get("trace") or [])
+
+
+OCR_MAX_POSITIONS = 8
+
+
+def _ocr_variants(value):
+    """Every value with some of its I/1 and O/0 characters swapped (never the value itself)."""
+    positions = [i for i, ch in enumerate(value) if ch in OCR_SWAPS]
+    if not positions or len(positions) > OCR_MAX_POSITIONS:
+        return []
+    out = []
+    for mask in range(1, 2 ** len(positions)):
+        chars = list(value)
+        for bit, i in enumerate(positions):
+            if mask >> bit & 1:
+                chars[i] = OCR_SWAPS[chars[i]]
+        out.append("".join(chars))
+    return out
+
+
+def ocr_vpn(source, vpns, sites):
+    """Decision 44: a VPN-column value an OCR or AI scan read may have I/1 or O/0 confused. Returns the one
+    (candidate, variant, rows) when exactly one variant of exactly one printed value matches exactly one
+    ITEM_PARENT within the known supplier sites; otherwise None."""
+    hits = []
+    for candidate in vpns:
+        if candidate["origin"] != "VPN column":
+            continue
+        for variant in _ocr_variants(candidate["value"]):
+            rows = [r for r in source.items_by_vpn(variant)
+                    if text(r.get("VPN")) == variant and text(r.get("SUPPLIER")) in sites]
+            if rows:
+                hits.append((candidate, variant, rows))
+    parents = {p for _, _, rows in hits for p in _unique_parents(rows)}
+    return hits[0] if len(hits) == 1 and len(parents) == 1 else None
 
 
 def match_line(run, n, line, source, sites=None):
@@ -583,6 +644,14 @@ def match_line(run, n, line, source, sites=None):
         rows = [r for r in source.items_by_vpn(candidate["value"]) if text(r.get("VPN")) == candidate["value"]]
         if rows:
             vpn_hits[candidate["value"]] = (candidate, rows)
+    ocr = None
+    if not barcode_hits and not vpn_hits and run.ocr_lines and sites:
+        # Only after both exact routes found nothing, on a scan read, under a known supplier (decision 44).
+        ocr = ocr_vpn(source, vpns, sites)
+        if ocr:
+            printed_vpn, variant, rows = ocr
+            vpns = [{**printed_vpn, "value": variant, "printed": printed_vpn["value"]}]
+            vpn_hits = {variant: (vpns[0], rows)}
 
     if not barcodes:
         result["checks"]["barcode"] = RECORDED_NO_BARCODE
@@ -676,9 +745,14 @@ def match_line(run, n, line, source, sites=None):
     if result["checks"]["description"] == "Weak":
         run.exception("Description Check", "Description is weakly consistent; exact identifier kept (ALG-020)",
                       "ALG-020", n, evidence=f"score {result['description_score']}")
+    if ocr:
+        result["method"], result["checks"]["vpn"] = "VPN OCR variant", "Pass (OCR I/1 O/0)"
+        run.exception("Item Review", f"Printed VPN {ocr[0]['value']} read by OCR matches Item Master VPN {ocr[1]} "
+                      "(I/1, O/0 only); check the correction", "ALG-018-OCR", n,
+                      evidence=f"printed {ocr[0]['value']} read as {ocr[1]}", owner="Item steward")
     result["status"] = "Matched"
     run.trace("Item", parent, "ALG-021", "Item Master ITEM_PARENT", reference=_refs(rows), line=n,
-              original=result["barcode"] or result["vpn"])
+              original=ocr[0]["value"] if ocr else result["barcode"] or result["vpn"])
     result["rule"] = rule
     return result
 
@@ -701,6 +775,98 @@ def supplier_family(run, candidates):
     return codes
 
 
+_DELIVER_TO = re.compile(r"(?i)\bdeliver(?:y)?\s*(?:to|address)\b\s*:?")
+_PRINTED_ID = r"(?<![\d.,/-]){}(?![\d.,/-])"
+
+
+def deliver_to_location(invoice, scan, config):
+    """R-006: the receiving store printed on the invoice, as an exact LOCATION id of the owner's LOCATIONS sheet.
+
+    Only a whole number printed after a 'Deliver To' label on the same line, or the reader's location field when
+    that id is printed in the text, counts. Store names are never matched (LOCATIONS has no name column).
+    Returns (location id, where it is printed, None) or (None, None, reason).
+    """
+    found = {}
+    for page, value in scan["pages"].items():
+        for line in value.splitlines():
+            for label in _DELIVER_TO.finditer(line):
+                for number in re.findall(_PRINTED_ID.format(r"\d{3,8}"), line[label.end():]):
+                    found.setdefault(number, f"page {page}, after 'Deliver To'")
+    printed = text(invoice.location)
+    if printed and printed not in found:
+        page = next((p for p, value in scan["pages"].items()
+                     if re.search(_PRINTED_ID.format(re.escape(printed)), value)), None)
+        if page is not None:
+            found[printed] = f"page {page}, reader's printed location"
+    known = {location: where for location, where in found.items() if location in config.location_master}
+    if len(known) == 1:
+        location, where = next(iter(known.items()))
+        return location, where, None
+    if known:
+        return None, None, f"{len(known)} different LOCATIONS ids are printed as Deliver-To"
+    if found:
+        return None, None, "the printed Deliver-To number is not a LOCATION id in the LOCATIONS sheet"
+    return None, None, "the Deliver-To store is not printed as a LOCATION id (LOCATIONS has no store names)"
+
+
+def _site_entity(run, site):
+    """Entity/currency suffix of a supplier site name: the characters after the 6-character EBS code."""
+    return re.sub(r"\s+", "", text((run.config.supplier_sites.get(site) or {}).get("site_name"))).upper()[6:]
+
+
+def code_by_market(run, families, deliver_to):
+    """R-006 'resolve with market/entity' (decision 34): when the printed supplier has several Active supplier
+    codes, keep the one code with Active sites serving the printed Deliver-To location's ENTITY AND CURENCY.
+    Returns {code: serving sites} or None, with the reason as an R-006 exception; never a guess."""
+    location, where, reason = deliver_to or (None, None, "no Deliver-To was read")
+    entity = text((run.config.location_master.get(location) or {}).get("entity_currency")).upper() if location else ""
+    if location and not entity:
+        reason = f"LOCATION {location} has no ENTITY AND CURENCY in the LOCATIONS sheet"
+    serving = {code: [s for s in sites if _site_entity(run, s) == entity] for code, sites in families.items()} \
+        if entity else {}
+    serving = {code: sites for code, sites in serving.items() if sites}
+    if entity and len(serving) == 1:
+        code, sites = next(iter(serving.items()))
+        run.trace("Supplier Code", code, "R-006", f"SUPPLIER SITES code whose Active sites serve the printed "
+                  f"Deliver-To LOCATION {location} ({where}) entity {entity}; {len(families)} codes share the "
+                  "printed supplier name", reference=", ".join([f"LOCATIONS {location}|{run.config.version}"] +
+                                                              [f"{s}|{run.config.version}" for s in sites]))
+        return {code: sites}
+    if entity:
+        reason = f"{len(serving)} of the {len(families)} supplier codes have Active sites serving the Deliver-To " \
+                 f"LOCATION {location} entity {entity}"
+    remaining = serving if len(serving) > 1 else families
+    run.site_candidates = [
+        {"supplier_code": code, "rule": "R-006", "reason": reason,
+         "location": location or "", "location_reference": f"LOCATIONS {location}|{run.config.version}" if entity else "",
+         "sites": [{"supplier_site": s, "site_name": text((run.config.supplier_sites.get(s) or {}).get("site_name")),
+                    "entity": _site_entity(run, s), "reference": f"{s}|{run.config.version}"} for s in sorted(sites)]}
+        for code, sites in sorted(remaining.items())]
+    run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES; "
+                  "market/entity does not settle it: " + reason, "R-006",
+                  evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+    return None
+
+
+def owner_pick(run, code):
+    """Decision 41: the owner's Supplier CODE pick, used only when it is one of the candidates R-006 offered in this
+    same run. It replaces the R-006 exception and is cited as an owner entry; anything else is ignored and said."""
+    code = text(code)
+    chosen = next((c for c in run.site_candidates if c["supplier_code"] == code), None)
+    if chosen is None:
+        run.exception("Supplier Exception", "Owner supplier-code pick is not one of this run's candidates; ignored",
+                      OWNER_PICK, evidence=f"{len(run.site_candidates)} candidates", owner="Supplier operations")
+        return None
+    if run.exceptions and run.exceptions[-1]["Rule ID"] == "R-006":
+        run.exceptions.pop()  # the 'market/entity does not settle it' exception code_by_market just raised
+    run.owner_pick = code
+    references = [chosen["location_reference"]] + [s["reference"] for s in chosen["sites"]]
+    run.trace("Supplier Code", code, OWNER_PICK, f"Owner pick among the {len(run.site_candidates)} R-006 candidate "
+              "supplier codes", reference=", ".join(r for r in references if r), confidence="Owner entry",
+              evidence_kind=EVIDENCE_OWNER_ENTRY)
+    return [s["supplier_site"] for s in chosen["sites"]]
+
+
 def _site_names(source, site, rows):
     """The site's Item Master SUPPLIER_NAMEs and only the rows of that site (cited as its lineage)."""
     rows = [r for r in rows if text(r.get("SUPPLIER")) == site]
@@ -711,7 +877,7 @@ def _site_names(source, site, rows):
     return names, rows
 
 
-def resolve_supplier(run, source, matches, candidates):
+def resolve_supplier(run, source, matches, candidates, deliver_to=None, owner_code=None):
     """SUP-001 / SUP-003, R-006 / ALG-002 / ALG-005: supplier site from the Item Master item-supplier relation.
 
     Returns (site, SUPPLIER_NAME, family). When several Active sites of one supplier family remain, the
@@ -723,12 +889,22 @@ def resolve_supplier(run, source, matches, candidates):
         by_name.extend(source.items_by_supplier_name(candidate["name"]))
     name_sites = {text(r.get("SUPPLIER")) for r in by_name if text(r.get("SUPPLIER"))}
     families = supplier_family(run, candidates)
-    family_sites = set()
+    family_sites, market_ref = set(), ""
     if len(families) == 1:
         family_sites = next(iter(families.values()))
     elif len(families) > 1:
-        run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES",
-                      "SUP-001", evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+        settled = code_by_market(run, families, deliver_to)
+        picked = None if settled or not owner_code else owner_pick(run, owner_code)
+        if settled:
+            family_sites = set(next(iter(settled.values())))
+            market_ref = f"LOCATIONS {deliver_to[0]}|{run.config.version}"
+        elif picked:
+            family_sites = set(picked)
+        else:
+            run.exception("Supplier Exception", "Printed supplier name has several Supplier CODEs in SUPPLIER SITES",
+                          "SUP-001", evidence=f"{len(families)} supplier codes", owner="Supplier operations")
+    if owner_code and not run.owner_pick and not (len(families) > 1 and not settled):
+        owner_pick(run, owner_code)  # no candidates this run: ignored, and said
     name_sites |= family_sites
     item_sites = None
     for m in matches:
@@ -747,8 +923,13 @@ def resolve_supplier(run, source, matches, candidates):
         names, site_rows = _site_names(source, site, rows)
         name = next(iter(names)) if len(names) == 1 else None
         bridged = site in family_sites
-        run.trace("Supplier Site", site, "SUP-003", "Item Master SUPPLIER" + (" via SUPPLIER SITES" if bridged else ""),
-                  reference=", ".join(x for x in (_refs(site_rows), f"{site}|{version}" if bridged else "") if x))
+        picked = bridged and run.owner_pick
+        run.trace("Supplier Site", site, OWNER_PICK if picked else "SUP-003",
+                  "Item Master SUPPLIER" + (" via SUPPLIER SITES" if bridged else "") +
+                  (f" of the owner-picked Supplier CODE {run.owner_pick}" if picked else ""),
+                  reference=", ".join(x for x in (_refs(site_rows), f"{site}|{version}" if bridged else "",
+                                                  market_ref if bridged else "") if x),
+                  confidence="Owner entry" if picked else "Exact", evidence_kind=EVIDENCE_OWNER_ENTRY if picked else None)
         if name is None:
             run.exception("Supplier Exception", "Supplier site has no single SUPPLIER_NAME in the Item Master",
                           "R-006", evidence=", ".join(sorted(names)), owner="Supplier operations")
@@ -959,6 +1140,9 @@ def _well_formed(run, rows, outcome, touched):
     return [r for r in rows if not malformed_row(r)]
 
 
+RMS_ORDER_FORMAT = re.compile(r"[1-9]\d{0,14}")  # owner Order No format (RF-1)
+
+
 def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=()):
     """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
@@ -974,9 +1158,18 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
                "candidates": 0, "malformed": 0}
     common = (keys, invoice_qty, invoice_value, currency, supplier_site, name_raw, name_master, supplier_site,
               parents)
+    no_po = "No printed PO"
     if printed:
         rows = [r for r in source.pogrn_by_order(printed) if text(r.get("RMS_ORDER_NO")) == printed]
         rows = _well_formed(run, rows, outcome, lambda r: True)
+        if not rows and not RMS_ORDER_FORMAT.fullmatch(printed):
+            # RF-1 (decision 39): a printed LPO that is not an owner order id is never Order No; the strict_6
+            # EBS-code route below decides it as if no PO were printed. The printed value stays in the evidence.
+            run.exception("Missing PO", "Printed PO is not in the POGRN report and the printed LPO is not an RMS "
+                          "order number; Order No follows the supplier's EBS code route", "POG-001", evidence=printed,
+                          owner="Buyer")
+            printed, no_po = "", "No printed RMS order number"
+    if printed:
         if not rows:
             run.exception("Missing PO", "Printed PO is not an RMS_ORDER_NO in the POGRN report (order not found)",
                           "POG-001", evidence=POGRN_REPORT, owner="Buyer")
@@ -1029,12 +1222,12 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
     outcome["validation"] = selected or evaluated
     outcome["candidates"] = len(selected)
     if not selected:
-        run.exception("Missing PO", f"No printed PO and none of the {len(evaluated)} order/location groups under the "
+        run.exception("Missing PO", f"{no_po} and none of the {len(evaluated)} order/location groups under the "
                       "supplier's 6-character EBS code agrees on quantity and value (order not found)", "POG-001",
                       evidence=POGRN_REPORT, owner="Buyer")
         return outcome
     if len(selected) > 1:
-        run.exception("Ambiguous PO", f"No printed PO and {len(selected)} order/location groups under the supplier's "
+        run.exception("Ambiguous PO", f"{no_po} and {len(selected)} order/location groups under the supplier's "
                       "6-character EBS code agree on quantity and value; owner review", "POG-001",
                       evidence=", ".join(f"{g['POGRN RMS Order No']}/{g['POGRN Location ID']}" for g in selected[:20]),
                       owner="Buyer")
@@ -1148,15 +1341,53 @@ def _line_value(invoice):
 
 
 def _printed_page(scan, amount):
-    """Page on which a printed amount appears (as printed, with or without thousands separators)."""
+    """Page on which a printed amount appears (as printed, with or without thousands separators). The reader
+    may drop trailing zeros, so the two- and three-decimal and, for a whole amount, the integer forms are also
+    looked for; those may not run on into further decimals ("520" is not found in "520.50")."""
     if amount is None:
         return None
     forms = {f"{amount}", f"{amount:,}"}
+    padded = {f"{amount:.2f}", f"{amount:,.2f}", f"{amount:.3f}", f"{amount:,.3f}"}
+    if amount == amount.to_integral():
+        padded |= {f"{amount:.0f}", f"{amount:,.0f}"}
+    patterns = [re.escape(f) + r"(?![\d])" for f in forms]
+    patterns += [re.escape(f) + r"(?![\d]|[.,]\d)" for f in padded - forms]
     for page, value in scan["pages"].items():
         flat = value.replace(" ", "")
-        if any(re.search(r"(?<![\d.,])" + re.escape(f.replace(" ", "")) + r"(?![\d])", flat) for f in forms):
+        if any(re.search(r"(?<![\d.,])" + p, flat) for p in patterns):
             return page
     return None
+
+
+_NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_DISCOUNT = re.compile(r"(?i)\bdiscount\b")
+
+
+def _printed_values(value, places):
+    """Numeric tokens of a text, commas stripped, sign and brackets ignored, at ``places``."""
+    return {Decimal(t.replace(",", "")).quantize(places, rounding=ROUND_HALF_UP)
+            for t in _NUMBER.findall(value) if t.replace(",", "")}
+
+
+def invoice_discount(invoice, scan):
+    """02A with an invoice-level discount (shared with target_check lines_to_net, agreed with INHERIT): at the
+    printed Header net's precision (at least two decimals), D = sum(qty x unit cost) - Header net is > 0 and is
+    printed on a text line with the word 'discount', and sum(qty x unit cost) is printed somewhere. Fine rules
+    also need sum(line net) == Header net. Returns (D, page) or None."""
+    lines = invoice.lines
+    if invoice.net is None or not lines or any(None in (l.qty, l.price, l.net_amount) for l in lines):
+        return None
+    places = Decimal(1).scaleb(min(invoice.net.as_tuple().exponent, -2))
+    q = lambda v: v.quantize(places, rounding=ROUND_HALF_UP)  # noqa: E731
+    total, net = q(sum((l.qty * l.price for l in lines), Decimal(0))), q(invoice.net)
+    if q(sum((l.net_amount for l in lines), Decimal(0))) != net or total - net <= 0:
+        return None
+    pages = scan["pages"].items()
+    if not any(total in _printed_values(value, places) for _, value in pages):
+        return None
+    page = next((p for p, value in pages for row in value.splitlines()
+                 if _DISCOUNT.search(row) and total - net in _printed_values(row, places)), None)
+    return (total - net, page) if page else None
 
 
 def _different_company(name, owner):
@@ -1251,10 +1482,12 @@ def item_resolution(run, matches, group):
 
 
 def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=(), page_count=None,
-                transaction=1, seen_documents=None):
-    """Run the whole rule chain for one invoice (ALG-028: every invoice, every rule)."""
+                transaction=1, seen_documents=None, owner_supplier_code=None, ocr_lines=False):
+    """Run the whole rule chain for one invoice (ALG-028: every invoice, every rule). ``owner_supplier_code`` is
+    the owner's pick among the R-006 candidates of an earlier run (decision 41)."""
     config = config or RulesConfig()
-    run = Run(invoice, config, filename)
+    # The probe pass stays exact; only the recorded pass may correct an OCR I/1, O/0 read (decision 44).
+    run = Run(invoice, config, filename, ocr_lines)
     scan = scan_pages(text_value, boxes, page_count)
     if scan["unreadable_pages"]:
         run.exception("OCR Review", f"Pages without readable text: {scan['unreadable_pages']}", "ALG-001",
@@ -1290,10 +1523,13 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     # constrains every line by that supplier (ALG-018 / R-015).
     probe = Run(invoice, config, filename)
     probe_matches = [match_line(probe, n, line, source, first_names or None) for n, line in enumerate(invoice.lines, 1)]
-    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates)
+    deliver_to = deliver_to_location(invoice, scan, config)
+    probe_site, _, probe_family = resolve_supplier(probe, source, probe_matches, candidates, deliver_to,
+                                                        owner_supplier_code)
     sites = {probe_site} if probe_site else (set(probe_family) if probe_family else (first_names or None))
     matches = [match_line(run, n, line, source, sites) for n, line in enumerate(invoice.lines, 1)]
-    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates)
+    supplier_site, master_name, family = resolve_supplier(run, source, matches, candidates, deliver_to,
+                                                          owner_supplier_code)
     if supplier_site:
         # Re-check items under the resolved supplier where the first pass was unconstrained.
         for m in matches:
@@ -1368,6 +1604,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     tax_code = resolve_tax_code(run, market, document_date)
     tax_source = "Reviewed invoice tax code" if text(invoice.taxCode) else "Owner VAT code table (C/PV), receiving market"
     lines_out = []
+    discount = invoice_discount(invoice, scan)
     for line, m in zip(invoice.lines, matches):
         n = m["line"]
         brand = ""
@@ -1393,7 +1630,8 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         elif line.net_amount is not None:
             # 02A Unit Cost: line/value reconciliation at the printed line amount's precision.
             computed = (line.qty * line.price).quantize(line.net_amount, rounding=ROUND_HALF_UP)
-            if computed != line.net_amount:
+            # A printed invoice-level discount explains a line amount below quantity x unit cost.
+            if computed != line.net_amount and not (discount and 0 <= line.net_amount <= computed):
                 line_ok = False
                 run.exception("Line Exception", f"Quantity x unit cost {computed} differs from line amount "
                               f"{line.net_amount}", "02A-Unit Cost", n)
@@ -1457,6 +1695,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         "po": {"order": po["order"], "source": po["source"], "status": po["status"], "value_source": value_source},
         "ebs_supplier_code": key or "/".join(sorted(keys)), "entity_hint": hint, "config_version": config.version,
         "item_resolution": resolution, "po_candidates": po["candidates"],
+        "supplier_site_candidates": [] if supplier_site and not run.owner_pick else run.site_candidates,
     }
 
 
@@ -1511,7 +1750,8 @@ def run_batch(entries, source, config=None):
     for transaction, entry in enumerate(entries, 1):
         try:
             result = run_invoice(entry["invoice"], source, config, entry.get("filename", ""), entry.get("text", ""),
-                                 entry.get("boxes", ()), entry.get("page_count"), transaction, seen)
+                                 entry.get("boxes", ()), entry.get("page_count"), transaction, seen,
+                                 entry.get("owner_supplier_code"), ocr_lines=entry.get("ocr_lines", False))
         except Exception as error:  # isolated per invoice; the error is the evidence
             result = {"status": "Blocked", "filename": entry.get("filename", ""), "transaction": transaction,
                       "header": {"Document": text(entry["invoice"].number), "Validation Status": "Blocked"},

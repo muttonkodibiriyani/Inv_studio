@@ -503,3 +503,32 @@ def test_next_label_after_invoice_number_label_is_not_the_number():
     pattern = re.compile(r"(?i)\b(?:invoice|inv|document)\s*(?:no\.?|number|#)\s*[:#-]?\s*([A-Z0-9][A-Z0-9./_-]{0,79})")
     assert _unique_identifier(["Tax Invoice No.  Tax Invoice Date  Currency"], (pattern,)) is None
     assert _unique_identifier(["Tax Invoice No. SYN-4401"], (pattern,)) == "SYN-4401"
+
+
+def test_unit_price_read_without_its_decimal_point_is_left_empty() -> None:
+    """A scan row whose price lost its decimal point in OCR: qty x price misses the printed amount by 10^k."""
+    text = "Tax Invoice\nInvoice No: SYN-0042\nInvoice Date: 2026-03-17\n"
+    boxes = [
+        *_table_header(page=1, y=220, item_label="Item Code"),
+        _box("Amount", 500, 220, page=1, width=45),
+        *_table_row("SYN-A-01", "Sample lash glue", "Each", "12", "2400", page=1, y=250),
+        _box("28.800", 500, 250, page=1, width=45),
+        *_table_row("SYN-A-02", "Sample brow pencil", "Each", "50", "2.400", page=1, y=280),
+        _box("120.000", 500, 280, page=1, width=45),
+        *_table_row("SYN-A-03", "Sample nail kit", "Each", "3", "2400", page=1, y=310),
+        _box("7200.000", 500, 310, page=1, width=45),
+        *_table_row("SYN-A-04", "Sample hair band", "Each", "7", "3150", page=1, y=340),
+        _box("20.000", 500, 340, page=1, width=45),
+    ]
+
+    invoice = Invoice.model_validate(extract_invoice(text, boxes))
+
+    assert [line.sku for line in invoice.lines] == ["SYN-A-01", "SYN-A-02", "SYN-A-03", "SYN-A-04"]
+    # 12 x 2.400 = 28.800 is printed, 12 x 2400 is not: the point was dropped, so the price stays empty.
+    assert invoice.lines[0].price is None
+    assert invoice.lines[0].qty == Decimal("12")
+    assert invoice.lines[1].price == Decimal("2.400")
+    # A whole-number price whose product is printed is kept.
+    assert invoice.lines[2].price == Decimal("2400")
+    # No printed amount explains the read: kept as read (never guessed either way).
+    assert invoice.lines[3].price == Decimal("3150")

@@ -13,7 +13,9 @@ printed text, the owner mapping config, or an attributed owner entry):
 - no_evidence: filled with no evidence;
 - unverifiable: evidence not re-checkable (e.g. a printed source and no stored text);
 - data_gap: rests on a malformed owner extract row;
-- owner_entry_unattributed: an owner entry without a matching stored entry, actor and time.
+- owner_entry_unattributed: an owner entry without a matching stored entry, actor and time;
+- missing_line: a Details cell of an item line the invoice prints but the read lacks (or merged away); estimated
+  when lines_to_net fails, never matched (MEASURE, T2(b)).
 
 A filled owner-rule cell is a template failure (mismatch). The owner-facing line collapses the buckets:
 verified · empty by owner rule · empty (flagged) · needs checking (every other bucket).
@@ -33,7 +35,9 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 VERIFIED, EMPTY, MISMATCH = "verified", "empty_flagged", "mismatch"
 NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, OVER_CITED = "no_evidence", "unverifiable", "data_gap", "over_cited"
 OWNER_RULE_EMPTY, UNATTRIBUTED, OWNER_ENTRY = "empty_owner_rule", "owner_entry_unattributed", "owner_entry"
-STATUSES = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, UNATTRIBUTED)
+MISSING_LINE = "missing_line"
+STATUSES = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, MISMATCH, OVER_CITED, NO_EVIDENCE, UNVERIFIABLE, DATA_GAP, UNATTRIBUTED,
+            MISSING_LINE)
 NEEDS_CHECKING = "needs_checking"
 # Empty by owner rule is correct but proves nothing from evidence: its own group, not added to verified (n/a).
 GROUPS = (VERIFIED, OWNER_RULE_EMPTY, EMPTY, NEEDS_CHECKING)
@@ -53,6 +57,7 @@ HEADER_FIELDS = {"Document": "number", "Supplier Site": "site", "Order No": "po"
 OWNER_EMPTY = {"Ref No. 1", "Ref No. 2", "Ref No. 3", "Comment"}
 OWNER_EMPTY_REASON = "Owner rule: left empty (owner form 01a10c4d)"
 UPC_EMPTY_REASON = "Owner rule: UPC left empty; Item is the Item Master ITEM_PARENT (owner form 01a10c4d)"
+MISSING_LINE_REASON = "Item line missing or merged: the read lines do not sum to the Header net"
 LOCATION_TYPES = ("Store (S)", "Warehouse (W)")
 # ISO 4217 minor units for the currencies the owner trades in; anything else is compared at two decimals.
 CURRENCY_DECIMALS = {"KWD": 3, "BHD": 3, "OMR": 3, "JOD": 3, "IQD": 3, "TND": 3, "LYD": 3}
@@ -95,7 +100,8 @@ def printed(text, original):
 
 
 DATE_FORMATS = ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%Y-%m-%d", "%d-%b-%Y", "%d %b %Y", "%d-%m-%y", "%d/%m/%y",
-                "%B %d, %Y", "%b %d, %Y")
+                "%B %d, %Y", "%b %d, %Y", "%d %B %Y", "%d-%B-%Y", "%B %d %Y")
+ORDINAL_DAY = re.compile(r"(?i)\b(\d{1,2})(st|nd|rd|th)\b")
 
 
 def same(value, original):
@@ -107,9 +113,10 @@ def same(value, original):
     a, b = _dec(value), _dec(original)
     if a is not None and b is not None:
         return a == b
+    printed = ORDINAL_DAY.sub(r"\1", str(original).strip())  # "3rd March 2031" reads as "3 March 2031"
     for fmt in DATE_FORMATS:
         try:
-            return datetime.strptime(str(original).strip(), fmt).date().isoformat() == str(value)
+            return datetime.strptime(printed, fmt).date().isoformat() == str(value)
         except ValueError:
             pass
     return False
@@ -284,10 +291,16 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
         return _cell(sheet, column, line, value, MISMATCH, UNATTRIBUTED,
                      "Owner entry without a matching stored entry, actor and time", first)
     status, sub = check_evidence(value, first, sources, location)
+    located = None
+    if status == VERIFIED and _ai_unlocated(first):
+        # A short AI value (e.g. a quantity '2') matches the page text almost anywhere: without a box it is not located.
+        status, sub, located = MISMATCH, UNVERIFIABLE, AI_UNLOCATED_REASON
     reason = {MISMATCH: "Evidence does not hold the value", UNVERIFIABLE: "evidence not re-checkable",
               DATA_GAP: "Source row malformed in the owner extract",
               OVER_CITED: "Some cited rows do not hold the value"}.get(sub or status, "")
-    if sub == UNVERIFIABLE and _ai_scan(first):
+    if located:
+        reason = located
+    elif sub == UNVERIFIABLE and _ai_scan(first):
         reason = SCAN_REASON
     elif status == VERIFIED and str(first.get("source") or "").startswith(SELECTED):
         reason = "Selected by POG-001 from the cited POGRN rows; not printed on the invoice"
@@ -297,6 +310,13 @@ def _field_cell(sheet, column, line, field, sources, entries, attribution, entry
 SELECTED = "Selected by POG-001"  # RULES 7ae7836: Order No picked among candidates (decision 16)
 PRINTED_SOURCE = "Printed on invoice"  # matching.printed_evidence label (e.g. a multi-number totals row)
 SCAN_REASON = "evidence not re-checkable: read by AI from a scan; no box to re-check"
+AI_SOURCE = "Invoice (ai)"
+AI_UNLOCATED_REASON = "AI value not located on the page"
+
+
+def _ai_unlocated(evidence):
+    """An AI read with no box: its quote may be found in the page text, but not at a located position."""
+    return str(evidence.get("source") or "") == AI_SOURCE and " box " not in f"{evidence.get('reference') or ''} "
 
 
 def _ai_scan(evidence):
@@ -380,6 +400,49 @@ def _vat_rate(config, code):
     return None
 
 
+def printed_line_count(text):
+    """A single distinct 'Total lines: N' printed on the invoice (mirrors docling_extract._printed_line_count)."""
+    values = {int(m.group(1)) for m in re.finditer(r"(?i)\btotal\s+lines\s*:?\s*(\d{1,4})\b", text or "")
+              if 0 < int(m.group(1)) <= 1000}
+    return next(iter(values)) if len(values) == 1 else None
+
+
+NUMBER = re.compile(r"\d[\d,]*\.?\d*")
+DISCOUNT_LABEL = re.compile(r"(?i)\bdiscount\b")
+
+
+def _printed_amount(text, amount):
+    """A numeric token of the text equals the amount by value (commas stripped; sign and brackets ignored)."""
+    return any(_dec(m) == amount for m in NUMBER.findall(str(text or "")))
+
+
+def printed_discount(text, amount):
+    """The amount is printed on a text line with the whole word 'discount' (shared with fine_rules RF-2)."""
+    return any(_printed_amount(row, amount) for row in str(text or "").splitlines() if DISCOUNT_LABEL.search(row))
+
+
+def after_discount(text, pairs, net):
+    """RF-3, the match agreed with RULES: at P = the Header net's decimals as read (at least 2), the lines total
+    T = sum(qty x unit cost) is printed, and T - net > 0 is printed on a 'discount' line."""
+    places = max(_places(net) or 0, 2)
+    total = _q(sum((q * c for q, c in pairs), Decimal(0)), places)
+    discount = total - _q(net, places)
+    return discount > 0 and printed_discount(text, discount) and _printed_amount(text, total)
+
+
+def missing_lines(read, net, exact, text):
+    """Item lines missing or merged when lines_to_net fails (MEASURE, T2(b)): printed - read when the invoice
+    prints a line count (exact evidence, uncapped), else |residual| / mean read-line net, at most 2 x the read
+    lines; at least 1 either way."""
+    printed_count = printed_line_count(text)
+    if printed_count is not None:
+        return max(printed_count - read, 1)
+    if exact <= 0:
+        return 1
+    k = int((abs(net - exact) * read / exact).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    return min(max(k, 1), 2 * read)
+
+
 def arithmetic(view, sources):
     """Line totals vs Header net, net + tax = printed gross, Tax_Breakdown vs Header, at the currency's decimals."""
     currency = ((view.get("fields") or {}).get("currency") or {}).get("value")
@@ -401,11 +464,18 @@ def arithmetic(view, sources):
         step = max(Decimal(1).scaleb(c.as_tuple().exponent) for _, c in pairs)
         bound = sum((abs(q) for q, _ in pairs), Decimal(0)) * step / 2 + Decimal(1).scaleb(-places)
         rounded = not ok and abs(exact - _q(net, places)) <= bound
+        # An invoice-level discount printed in the totals: the lines carry the pre-discount prices (RF-3).
+        discounted = not ok and not rounded and after_discount(sources.text, pairs, net)
         status, detail = ((PASS, "Sum of quantity x unit cost equals the Header net") if ok else
                           (WARNING, "Sum of quantity x unit cost differs from the Header net within unit-cost "
                                     "rounding") if rounded else
+                          (WARNING, "Lines equal the Header net after the printed invoice discount") if discounted else
                           (FAIL, "Sum of quantity x unit cost differs from the Header net"))
-        out.append({"check": "lines_to_net", "status": status, "decimals": places, "detail": detail})
+        check = {"check": "lines_to_net", "status": status, "decimals": places, "detail": detail}
+        if status == FAIL:
+            check["missing_lines"] = k = missing_lines(len(lines), _q(net, places), exact, sources.text)
+            check["detail"] += f"; {k} item line(s) missing or merged"
+        out.append(check)
 
     if net is None or tax is None:
         out.append({"check": "net_plus_tax_gross", "status": SKIPPED, "detail": "Header net or tax is empty"})
@@ -559,6 +629,19 @@ def template(sheets, currency_places=None):
 # --------------------------------------------------------------------------- the per-invoice check
 
 
+def missing_line_cells(checks, upc="empty"):
+    """The Details cells of the item lines a failed lines_to_net counts as missing: never matched."""
+    k = next((c.get("missing_lines", 0) for c in checks if c["check"] == "lines_to_net"), 0)
+    cells = []
+    for i in range(1, k + 1):
+        for column in TEMPLATE["Details"][1:]:
+            if column == "UPC" and upc == "empty":
+                cells.append(_cell("Details", column, f"missing {i}", None, OWNER_RULE_EMPTY, reason=UPC_EMPTY_REASON))
+            else:
+                cells.append(_cell("Details", column, f"missing {i}", None, MISSING_LINE, reason=MISSING_LINE_REASON))
+    return cells
+
+
 def counts(cells, scope=None):
     picked = [c for c in cells if scope is None or c["scope"] == scope]
     by, groups = Counter(c["status"] for c in picked), Counter(c["group"] for c in picked)
@@ -573,19 +656,22 @@ def check_view(view, sources, transaction=1, upc="empty", entries=None, attribut
     currency = ((view.get("fields") or {}).get("currency") or {}).get("value")
     sheets = planned_rows(view, transaction, upc)
     checks = arithmetic(view, sources) + joins(sheets) + template(sheets, decimals(currency))
+    cells += missing_line_cells(checks, upc)
     total, metric = counts(cells), counts(cells, "metric")
     failed = [c["check"] for c in checks if c["status"] == FAIL]
     return {
         "version": 1, "checked_at": (now or datetime.now(timezone.utc)).isoformat(), "transaction": transaction,
         "upc": upc, "counts": total, "metric": metric, "cells": cells, "checks": checks,
         "holds": bool(total[NEEDS_CHECKING] or failed),
-        "summary": summary_line(total),
+        "summary": summary_line(total, failed),
     }
 
 
-def summary_line(c):
+def summary_line(c, failed=()):
+    # Cells are scored over the rows read; missing lines cost no cells, so a partial read says so here.
     return (f"Target sheet: {c[VERIFIED]} verified · {c[OWNER_RULE_EMPTY]} empty by owner rule · "
-            f"{c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking")
+            f"{c[EMPTY]} empty (flagged) · {c[NEEDS_CHECKING]} needs checking"
+            + (" · lines do not sum to net" if "lines_to_net" in failed else ""))
 
 
 def issues(result):
@@ -593,7 +679,9 @@ def issues(result):
     out = []
     for core, code, message in ((True, "Target Mismatch", "cell(s) do not equal the source their evidence points to"),
                                 (False, "Target Unverified", "filled cell(s) could not be proven from their evidence")):
-        cells = [x for x in result["cells"] if x["group"] == NEEDS_CHECKING and (x["status"] == MISMATCH) == core]
+        # Missing-line cells are reported by the failed lines_to_net check below, not as unproven filled cells.
+        cells = [x for x in result["cells"] if x["group"] == NEEDS_CHECKING and x["status"] != MISSING_LINE
+                 and (x["status"] == MISMATCH) == core]
         if cells:
             fields = sorted({f"{x['sheet']}.{x['column']}" for x in cells})
             out.append({"code": code, "message": f"{len(cells)} {message}: {', '.join(fields)}", "owner": "Accounts payable",
@@ -698,7 +786,9 @@ def confirm_records(system, final, supplier="", at=None):
     before = {_key(c): c for c in (system or {}).get("cells", []) if c["scope"] == "metric"}
     after = {_key(c): c for c in (final or {}).get("cells", []) if c["scope"] == "metric"}
     records = []
-    for key in sorted(set(before) | set(after), key=lambda k: (k[0], k[1], k[2] or 0)):
+    # Read lines are numbered; missing-line cells carry 'missing i' and sort after them.
+    order = lambda k: (k[0], k[1], isinstance(k[2], str), k[2] if isinstance(k[2], int) else 0, str(k[2] or ""))  # noqa: E731
+    for key in sorted(set(before) | set(after), key=order):
         b, a = before.get(key), after.get(key)
         old, new = (b or {}).get("value", ""), (a or {}).get("value", "")
         changed = not (old == new or (old and new and same(new, old)))
@@ -722,8 +812,10 @@ def accuracy_summary(records, now=None, supplier=None):
                   and (supplier is None or r.get("supplier") == supplier)]
         group = defaultdict(lambda: [0, 0])
         for r in picked:
-            for k in (("overall",), ("field", r["field"]), ("status", r["status_before"]),
-                      ("supplier", r.get("supplier") or "")):
+            # A missing line (line 'missing i') has no value to confirm: it shows under its status only, never as accurate.
+            keys = (("status", r["status_before"]),) if isinstance(r["line"], str) else \
+                (("overall",), ("field", r["field"]), ("status", r["status_before"]), ("supplier", r.get("supplier") or ""))
+            for k in keys:
                 group[k][0] += 1
                 group[k][1] += bool(r["changed"])
         invoices = len({(r.get("job_id"), r["at"]) for r in picked})

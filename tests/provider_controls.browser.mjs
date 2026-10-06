@@ -203,10 +203,23 @@ try {
   await page.locator("#upload-model-status").getByText("2 models available", { exact: false }).waitFor();
   assert.deepEqual(await page.locator("#upload-model-choices option").evaluateAll(
     (options) => options.map((option) => option.value),
-  ), ["", "claude-first", "claude-saved"]);
+  ), ["", "claude-first", "claude-saved", "__other_model__"]);
   assert.equal(await page.locator("#upload-model-choices").inputValue(), "claude-saved");
   assert.equal(await page.locator("#upload-model").inputValue(), "claude-saved");
   assert.equal((await anthropicBadge.textContent())?.trim(), "Verified");
+  // A listed model shows once, in the list; "Other model ID…" opens the model ID box.
+  assert.equal(await page.locator("#upload-model").isVisible(), false, "A listed model also shows in the model ID box");
+  await page.locator("#upload-model-choices").selectOption("__other_model__");
+  assert.equal(await page.locator("#upload-model").isVisible(), true, "Other model ID did not open the model ID box");
+  assert.equal(await page.locator("#upload-model").evaluate((input) => input === document.activeElement), true);
+  await page.locator("#upload-model").fill("synthetic-manual-model");
+  await page.locator("#upload-model-choices").selectOption("claude-first");
+  assert.equal(await page.locator("#upload-model").inputValue(), "claude-first");
+  assert.equal(await page.locator("#upload-model").isVisible(), false);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const uploadOverflow = await page.locator("#upload-dialog").evaluate((dialog) => dialog.scrollWidth - dialog.clientWidth);
+  assert(uploadOverflow <= 1, `The upload dialog scrolls horizontally by ${uploadOverflow}px at 390px`);
+  await page.setViewportSize({ width: 1280, height: 720 });
   await page.keyboard.press("Escape");
   await page.locator("#upload-dialog").waitFor({ state: "hidden" });
 
@@ -232,6 +245,7 @@ try {
   await page.locator("#retry-provider").selectOption("claude_local");
   await page.locator("#retry-model-status").getByText("Synthetic provider model failure", { exact: true }).waitFor();
   assert.equal(await page.locator("#retry-model").inputValue(), "");
+  assert.equal(await page.locator("#retry-model").isVisible(), true, "The model ID box is hidden although no model list loaded");
   assert.equal((await page.locator('[data-connection-state="openai"]').textContent())?.trim(), "Key saved");
   await page.keyboard.press("Escape");
   await page.locator("#retry-dialog").waitFor({ state: "hidden" });

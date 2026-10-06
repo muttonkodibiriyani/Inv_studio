@@ -20,12 +20,13 @@ function evidenceText(evidence) {
   return (evidence || []).map((entry) => {
     const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
       : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
-        : entry.kind === "owner_rule" ? `owner rule · ${entry.reference}`
+        : entry.kind === "owner_rule" ? (/^owner rule\b/i.test(entry.reference || "") ? entry.reference : `owner rule · ${entry.reference}`)
         : entry.kind === "selected" ? `selected by rule, not printed · ${entry.reference}`
+        : entry.kind === "owner_entry" && entry.rule === "OWNER-PICK" ? "from the reviewer's supplier-code pick"
         : entry.kind === "owner_entry" ? `entered by reviewer${entry.original ? ` · ${entry.original}` : ""}`
         : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
           : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
-    return `${where}${entry.rule ? ` (${entry.rule})` : ""}`;
+    return `${where}${entry.rule && !where.includes(entry.rule) ? ` (${entry.rule})` : ""}`;
   }).join("; ");
 }
 
@@ -34,8 +35,9 @@ const RULES_REQUIRED_HEADER = new Set(["number", "site", "po", "location", "loca
 const RULES_REQUIRED_LINE = new Set(["Item", "Unit Cost", "Quantity", "Unit Tax Code"]);
 const RULES_ENTRY_HINT = { location_type: "Store (S) or Warehouse (W)", date: "YYYY-MM-DD" };
 
+// A site the rules filled from the reviewer's supplier-code pick is not a typed entry: "Clear pick" undoes it.
 function enteredByReviewer(cell) {
-  return (cell?.evidence || []).some((entry) => entry.kind === "owner_entry");
+  return (cell?.evidence || []).some((entry) => entry.kind === "owner_entry" && entry.rule !== "OWNER-PICK");
 }
 
 function rulesEntry(cell, label, scope, name, line) {
@@ -63,17 +65,41 @@ function rulesCell(cell, name, line) {
 // Which reader produced a field and where readers disagreed (TRAIN's job.readers / evidence.*.review).
 // Both are keyed by invoice field names; line cells map from the target column. Absent keys show nothing.
 const READER_LINE_FIELDS = { Item: "sku", UPC: "gtin", "Unit Cost": "price", Quantity: "qty" };
+const READER_HEADER_FIELDS = { site: "supplier_name" };
+const AI_READER_LABELS = {
+  fallback: "Fallback", gap_fill: "Gap fill", cross_check: "Cross-check", skipped: "Not needed", off: "Off",
+  unavailable: "Not connected", failed: "Failed", selected: "Selected reader",
+};
 
 function readerNotes(job, scope, column, line) {
-  const key = scope === "header" ? column : READER_LINE_FIELDS[column];
+  const key = scope === "header" ? READER_HEADER_FIELDS[column] || column : READER_LINE_FIELDS[column];
   const readers = scope === "header" ? job?.readers?.header : job?.readers?.lines?.[line - 1];
   const evidence = scope === "header" ? job?.evidence?.header : job?.evidence?.lines?.[line - 1];
   const notes = [];
   const reader = readers?.[key];
   if (typeof reader === "string" && reader) notes.push(make("span", `reader-badge reader-${reader}`, reader));
   const review = evidence?.[key]?.review;
-  if (review?.reason) notes.push(make("small", "rules-flagged", `Readers disagree: ${review.reason}`));
+  if (review?.reason) {
+    const other = review.other_value === null || review.other_value === undefined ? "" : ` · other read: ${review.other_value}`;
+    const page = review.other_page ? ` (page ${review.other_page})` : "";
+    const note = make("small", "rules-flagged", `Readers disagree: ${review.reason}${other}${page}`);
+    if (review.other_quote) note.title = review.other_quote;
+    notes.push(note);
+  }
   return notes;
+}
+
+// Why the AI ran on this invoice (engines first, then the AI per field) and how many calls it made.
+function renderAiReader(job) {
+  const line = $("#rules-ai-reader");
+  const ai = job?.readers?.ai;
+  line.hidden = !ai?.status;
+  if (!ai?.status) return line.replaceChildren();
+  const calls = Number(ai.calls) || 0;
+  line.textContent = `AI reader: ${AI_READER_LABELS[ai.status] || ai.status} · ${calls} call${calls === 1 ? "" : "s"}`
+    + (ai.reason ? ` — ${ai.reason}` : "");
+  line.title = (ai.notes || []).join("\n");
+  line.classList.toggle("ai-used", ["fallback", "gap_fill", "cross_check", "selected"].includes(ai.status));
 }
 
 const TARGET_GROUPS = [
@@ -227,6 +253,7 @@ function renderRulesResult(job) {
     + (rate.owner_review ? " — below 95%: this invoice goes to owner review." : "");
   itemRate.title = rate.definition || "";
   itemRate.classList.toggle("owner-review", Boolean(rate.owner_review));
+  renderAiReader(job);
   const list = $("#rules-fields");
   list.replaceChildren();
   Object.entries(rules.fields || {}).forEach(([key, field]) => {
@@ -237,6 +264,7 @@ function renderRulesResult(job) {
     } else dd.append(make("span", "", field.value), make("small", "", evidenceText(field.evidence)));
     dd.append(...readerNotes(job, "header", key));
     if ((empty && RULES_REQUIRED_HEADER.has(key)) || enteredByReviewer(field)) dd.append(rulesEntry(field, field.label, "header", key));
+    if (key === "site") renderSupplierPick(dd, job);
     if (field.target === "Order No" && Number(rules.po_candidates) > 1) {
       dd.append(make("small", "rules-flagged", `Ambiguous: ${rules.po_candidates} candidate orders — owner review`));
     }
@@ -252,10 +280,73 @@ function renderRulesResult(job) {
   });
 }
 
+// When the rules leave 2+ supplier codes, the reviewer picks one: a click saves the form with that code and the
+// rules re-run on it (decision 41). The candidates stay listed with the pick marked; "Clear pick" sends "".
+function renderSupplierPick(dd, job) {
+  const candidates = job.rules?.supplier_site_candidates || [];
+  if (candidates.length < 2) return;
+  const picked = job.owner_supplier_code ? String(job.owner_supplier_code) : "";
+  const locked = ["queued", "processing", "exported"].includes(job.status);
+  const box = make("div", "supplier-pick");
+  box.append(make("small", "", picked
+    ? `Supplier code ${picked} picked at review · the rules filled the site from it`
+    : `${candidates.length} supplier codes match this supplier · pick the right one`));
+  const options = make("div", "supplier-pick-options");
+  candidates.forEach((candidate) => {
+    const code = String(candidate.supplier_code ?? "");
+    const sites = candidate.sites || [];
+    const first = sites[0] || {};
+    const button = make("button", `supplier-pick-option${code === picked ? " picked" : ""}`);
+    button.type = "button";
+    button.dataset.supplierCode = code;
+    button.setAttribute("aria-pressed", String(code === picked));
+    button.setAttribute("aria-label", `Pick supplier code ${code}`);
+    const where = [first.site_name || first.entity || "", sites.length > 1 ? `+${sites.length - 1} more` : ""].filter(Boolean).join(" ");
+    button.append(make("strong", "", code), make("span", "", where || candidate.location || ""));
+    button.title = [candidate.reason, ...sites.map((site) => [site.supplier_site, site.site_name].filter(Boolean).join(" · "))].filter(Boolean).join("\n");
+    button.disabled = locked;
+    button.addEventListener("click", () => { if (code !== picked) pickSupplier(code); });
+    options.append(button);
+  });
+  if (picked) {
+    const clear = make("button", "button button-quiet supplier-pick-clear", "Clear pick");
+    clear.type = "button";
+    clear.disabled = locked;
+    clear.addEventListener("click", () => pickSupplier(""));
+    options.append(clear);
+  }
+  box.append(options);
+  dd.append(box);
+}
+
+async function pickSupplier(code) {
+  $$(".supplier-pick button").forEach((button) => { button.disabled = true; });
+  const done = code ? `Supplier code ${code} picked. The rules re-ran with it.` : "Supplier code pick cleared. The rules re-ran.";
+  if (!(await submitReview({ supplier_code: code, confirm: false }, done))) {
+    $$(".supplier-pick button").forEach((button) => { button.disabled = false; });
+  }
+}
+
 function draftValue(job, field, fallback) {
   if (!rulesJob(job)) return fallback;
   return job.rules?.fields?.[field]?.value ?? "";
 }
+
+// On rules jobs the Buyer name shows the owner rule BUYER-NAME value, which the target sheet's Buyer uses; the
+// reader's printed Bill To stays stored and shows as a hint when it differs. Display only, like draftValue().
+function rulesBuyer(job) {
+  const field = rulesJob(job) ? job.rules?.fields?.buyer_name : null;
+  return field && field.value !== null && field.value !== undefined && field.value !== "" ? field : null;
+}
+
+function buyerEvidence(field) {
+  const entry = field.evidence?.[0];
+  if (entry?.kind === "printed") return `printed${entry.reference ? `, ${entry.reference}` : ""}`;
+  if (entry?.kind === "owner_rule") return `owner rule ${entry.rule || "BUYER-NAME"}`;
+  return evidenceText(field.evidence);
+}
+
+const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const HEADER_FIELDS = [
   ["number", "Invoice number", "text"],
@@ -267,7 +358,7 @@ const HEADER_FIELDS = [
   ["po", "Purchase order", "text"],
   ["location", "Delivery location", "text"],
   ["date_printed", "Printed invoice date · source", "text", { readOnly: true }],
-  ["date", "Invoice date · confirm YYYY-MM-DD", "date"],
+  ["date", "Invoice date · confirm calendar date", "date"],
   ["currency", "Currency", "text"],
   ["origin", "Origin", "text"],
   ["market", "Market", "text"],
@@ -771,6 +862,12 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// selected_engine is an engine name, or "<provider> / <model>" for an AI read: the model ID shows as typed, as in the trace.
+function engineLabel(value) {
+  const [engine, ...model] = String(value || "").split(" / ");
+  return `${humanize(engine)}${model.length ? ` · ${model.join(" / ")}` : ""}`;
+}
+
 function humanize(value) {
   const names = {
     invoice2data: "invoice2data",
@@ -909,7 +1006,7 @@ function renderJobs() {
     const dot = make("span", `status-dot ${job.status === "error" ? "error" : ["processing", "queued"].includes(job.status) ? "processing" : ""}`);
     dot.setAttribute("aria-hidden", "true");
     button.append(dot);
-    button.addEventListener("click", () => selectJob(job.id));
+    button.addEventListener("click", () => selectJob(job.id, { reveal: true }));
     row.append(select, button);
     list.append(row);
   });
@@ -953,7 +1050,9 @@ function renderBatchWorkflow(jobs) {
   $("#workflow-download-count").textContent = `${app.selectedForBatch.size} selected`;
 }
 
-async function selectJob(id) {
+// A reviewer's tap reveals the review when it sits off-screen (stacked layouts), and another invoice starts at the
+// top of its details instead of the previous invoice's scroll position.
+async function selectJob(id, { reveal = false } = {}) {
   if (id !== app.selectedJobId && app.reviewDirty) {
     notify("Save this invoice before opening another one. Your edits are still here.", "error", 7000);
     return;
@@ -964,13 +1063,24 @@ async function selectJob(id) {
   try {
     const job = await api(`/api/jobs/${encodeURIComponent(id)}`);
     if (token !== app.selectionToken) return;
+    const switched = app.currentJob?.id !== job.id;
     app.currentJob = job;
     app.reviewDirty = false;
     renderSelectedJob(job);
+    if (switched) $(".fields-card").scrollTop = 0;
+    if (reveal) revealReview();
     startPollingIfNeeded();
   } catch (error) {
     notify(error.message, "error");
   }
+}
+
+function revealReview() {
+  const panel = $("#review-panel");
+  if (panel.hidden) return;
+  const top = panel.getBoundingClientRect().top;
+  const stacked = top >= $(".inbox-card").getBoundingClientRect().bottom - 1;
+  if (stacked && (top < 0 || top > window.innerHeight * 0.25)) panel.scrollIntoView({ block: "start" });
 }
 
 function clearSelectedJob() {
@@ -1046,7 +1156,7 @@ function renderSelectedJob(job) {
   $("#review-panel").hidden = false;
   $("#selected-filename").textContent = job.filename;
   $("#selected-file-icon").textContent = (job.filename.split(".").pop() || "DOC").slice(0, 4).toUpperCase();
-  const engine = job.selected_engine && job.selected_engine !== "pending" ? humanize(job.selected_engine) : "Engine pending";
+  const engine = job.selected_engine && job.selected_engine !== "pending" ? engineLabel(job.selected_engine) : "Engine pending";
   $("#selected-meta").textContent = `${engine}${job.created_at ? ` · Added ${formatDate(job.created_at)}` : ""}`;
   const processing = ["queued", "processing"].includes(job.status);
   const emptyExtraction = !processing && !hasStructuredInvoiceData(job);
@@ -1153,8 +1263,18 @@ function renderInvoiceForm(job) {
     if (type === "number") input.step = "any";
     if (name === "currency") { input.maxLength = 3; input.autocapitalize = "characters"; }
     input.value = invoice[name] ?? "";
+    const buyer = name === "buyer_name" ? rulesBuyer(job) : null;
+    if (buyer) {
+      input.value = buyer.value;
+      input.dataset.rulesValue = buyer.value;
+    }
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
+    if (buyer) {
+      wrapper.append(make("small", "buyer-evidence", buyerEvidence(buyer)));
+      const printed = String(invoice.buyer_name ?? "").trim();
+      if (printed && foldText(printed) !== foldText(buyer.value)) wrapper.append(make("small", "buyer-printed", `printed: ${printed}`));
+    }
     if (name === "date_printed") {
       wrapper.append(make("small", "", invoice.date_printed
         ? "Read-only source evidence. It is never converted automatically."
@@ -1274,10 +1394,15 @@ function renderValidation(job) {
     return;
   }
   summary.hidden = false;
-  summary.className = `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
+  // After the reviewer's confirm, what remains are the notes they accepted, not open issues.
+  const confirmed = job.status === "ready" || job.status === "exported";
+  summary.className = confirmed
+    ? "validation-summary accepted"
+    : `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
   const details = make("details", "validation-details");
   const heading = make("summary");
-  heading.append(make("strong", "", `${issues.length} issue${issues.length === 1 ? "" : "s"} to resolve`), make("span", "", "Show all"));
+  const plural = issues.length === 1 ? "" : "s";
+  heading.append(make("strong", "", confirmed ? `${issues.length} note${plural} accepted at review` : `${issues.length} issue${plural} to resolve`), make("span", "", "Show all"));
   const list = make("ul");
   issues.forEach((issue) => {
     const line = issue.line ? `Line ${issue.line}: ` : "";
@@ -1337,7 +1462,7 @@ function renderTrace(job) {
   });
   const chosen = trace.findLast?.((entry) => entry && typeof entry === "object" && entry.status === "extracted") || trace.find((entry) => entry && typeof entry === "object" && entry.status === "extracted");
   $("#trace-summary").textContent = job.selected_engine && job.selected_engine !== "none"
-    ? `Chosen: ${humanize(job.selected_engine)}`
+    ? `Chosen: ${engineLabel(job.selected_engine)}`
     : chosen ? `Fields returned by ${humanize(chosen.engine)}${chosen.model ? ` · ${chosen.model}` : ""}` : "How this result was produced";
 
   const provenance = $("#provenance-list");
@@ -1374,6 +1499,11 @@ function collectInvoice() {
       return;
     }
     const value = input.value.trim();
+    // A rules value the reviewer did not edit is display only: the stored reader value is sent back unchanged.
+    if (input.dataset.rulesValue !== undefined && value === input.dataset.rulesValue.trim()) {
+      invoice[name] = app.currentJob?.invoice?.[name] ?? null;
+      return;
+    }
     invoice[name] = value === "" ? null : value;
     if (type === "number" && value !== "") invoice[name] = value;
   });
@@ -1388,8 +1518,9 @@ function collectInvoice() {
   return invoice;
 }
 
-async function saveReview() {
-  if (!app.currentJob) return;
+// Saves the form; extra fields (a supplier-code pick) ride on the same request. Resolves true once saved.
+async function submitReview(extra = {}, done = "") {
+  if (!app.currentJob) return false;
   const button = $("#save-review");
   button.disabled = true;
   button.textContent = "Saving…";
@@ -1401,15 +1532,19 @@ async function saveReview() {
         revision: app.currentJob.revision,
         confirm: $("#confirm-review").checked,
         ...(rulesJob(app.currentJob) ? { entries: collectEntries() } : {}),
+        ...extra,
       },
     });
     app.currentJob = job;
     replaceJobSummary(job);
     renderSelectedJob(job);
-    notify(job.validation?.ready ? "Review confirmed. This invoice is ready to export." : "Saved and revalidated. Resolve the listed issues before export.", job.validation?.ready ? "success" : "error");
+    if (done) notify(done, "success");
+    else notify(job.validation?.ready ? "Review confirmed. This invoice is ready to export." : "Saved and revalidated. Resolve the listed issues before export.", job.validation?.ready ? "success" : "error");
+    return true;
   } catch (error) {
     notify(error.message, "error", 7000);
     if (error.message.includes("changed")) await selectJob(app.currentJob.id);
+    return false;
   } finally {
     button.textContent = "Save & revalidate";
     button.disabled = false;
@@ -1879,9 +2014,29 @@ function setupModelPicker(prefix) {
   status.setAttribute("role", "status");
   input.after(status);
   select.addEventListener("change", () => {
-    if (select.value) input.value = select.value;
+    if (select.value === OTHER_MODEL) {
+      input.hidden = false;
+      input.focus();
+      input.select();
+    } else {
+      if (select.value) input.value = select.value;
+      syncModelPicker(prefix);
+    }
     if (prefix === "upload") updateUploadReadiness();
   });
+}
+
+// A model the provider lists shows once, chosen in the list; the model ID box opens for "Other model ID…", for an
+// ID the list does not have, and whenever no list is loaded.
+const OTHER_MODEL = "__other_model__";
+function syncModelPicker(prefix) {
+  const input = $(`#${prefix}-model`);
+  const select = $(`#${prefix}-model-choices`);
+  if (!input || !select) return;
+  const offered = !select.disabled && [...select.options].some((option) => option.value === OTHER_MODEL);
+  const listed = offered && Boolean(input.value) && [...select.options].some((option) => option.value === input.value && option.value !== OTHER_MODEL);
+  if (offered) select.value = listed ? input.value : input.value ? OTHER_MODEL : "";
+  input.hidden = listed;
 }
 
 async function loadProviderModels(prefix, { providerChanged = false, force = false } = {}) {
@@ -1897,9 +2052,11 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
   if (!app.state?.connections?.[provider]) {
     select.replaceChildren(new Option("Connect this provider first", ""));
     status.textContent = `${humanize(provider)} is not connected. Open Engines & AI to connect it.`;
+    syncModelPicker(prefix);
     if (prefix === "upload") updateUploadReadiness();
     return;
   }
+  syncModelPicker(prefix);
   status.textContent = `Loading models from ${humanize(provider)}…`;
   try {
     let cached = app.providerModels[provider];
@@ -1914,11 +2071,11 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
     renderConnections();
     select.replaceChildren(new Option(models.length ? "Choose a model" : "No models returned", ""));
     models.forEach((model) => select.add(new Option(model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id, model.id)));
+    if (models.length) select.add(new Option("Other model ID…", OTHER_MODEL));
     if (!input.value && models.length) {
       const saved = app.state.settings?.provider === provider ? app.state.settings.model : "";
       input.value = models.find((model) => model.id === saved)?.id || models[0].id;
     }
-    select.value = models.some((model) => model.id === input.value) ? input.value : "";
     select.disabled = !models.length;
     status.textContent = models.length ? `${models.length} models available. Check the model before confirming processing.` : "The provider returned no model choices. Check account access or enter a supported model ID.";
   } catch (error) {
@@ -1929,6 +2086,7 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
     select.replaceChildren(new Option("Models could not be loaded", ""));
     status.textContent = error.message;
   } finally {
+    syncModelPicker(prefix);
     if (prefix === "upload") updateUploadReadiness();
   }
 }
@@ -2070,7 +2228,8 @@ function renderPreflight(plan, request) {
     ["AI fallback", plan.summary.ai_fallback ? "Allowed" : "Disabled (local only)"],
     ["Provider", plan.summary.ai_fallback || plan.summary.engine === "ai" ? humanize(plan.summary.provider) : "Not used"],
     ["Model", plan.summary.ai_fallback || plan.summary.engine === "ai" ? (plan.summary.model || "Not selected") : "Not used"],
-    ["References", plan.summary.reference_version ? `Version ${String(plan.summary.reference_version).slice(0, 12)}` : "Not loaded — export will be held"],
+    ["References", !app.state?.legacy_references ? "Owner catalog and mapping tables"
+      : plan.summary.reference_version ? `Version ${String(plan.summary.reference_version).slice(0, 12)}` : "Not loaded — export will be held"],
     ["Price tolerance", String(plan.summary.policy?.price_tolerance ?? "—")],
     ["Total tolerance", String(plan.summary.policy?.total_tolerance ?? "—")],
   ];
@@ -2416,6 +2575,11 @@ async function searchReferenceLookup({ append = false } = {}) {
 }
 
 function renderReferences() {
+  // Production validates against the owner catalog and mapping tables; the legacy snapshot and the synthetic demo
+  // that loads it exist only in test builds, where the server answers their endpoints.
+  const legacy = Boolean(app.state?.legacy_references);
+  $("#load-demo").hidden = !legacy;
+  $("#legacy-reference-card").hidden = !legacy;
   const refs = app.state?.references;
   $("#reference-status").textContent = refs ? `Version ${String(refs.version || "loaded").slice(0, 10)}` : "Not loaded";
   $("#reference-status").className = `status-pill ${refs ? "success" : "neutral"}`;
@@ -2501,10 +2665,12 @@ function applySettings() {
   $("#settings-provider").value = settings.provider;
   $("#settings-model").value = settings.model;
   $("#settings-ai-fallback").checked = settings.ai_fallback !== false;
+  syncModelPicker("settings");
   if (!$("#upload-dialog").open) {
     $("#upload-provider").value = settings.provider;
     $("#upload-model").value = settings.model;
     $("#upload-ai-fallback").checked = settings.ai_fallback !== false;
+    syncModelPicker("upload");
   }
 }
 
@@ -2725,7 +2891,7 @@ function bindEvents() {
   $("#add-line").addEventListener("click", () => { addLine(); markReviewDirty(); });
   $("#invoice-form").addEventListener("input", markReviewDirty);
   $("#confirm-review").addEventListener("change", markReviewDirty);
-  $("#save-review").addEventListener("click", saveReview);
+  $("#save-review").addEventListener("click", () => submitReview());
   $("#export-job").addEventListener("click", exportCurrentJob);
   $("#batch-review").addEventListener("click", openBatchReview);
   $("#confirm-batch-review").addEventListener("click", downloadBatchReview);
@@ -2777,13 +2943,16 @@ function bindEvents() {
   $("#retry-job").addEventListener("click", () => {
     const rawOptions = app.currentJob?.options || app.state.settings;
     const options = { ...rawOptions, ...offeredAISettings(rawOptions) };
-    $("#retry-engine").value = options.engine || "auto";
+    // A job read with Engine "AI provider" re-reads with Auto and AI fallback: local readers first, then the AI for
+    // what they leave open. The reviewer can still choose AI provider here.
+    const aiOnly = options.engine === "ai";
+    $("#retry-engine").value = aiOnly ? "auto" : options.engine || "auto";
     $("#retry-language").value = options.language || "en";
     const preferNativeText = app.nativeTextPreferenceExplicit
       ? app.preferNativeText
       : options.prefer_native_text !== false;
     setNativeTextPreference(preferNativeText, { remember: false });
-    $("#retry-ai-fallback").checked = options.ai_fallback !== false;
+    $("#retry-ai-fallback").checked = aiOnly || options.ai_fallback !== false;
     $("#retry-provider").value = options.provider || "openai";
     $("#retry-model").value = options.model || "";
     $("#retry-dialog").showModal();

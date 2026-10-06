@@ -132,12 +132,16 @@ def _evidence(entry):
     elif entry.get("evidence_kind")=="printed":kind="printed"
     # Picked by the rules among candidate orders (decision 16): never shown as printed.
     elif entry.get("evidence_kind")=="selected":kind="selected"
+    # The owner's supplier-code pick (rule OWNER-PICK): scored as an owner entry, never as machine-read.
+    elif entry.get("evidence_kind")=="owner_entry":kind="owner_entry"
     elif _SHEET_ROW.match(reference):kind="sheet"
     elif "|" in reference:kind="table"
     elif source.startswith("Invoice"):kind="printed"
     else:kind="rule"
     return {"kind":kind,"source":source,"reference":reference,"original":str(entry.get("original") or ""),
-            "rule":str(entry.get("rule") or ""),"confidence":str(entry.get("confidence") or "")}
+            "rule":str(entry.get("rule") or ""),"confidence":str(entry.get("confidence") or ""),
+            # A value the rules derived after the owner's supplier-code pick: kept for the owner-assisted sub-count.
+            **({"assisted_by":str(entry["assisted_by"])} if entry.get("assisted_by") else {})}
 
 
 def _amount_forms(value):
@@ -302,7 +306,9 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
     return {"status":result.get("status") or "Review","fields":fields,"lines":out_lines,"issues":issues,
             "item_lines":{"resolved":resolved,"total":total,"rate":str(rate.quantize(Decimal("0.0001"))) if rate is not None else None,
                           "threshold":str(ITEM_THRESHOLD),"owner_review":below,"definition":definition},
-            "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version")}
+            "po_candidates":int(result.get("po_candidates") or 0),"config_version":result.get("config_version"),
+            # Codes left when the rules cannot pick a supplier code: offered for the owner's pick, never a value.
+            **({"supplier_site_candidates":result["supplier_site_candidates"]} if result.get("supplier_site_candidates") else {})}
 
 
 def rules_key(view):

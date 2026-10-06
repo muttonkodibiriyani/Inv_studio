@@ -1,6 +1,7 @@
 """Review fields, banner and download from ONE fine-rules result with evidence. Synthetic data only."""
 
 import io
+import json
 from datetime import datetime
 from decimal import Decimal
 
@@ -236,6 +237,24 @@ def test_demo_references_are_test_only(production, monkeypatch, tmp_path):
         create_app(tmp_path / "cloud")
 
 
+PREFLIGHT = {"options": {"engine": "auto", "ai_fallback": False, "provider": "openai", "model": "", "language": "en"},
+             "files": [{"name": "synthetic.pdf", "size": 10}]}
+
+
+def test_production_preflight_names_the_owner_sources_not_legacy_references(production, monkeypatch, tmp_path):
+    _, client = production
+    assert client.get("/api/state").json()["legacy_references"] is False
+    warnings = client.post("/api/preflight", headers=H, json=PREFLIGHT).json()["warnings"]
+    assert not any("No reference files loaded" in w or "owner catalog" in w or "mapping tables" in w for w in warnings)
+
+    monkeypatch.setenv("INV_STUDIO_DATA", str(tmp_path / "empty-default"))
+    from app.main import create_app
+    with TestClient(create_app(tmp_path / "empty")) as empty:
+        warnings = empty.post("/api/preflight", headers=H, json=PREFLIGHT).json()["warnings"]
+    assert any(w.startswith("No owner catalog or mapping tables imported.") for w in warnings)
+    assert not any("No reference files loaded" in w for w in warnings)
+
+
 def test_legacy_demo_validation_is_still_available_to_tests():
     assert matching.validate and matching.enrich and Decimal("0.95") == matching.ITEM_THRESHOLD
 
@@ -382,3 +401,14 @@ def test_an_order_selected_by_the_rules_is_shown_as_picked_not_printed():
                            "reference": "POGRN!12", "confidence": "Derived from POGRN", "evidence_kind": "selected"}]}
     po = rules_view(result)["fields"]["po"]
     assert po["value"] == "70002" and po["evidence"][0]["kind"] == "selected"
+
+
+def test_config_audit_records_field_names_and_lengths_never_values(production):
+    app, client = production
+    secret = "Synthetic Buyer Holding Co"
+    assert client.post("/api/fine-rules/config", json={**CONFIG, "buyer_name": secret, "version": "syn-v9", "value_decimals": 2},
+                       headers=H).status_code == 200
+    with app.state.store.connection() as c:
+        audits = [json.loads(r[0]) for r in c.execute("SELECT payload FROM audit WHERE event='fine_rules_config_changed'")]
+    assert audits[-1]["buyer_name"] == len(secret) and audits[-1]["version"] == len("syn-v9") and audits[-1]["value_decimals"] == "int"
+    assert secret not in json.dumps(audits) and "syn-v9" not in json.dumps(audits)

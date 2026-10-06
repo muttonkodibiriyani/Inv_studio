@@ -178,3 +178,66 @@ def test_line_preserves_optional_printed_amounts_without_recalculating_unit_pric
     properties = extraction_schema()["properties"]["lines"]["items"]["properties"]
     assert properties["net_amount"] == {"type": ["string", "null"]}
     assert properties["tax_amount"] == {"type": ["string", "null"]}
+
+
+class SequenceClient(FakeClient):
+    def __init__(self, responses):
+        super().__init__(None)
+        self.responses = list(responses)
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
+def test_one_rate_limit_retry_waits_for_retry_after_then_succeeds(tmp_path, monkeypatch):
+    configure(monkeypatch)
+    busy = FakeResponse(status_code=429, raw=b"{}")
+    busy.headers = {"Retry-After": "3"}
+    fake = SequenceClient([busy, response_for()])
+    monkeypatch.setattr(vertex_module.httpx, "Client", lambda *args, **kwargs: fake)
+    waits = []
+    monkeypatch.setattr(vertex_module, "_sleep", waits.append)
+    path = tmp_path / "invoice.pdf"
+    path.write_bytes(b"%PDF-1.7 test invoice")
+
+    invoice, usage = VertexProvider().extract(path, "OCR facts", "gemini-3.7-flash", "prompt")
+
+    assert invoice.number == "DEMO-2026-001" and len(fake.calls) == 2 and waits == [3]
+    assert fake.calls[0][1]["json"] == fake.calls[1][1]["json"]
+
+
+def test_rate_limit_retries_once_only_and_clamps_the_pause(tmp_path, monkeypatch):
+    configure(monkeypatch)
+    busy = FakeResponse(status_code=429, raw=b"{}")
+    busy.headers = {"Retry-After": "600"}
+    fake = SequenceClient([busy, FakeResponse(status_code=429, raw=b"{}"), response_for()])
+    monkeypatch.setattr(vertex_module.httpx, "Client", lambda *args, **kwargs: fake)
+    waits = []
+    monkeypatch.setattr(vertex_module, "_sleep", waits.append)
+    path = tmp_path / "invoice.pdf"
+    path.write_bytes(b"%PDF-1.7 test invoice")
+
+    with pytest.raises(ValueError) as error:
+        VertexProvider().extract(path, "OCR facts", "gemini-3.7-flash", "prompt")
+    assert len(fake.calls) == 2 and waits == [vertex_module.MAX_RETRY_AFTER_SECONDS]
+    assert "600" not in str(error.value)
+    assert vertex_module._retry_after(FakeResponse(status_code=429)) == vertex_module.RETRY_AFTER_SECONDS
+
+
+def test_vertex_asks_for_header_evidence_and_returns_it_beside_usage(tmp_path, monkeypatch):
+    configure(monkeypatch)
+    invoice = dict(sample_invoice())
+    invoice["header_evidence"] = {"number": {"quote": "Invoice DEMO-2026-001", "page": 1}}
+    fake = FakeClient(response_for(invoice))
+    monkeypatch.setattr(vertex_module.httpx, "Client", lambda *args, **kwargs: fake)
+    path = tmp_path / "invoice.pdf"
+    path.write_bytes(b"%PDF-1.7 test invoice")
+
+    parsed, usage = VertexProvider().extract(path, "OCR facts", "gemini-3.7-flash", "prompt")
+
+    assert parsed.number == "DEMO-2026-001"
+    assert usage == {"promptTokenCount": 12, "candidatesTokenCount": 8,
+                     "evidence": {"number": {"quote": "Invoice DEMO-2026-001", "page": 1}}}
+    schema = fake.calls[0][1]["json"]["generationConfig"]["responseSchema"]
+    assert "buyer_name" in schema["properties"]["header_evidence"]["properties"]

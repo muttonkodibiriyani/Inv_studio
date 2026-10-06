@@ -26,6 +26,10 @@ An accepted negative receipt represents a return. Available receipt balance = su
 
 PO location type is explicit. Prefixes such as 900 do not prove warehouse versus store. The printed buyer name is a source fact and is stored separately from the internal buyer/company code. A name or address cannot populate that code without approved reference evidence. Same-name suppliers in different companies or sites are not interchangeable. Currency equality does not prove domestic supply. Invoice-line `item_id` means the approved internal item only; AI leaves it null, and the supplier SKU never falls back into it. An operator may enter it manually or confirm it from reference evidence. A missing GTIN can remain blank when an exact supplier-site SKU maps uniquely to an internal item; conflicting SKU/GTIN identity is held.
 
+## Printed evidence
+
+Every stored job carries `evidence` beside `invoice`, never inside it: `{"header": {<field>: entry}, "lines": [{<line field>: entry}, ...]}` with `lines` indexed like `invoice.lines`. An entry is `{"quote", "page" (1-based), "box"?: [x0, y0, x1, y1] normalised 0-1, "source": "ai" | "ocr" | "native", "review"?: {"reason", "other_value"}}`. Local readers locate each value in the page geometry they read; an AI reader quotes its own sources (`header_evidence` in its output schema, split off before validation). When the AI read a scan with no text layer, a local OCR pass runs after the result is saved and adds boxes; a near-identical OCR value or file-name digit run becomes a `review` flag on the entry. Evidence never changes a value, the revision or the status, and the pass is recorded in the trace.
+
 ## Large source extracts
 
 Keep original files immutable, compute a SHA-256 hash, inspect every populated cell and build a profile with source sheet/row/column provenance. Map fields into a staging model before proposing a canonical snapshot. Report duplicates, one-to-many joins, missing internal scope, formula/cached-value differences and date/identifier conversion risks.

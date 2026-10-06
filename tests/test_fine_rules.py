@@ -260,6 +260,26 @@ def test_R_020_no_pogrn_rows_for_ebs_code_is_missing_po():
     assert result["header"]["Order No"] == "" and "POGRN Supplier Exception" in types(result, "SUP-002")
 
 
+def test_R_024_printed_lpo_that_is_not_an_owner_order_id_is_never_order_no():
+    def order(po, rows=POGRN):
+        result = run(invoice(po=po), rows=rows)
+        missing = [e for e in result["exceptions"] if e["Engine Type"] in ("Missing PO", "Ambiguous PO")]
+        trace = next((x for x in result["lineage"] if x["target"] == "Order No"), {})
+        return result["header"]["Order No"], trace.get("rule"), [(e["Description"][:40], e["Candidates / Evidence"])
+                                                                 for e in missing]
+
+    lpo = ("Printed PO is not in the POGRN report an", "LPO-A12")
+    # The supplier's EBS-code route still selects the one agreeing order; the printed LPO is only evidence.
+    assert order("LPO-A12") == ("13000001", "POG-001", [lpo])
+    assert order("0123")[0] == "13000001"
+    other = [pogrn("13000002", "38091", "9", "90")]
+    value, rule, missing = order("LPO-A12", rows=other)
+    assert (value, rule) == ("", None) and missing[0] == lpo
+    assert missing[1][0].startswith("No printed RMS order number and none")
+    # A printed owner-format order that is not in POGRN is still the unvalidated R-024 value.
+    assert order("99999999")[:2] == ("99999999", "R-024")
+
+
 def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
     # Owner form 01a10c4d qty_cost_tolerance = invoice_flag: POG-006 and C-11 warn, they do not block.
     result = run(invoice(po="13000001"), rows=both("13000001", "38091", q2="1"))
@@ -785,6 +805,118 @@ def test_SUP_001_bridge_and_site_chosen_by_order_ebs_code_and_location_entity():
     assert review["header"]["Supplier Site"] == "" and "Supplier Site Exception" in types(review, "SUP-003")
 
 
+def test_R_006_two_supplier_codes_resolved_by_the_printed_deliver_to_location_entity():
+    # One printed supplier name, two Active codes; the Item Master relates the items to a site of each code.
+    items = ITEMS + [item(p, b, v, site="92006", name="DEF002RB2SAR", ref=r)
+                     for p, b, v, r in (("345000001", "ULT_0012345678905", "100001", 7),
+                                        ("345000002", "ULT_0098765432109", "100002", 8))]
+    sites = [{"supplier_site": s, "currency": c, "status": "Active", "supplier_code": code,
+              "supplier_name": "ABC Trading LLC", "site_name": n}
+             for s, c, code, n in (("22001", "KWD", "1", "ABC001RA1KWD"), ("92006", "SAR", "2", "DEF002RB2SAR"))]
+    master = {"38091": {"type": fr.STORE, "market": "Kuwait", "entity_currency": "RA1KWD"},
+              "38092": {"type": fr.STORE, "market": "KSA", "entity_currency": "RB2SAR"}}
+    config = {**CONFIG, "supplier_sites": sites, "location_master": master}
+    no_po = invoice(po=None)
+
+    picked = run(no_po, items=items, config=config, text_value="Bill To: Ulta Buyer Co   Deliver To: Store 38091")
+    header = picked["header"]
+    assert (header["Supplier Site"], header["Order No"], header["Location"]) == ("22001", "13000001", "38091")
+    code = next(x for x in picked["lineage"] if x["target"] == "Supplier Code")
+    assert code["rule"] == "R-006" and code["value"] == "1"
+    assert "LOCATIONS 38091|test-1" in code["reference"] and "22001|test-1" in code["reference"]
+    site = [x for x in picked["lineage"] if x["target"] == "Supplier Site"][0]
+    assert "LOCATIONS 38091|test-1" in site["reference"]
+    assert "SUP-001" not in {e["Rule ID"] for e in picked["exceptions"]} and picked["supplier_site_candidates"] == []
+
+    other = run(no_po, items=items, config=config, text_value="DELIVERY ADDRESS: 38092")
+    assert other["header"]["Supplier Site"] == "92006" and other["header"]["Order No"] == ""
+
+    def reason(result):
+        assert result["header"]["Supplier Site"] == "" and result["header"]["Order No"] == ""
+        assert "Supplier Exception" in types(result, "SUP-001")
+        return " ".join(e["Description"] for e in result["exceptions"] if e["Rule ID"] == "R-006")
+
+    assert "not printed as a LOCATION id" in reason(run(no_po, items=items, config=config,
+                                                        text_value="Deliver To: Store Name, City\nP.O. Box 38091"))
+    assert "not a LOCATION id" in reason(run(no_po, items=items, config=config, text_value="Deliver To: 99999"))
+    assert "2 different LOCATIONS ids" in reason(run(no_po, items=items, config=config,
+                                                     text_value="Deliver To: 38091 or 38092"))
+    both = config | {"supplier_sites": sites + [{**sites[1], "supplier_site": "92007", "site_name": "DEF002RA1KWD"}]}
+    tied = run(no_po, items=items, config=both, text_value="Deliver To: Store 38091")
+    assert "2 of the 2 supplier codes" in reason(tied)
+    # The codes left are offered as cited candidates for the reviewer's pick; the field itself stays empty.
+    offered = tied["supplier_site_candidates"]
+    assert [(c["supplier_code"], [s["supplier_site"] for s in c["sites"]]) for c in offered] == [
+        ("1", ["22001"]), ("2", ["92007"])]
+    assert offered[1]["sites"][0]["reference"] == "92007|test-1" and offered[0]["location_reference"] == \
+        "LOCATIONS 38091|test-1"
+    unprinted = run(no_po, items=items, config=config, text_value="Deliver To: Store Name")
+    assert [c["supplier_code"] for c in unprinted["supplier_site_candidates"]] == ["1", "2"]
+    no_entity = config | {"location_master": {"38091": {"type": fr.STORE, "market": "Kuwait"}}}
+    assert "no ENTITY AND CURENCY" in reason(run(no_po, items=items, config=no_entity,
+                                                 text_value="Deliver To: Store 38091"))
+
+
+def test_02A_line_below_quantity_x_cost_is_explained_by_a_printed_invoice_discount():
+    def unit_cost_lines(first, second, net, text_value):
+        inv = invoice(net=D(net), lines=lines(first={"net_amount": D(first)}, second={"net_amount": D(second)}))
+        result = run(inv, text_value=text_value)
+        return [e["Line No."] for e in result["exceptions"] if e["Rule ID"] == "02A-Unit Cost"]
+
+    printed = "Invoice\fTotal 70.00\nDiscount -15.00\nNet Total 55.00"
+    assert unit_cost_lines("15", "40", "55", printed) == []
+    assert unit_cost_lines("0", "40", "40", "Total 70.000\nLess: Discount (30.000)\nNet 40.000") == []
+    assert unit_cost_lines("15", "40", "55", printed.replace("Discount", "Less")) == [1]
+    assert unit_cost_lines("15", "40", "55", printed.replace("-15.00", "-10.00")) == [1]
+    assert unit_cost_lines("15", "40", "55", printed.replace("Total 70.00", "Total")) == [1]
+    assert unit_cost_lines("15", "40", "60", printed) == [1]
+    assert unit_cost_lines("45", "10", "55", printed) == [1]
+
+
+def test_owner_pick_among_the_R_006_candidates_runs_the_cascade_and_is_cited_as_an_owner_entry():
+    items = ITEMS + [item(p, b, v, site="92006", name="DEF002RB2SAR", ref=r)
+                     for p, b, v, r in (("345000001", "ULT_0012345678905", "100001", 7),
+                                        ("345000002", "ULT_0098765432109", "100002", 8))]
+    sites = [{"supplier_site": s, "currency": c, "status": "Active", "supplier_code": code,
+              "supplier_name": "ABC Trading LLC", "site_name": n}
+             for s, c, code, n in (("22001", "KWD", "1", "ABC001RA1KWD"), ("92006", "SAR", "2", "DEF002RB2SAR"))]
+    master = {"38091": {"type": fr.STORE, "market": "Kuwait", "entity_currency": "RA1KWD"}}
+    config = {**CONFIG, "supplier_sites": sites, "location_master": master}
+
+    def picked(code, text_value="Deliver To: Store Name"):
+        entry = {"invoice": invoice(po=None), "text": text_value, "owner_supplier_code": code}
+        return fr.run_batch([entry], fr.RowsSource(items, POGRN), fr.RulesConfig.from_dict(config))[0]
+
+    def rules(result):
+        return [(e["Rule ID"], e["Description"]) for e in result["exceptions"]]
+
+    unpicked = picked(None)
+    assert unpicked["header"]["Supplier Site"] == "" and len(unpicked["supplier_site_candidates"]) == 2
+    assert run(invoice(po=None), items=items, config=config, text_value="Deliver To: Store Name") == unpicked
+    assert picked("") == unpicked
+
+    one = picked("1")
+    header = one["header"]
+    assert (header["Supplier Site"], header["Order No"], header["Location"]) == ("22001", "13000001", "38091")
+    lineage = {x["target"]: x for x in one["lineage"] if x["line"] is None}
+    assert lineage["Supplier Code"]["rule"] == "OWNER-PICK" and lineage["Supplier Code"]["value"] == "1"
+    assert lineage["Supplier Code"]["evidence_kind"] == "owner_entry"
+    assert "22001|test-1" in lineage["Supplier Code"]["reference"]
+    assert lineage["Supplier Site"]["rule"] == "OWNER-PICK" and lineage["Supplier Site"]["evidence_kind"] == "owner_entry"
+    assert lineage["Order No"]["assisted_by"] == "OWNER-PICK" and lineage["Location"]["assisted_by"] == "OWNER-PICK"
+    assert "assisted_by" not in lineage["Document"] and "R-006" not in [x["rule"] for x in one["lineage"]]
+    assert not [r for r in rules(one) if r[0] in ("R-006", "SUP-001", "OWNER-PICK")]
+    assert [c["supplier_code"] for c in one["supplier_site_candidates"]] == ["1", "2"]
+    assert picked("2")["header"]["Supplier Site"] == "92006" and picked("2")["header"]["Order No"] == ""
+
+    stray = picked("9")
+    assert stray["header"] == unpicked["header"] and stray["lineage"] == unpicked["lineage"]
+    ignored = ("OWNER-PICK", "Owner supplier-code pick is not one of this run's candidates; ignored")
+    assert [r for r in rules(stray) if r != ignored] == rules(unpicked) and rules(stray).count(ignored) == 1
+    settled = picked("2", "Deliver To: Store 38091")
+    assert settled["header"]["Supplier Site"] == "22001" and rules(settled).count(ignored) == 1
+
+
 def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     traced = run(text_value="Net 70.000\fTax 0\nTotal 70")
     refs = {x["target"]: x["reference"] for x in traced["lineage"]}
@@ -792,6 +924,19 @@ def test_TGT_001_totals_are_traced_to_their_printed_page_else_flagged():
     assert traced["header"]["Gross Amount"] == D(70)
     missing = run()
     assert "Totals Audit" in types(missing) and missing["status"] == "Approved"
+
+
+def test_TGT_001_amount_printed_with_two_decimals_or_thousands_separators_is_found():
+    scan = {"pages": {1: "Invoice", 2: "Net Total 520.00\nVAT 0.00"}}
+    assert fr._printed_page(scan, D("520.0")) == 2
+    assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Total 1,520"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Total KWD 1,520.000"}}, D("1520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Net 520.000"}}, D("520.0")) == 1
+    assert fr._printed_page({"pages": {1: "Net 520.0005"}}, D("520.0")) is None
+    assert fr._printed_page(scan, D("520.5")) is None
+    assert fr._printed_page({"pages": {1: "Total 520.50"}}, D("520.0")) is None
+    assert fr._printed_page({"pages": {1: "Total 1,520.00"}}, D("520.0")) is None
 
 
 def test_item_resolution_counts_lines_whose_quantity_agrees_with_the_order():
@@ -815,3 +960,68 @@ def test_exception_types_are_the_owner_checklist_failure_statuses():
     assert fr.FAILURE_STATUS["Value Mismatch"] == ("Value Mismatch", "C-16")
     assert fr.FAILURE_STATUS["Quantity Mismatch"] == ("Quantity Mismatch", "C-15")
     assert fr.FAILURE_STATUS["Malformed Source Row"] == ("Audit Exception", "C-17")
+
+
+# --------------------------------------------------------------------------- decision 44: OCR I/1, O/0 VPN lookup
+
+OCR_ITEMS = ITEMS + [
+    item("345000010", "ULT_7770001112223", "IO10AB", desc="Velvet Blush Pink", ref=10),
+    item("345000011", "ULT_7770001112224", "OI20CD", desc="Velvet Blush Coral", ref=11),
+    item("345000012", "ULT_7770001112225", "OI2OCD", desc="Velvet Blush Peach", ref=12),
+]
+
+
+def ocr_lines(sku):
+    # The second line is exact and fixes the supplier; the first carries the OCR-read VPN only.
+    return lines(first={"gtin": None, "sku": sku, "description": "Velvet Blush"})
+
+
+def test_decision_44_ocr_vpn_variant_fills_only_one_parent_with_a_review_flag():
+    result = run(invoice(lines=ocr_lines("1O10AB")), items=OCR_ITEMS, ocr_lines=True)
+    first = result["lines"][0]
+    assert first["Item"] == "345000010" and first["Match Method"] == "VPN OCR variant"
+    assert first["VPN Check"] == "Pass (OCR I/1 O/0)"
+    flag = next(e for e in result["exceptions"] if e["Rule ID"] == "ALG-018-OCR")
+    assert (flag["Engine Type"], flag["Exception Type"], flag["Check ID"], flag["blocking"]) == \
+        ("Item Review", "Item Exception", "C-08", False)
+    assert flag["Candidates / Evidence"] == "printed 1O10AB read as IO10AB"
+    trace = next(t for t in result["lineage"] if t["target"] == "Item" and t["line"] == 1)
+    assert trace["original"] == "1O10AB" and trace["reference"] == "Items!10"
+
+
+def test_decision_44_never_on_text_reads_ambiguous_variants_or_unknown_supplier():
+    # A text-layer or docling read (ocr_lines False) never tries.
+    off = run(invoice(lines=ocr_lines("1O10AB")), items=OCR_ITEMS)
+    assert off["lines"][0]["Item"] == "" and "ALG-018-OCR" not in [e["Rule ID"] for e in off["exceptions"]]
+    # Two variants hitting two parents (OI20CD, OI2OCD): stays unmatched.
+    two = run(invoice(lines=ocr_lines("0I2OCD")), items=OCR_ITEMS, ocr_lines=True)
+    assert two["lines"][0]["Item"] == ""
+    # The printed token alone, with no variant in the master: stays unmatched.
+    none = run(invoice(lines=ocr_lines("ZZ99XY")), items=OCR_ITEMS, ocr_lines=True)
+    assert none["lines"][0]["Item"] == ""
+    # An exact VPN is never re-read.
+    exact = run(invoice(lines=ocr_lines("IO10AB")), items=OCR_ITEMS, ocr_lines=True)
+    assert exact["lines"][0]["Match Method"] == "VPN exact"
+    # No supplier constraint: a unique parent across the whole master is too weak.
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "VPN column"}], {"22001"})
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "VPN column"}], {"99999"}) is None
+    m = fr.match_line(fr.Run(invoice(), fr.RulesConfig(), "", ocr_lines=True), 1,
+                      Line(sku="1O10AB", description="x"), fr.RowsSource(OCR_ITEMS, POGRN), None)
+    assert m["parent"] is None
+    # The ITM-004 description route is digits only and never varied.
+    assert fr.ocr_vpn(fr.RowsSource(OCR_ITEMS, POGRN), [{"value": "1O10AB", "origin": "description start"}],
+                      {"22001"}) is None
+    assert fr._ocr_variants("ABC") == [] and len(fr._ocr_variants("I0I0I0I0I")) == 0  # over 8 positions
+    assert sorted(fr._ocr_variants("I0")) == ["10", "1O", "IO"]
+
+
+def test_ocr_read_only_for_local_ocr_or_ai_selected():
+    ai = {"engine": "vertex", "method": "vision_ai"}
+    assert fr.ocr_read({"selected_engine": "paddleocr"})
+    assert fr.ocr_read({"selected_engine": "invoice2data + PaddleOCR"})
+    assert fr.ocr_read({"selected_engine": "vertex / model-x", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "native PDF text", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "docling", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "other / model-x", "trace": [ai]})
+    assert not fr.ocr_read({"selected_engine": "vertex / model-x", "trace": [{"engine": "vertex", "method": "text_only"}]})
+    assert not fr.ocr_read({})

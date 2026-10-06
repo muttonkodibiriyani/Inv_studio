@@ -20,6 +20,7 @@ from app.models import Invoice, Line
 _STRONG_INVOICE = re.compile(
     r"(?im)(?:\b(?:tax|commercial|sales|debit)\s+invoice\b|\bcredit\s*invoice\b|^\s*invoice\s*$)"
 )
+_PACKING_TITLE = re.compile(r"(?i)\bpacking\s+(?:list|slip)\b")
 _PURCHASE_ORDER_HEADING = re.compile(r"(?im)^\s*purchase\s+order(?:\s+no\b[^\n]*)?\s*$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9./_-]{0,79}$")
 _PLAIN_NUMBER = re.compile(r"^[0-9]+(?:\.[0-9]+)?$")
@@ -70,7 +71,7 @@ class _DraftLine:
     description: str | None
     uom: str | None
     qty: Decimal
-    price: Decimal
+    price: Decimal | None
     evidence_parts: list[str]
     page: int
     last_y: float
@@ -119,14 +120,25 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
     compact_header = _spatial_compact_header(rows)
     if number is None:
         number = compact_header.get("number")
+    # Party names are read only from invoice pages: a packing list in the same
+    # file labels its own parties beside its own titles.
+    pages = {page for page, _ in rows}
+    packing_pages = {
+        page for page in pages
+        if is_packing_page("\n".join(_row_text(row) for row_page, row in rows if row_page == page))
+    }
+    party_rows, party_lines = rows, lines
+    if packing_pages and packing_pages != pages:
+        party_rows = [(page, row) for page, row in rows if page not in packing_pages]
+        party_lines = [text for text in (_row_text(row).strip() for _, row in party_rows) if text]
     supplier_name = _unique_text(
-        lines,
+        party_lines,
         (
             re.compile(r"(?i)\b(?:supplier(?:\s+name)?|seller\s+name)\s*:\s*(.{1,160})$"),
         ),
     )
-    supplier_name = _spatial_party_name(rows, {"supplier", "supplier name"}) or supplier_name
-    buyer_name = _spatial_buyer_name(rows) or _extract_buyer_name(lines)
+    supplier_name = _spatial_party_name(party_rows, {"supplier", "supplier name"}) or supplier_name
+    buyer_name = _spatial_buyer_name(party_rows) or _extract_buyer_name(party_lines)
     po = _unique_identifier(
         lines,
         (
@@ -233,6 +245,12 @@ def extract_invoice(text: str, boxes: list[dict[str, Any]] | None) -> dict[str, 
 
 def _has_invoice_heading(text: str) -> bool:
     return bool(_STRONG_INVOICE.search(text))
+
+
+def is_packing_page(page_text: str) -> bool:
+    """A packing list or slip page that carries no invoice title of its own."""
+
+    return bool(_PACKING_TITLE.search(page_text)) and not _has_invoice_heading(page_text)
 
 
 def _is_purchase_order_document(text: str) -> bool:
@@ -727,8 +745,8 @@ def _only_distinct(values: Iterable[str]) -> str | None:
 
 def _extract_printed_date(lines: list[str]) -> str | None:
     """Preserve a labelled source date even when its locale is ambiguous."""
-    date_pattern = r"(?:\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}|\d{1,2}[- /][A-Za-z]{3,9}[- /]\d{4})"
-    label = re.compile(r"(?i)\b(?:invoice|document)\s+date\s*:?\s*(" + date_pattern + r")(?!\d)")
+    date_pattern = r"(?:\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}|\d{1,2}(?:st|nd|rd|th)?[- /][A-Za-z]{3,9},?[- /]\d{4})"
+    label = re.compile(r"(?i)(?:^|\s{2,}|\b(?:invoice|document)\s+)date\s*:?\s*(" + date_pattern + r")(?!\d)")
     values = []
     for i, line in enumerate(lines):
         match = label.search(line)
@@ -963,7 +981,7 @@ def _extract_table_lines(words: list[_Word]) -> list[Line]:
                         description=description,
                         uom=_clean_uom(_join_words(parts["uom"])),
                         qty=qty,
-                        price=price,
+                        price=None if _dropped_decimal_point(qty, price, row, columns) else price,
                         evidence_parts=[row_text],
                         page=page,
                         last_y=_row_y(row),
@@ -1328,6 +1346,28 @@ def _join_words(words: list[_Word]) -> str:
     return " ".join(
         word.text for line in lines for word in sorted(line, key=lambda item: item.x)
     ).strip()
+
+
+def _dropped_decimal_point(qty: Decimal, price: Decimal, row: list[_Word], columns: _Columns) -> bool:
+    """A unit price OCR read without its decimal point: left empty rather than filled wrong.
+
+    True only when the price was read as a whole number, quantity x price is not an amount printed right of
+    the price column, and quantity x price / 10^k is one printed with exactly k decimals (e.g. 12 x "2400"
+    beside a printed 28.800). Nothing is restored: the printed point itself was not read.
+    """
+    if price.as_tuple().exponent < 0 or not qty:
+        return False
+    amounts = [
+        value for value in (_parse_decimal(word.text) for word in row if word.x >= columns.price_right)
+        if value is not None and value
+    ]
+    if any(value == qty * price for value in amounts):
+        return False
+    return any(
+        value.as_tuple().exponent == -places and value == qty * price.scaleb(-places)
+        for value in amounts
+        for places in (1, 2, 3)
+    )
 
 
 def _first_decimal(words: list[_Word]) -> Decimal | None:

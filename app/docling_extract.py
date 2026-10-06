@@ -8,6 +8,8 @@ from decimal import Decimal, InvalidOperation
 from statistics import median
 from typing import Any
 
+from app.layout_extract import is_packing_page
+
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
     return obj.get(name, default) if isinstance(obj, dict) else getattr(obj, name, default)
@@ -219,8 +221,37 @@ def _exact_header_role(header: Any) -> str | None:
         "tax_rate": {"taxrate", "vatrate", "taxpercent"},
         "tax_amount": {"taxamount", "vatamount", "taxamt", "vatamt"},
         "gross_amount": {"grossamount", "amountincludingtax", "total"},
+        "other_amount": {"otheramount"},
     }
     return next((role for role, values in aliases.items() if packed in values), None)
+
+
+def _page_slope(words: list[dict[str, Any]]) -> float:
+    """Vertical drift per pixel of a tilted scan: the slope that lines printed rows up most sharply.
+
+    Zero unless rows align clearly better when tilted, so a straight page is grouped exactly as before.
+    """
+    centres = [((float(w["box"][0]) + float(w["box"][2])) / 2, (float(w["box"][1]) + float(w["box"][3])) / 2)
+               for w in words]
+    if len(centres) < 40:
+        return 0.0
+
+    def sharpness(slope: float) -> int:
+        bands: dict[int, int] = {}
+        for x, y in centres:
+            key = round((y - slope * x) / 2)
+            bands[key] = bands.get(key, 0) + 1
+        return sum(count * count for count in bands.values())
+
+    level = sharpness(0.0)
+    score, slope = max((sharpness(step / 1000), step / 1000) for step in range(-30, 31))
+    return slope if abs(slope) >= 0.003 and score >= level * 1.15 else 0.0
+
+
+def _overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    narrower = min(float(left["box"][2]) - float(left["box"][0]), float(right["box"][2]) - float(right["box"][0]))
+    shared = min(float(left["box"][2]), float(right["box"][2])) - max(float(left["box"][0]), float(right["box"][0]))
+    return narrower > 0 and shared > 0.5 * narrower
 
 
 def _rows_from_words(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -231,22 +262,41 @@ def _rows_from_words(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
         return []
     typical = median(max(1.0, float(word["box"][3]) - float(word["box"][1])) for word in words)
     tolerance = max(3.0, typical * 0.6)
+    # A tilted scan puts the right end of a printed row half a row lower than its left end; rows are
+    # grouped on tilt-corrected centres. Words and their boxes are returned unchanged.
+    slope = _page_slope(words)
+
+    def centre_of(word: dict[str, Any]) -> float:
+        middle = (float(word["box"][0]) + float(word["box"][2])) / 2
+        return (float(word["box"][1]) + float(word["box"][3])) / 2 - slope * middle
+
     rows: list[list[dict[str, Any]]] = []
     centres: list[float] = []
-    for word in sorted(words, key=lambda value: (
-        (float(value["box"][1]) + float(value["box"][3])) / 2,
-        float(value["box"][0]),
-    )):
-        centre = (float(word["box"][1]) + float(word["box"][3])) / 2
+    for word in sorted(words, key=lambda value: (centre_of(value), float(value["box"][0]))):
+        centre = centre_of(word)
         if rows and abs(centre - centres[-1]) <= tolerance:
             rows[-1].append(word)
-            centres[-1] = sum(
-                (float(item["box"][1]) + float(item["box"][3])) / 2 for item in rows[-1]
-            ) / len(rows[-1])
+            centres[-1] = sum(centre_of(item) for item in rows[-1]) / len(rows[-1])
         else:
             rows.append([word])
             centres.append(centre)
-    return [sorted(row, key=lambda value: float(value["box"][0])) for row in rows]
+    # Two words stacked over the same span cannot share one printed row: closely spaced rows were
+    # chained together. Split such a group into rows by height, each word joining the nearest row
+    # that has nothing above or below it.
+    split: list[list[dict[str, Any]]] = []
+    for row in rows:
+        if not any(_overlaps(a, b) for i, a in enumerate(row) for b in row[i + 1:]):
+            split.append(row)
+            continue
+        parts: list[tuple[float, list[dict[str, Any]]]] = []
+        for word in sorted(row, key=centre_of):
+            free = [part for part in parts if not any(_overlaps(word, other) for other in part[1])]
+            if free:
+                min(free, key=lambda part: abs(centre_of(word) - part[0]))[1].append(word)
+            else:
+                parts.append((centre_of(word), [word]))
+        split.extend(part for _anchor, part in sorted(parts, key=lambda p: median(centre_of(w) for w in p[1])))
+    return [sorted(row, key=lambda value: float(value["box"][0])) for row in split]
 
 
 def _header_roles(row: list[dict[str, Any]]) -> list[tuple[str, float, float]]:
@@ -320,6 +370,20 @@ def _mapped_row(row, roles, bounds, expected_serial=None):
                     and bounds[column] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 1]]
             values[column] = " ".join(kept).strip() or None
             values[column + 1] = token
+    # A right-aligned quantity can end just past the column boundary and land
+    # in the price cell ("7 AED 10.25"). A whole integer that ends left of the
+    # price heading, with the price still in that cell, is the quantity.
+    for column in range(len(roles) - 1):
+        if roles[column][0] != "qty" or roles[column + 1][0] != "price" or values[column]:
+            continue
+        cell = sorted((word for word in row
+                       if bounds[column + 1] <= (float(word["box"][0]) + float(word["box"][2])) / 2 < bounds[column + 2]),
+                      key=lambda word: float(word["box"][0]))
+        if (len(cell) >= 2 and re.fullmatch(r"[0-9]{1,6}", str(cell[0]["text"]).strip())
+                and float(cell[0]["box"][2]) < roles[column + 1][1]
+                and any(_decimal(word["text"]) is not None for word in cell[1:])):
+            values[column] = str(cell[0]["text"]).strip()
+            values[column + 1] = " ".join(str(word["text"]).strip() for word in cell[1:]).strip() or None
     for column, role in enumerate(roles):
         if role[0] == "description" and values[column]:
             # OCR reads a printed size's 0 as O and l as I ("3OML", "10mI").
@@ -379,6 +443,10 @@ def _tables_from_measured_words(boxes: list[dict[str, Any]]) -> list[dict[str, A
     for page in sorted({int(box.get("page", 1)) for box in boxes}):
         page_words = [box for box in boxes if int(box.get("page", 1)) == page]
         rows = _rows_from_words(page_words)
+        if is_packing_page("\n".join(" ".join(str(w["text"]) for w in row) for row in rows)):
+            # A packing list repeats the goods without being invoice lines.
+            carry = None
+            continue
         size = page_words[0].get("size") if page_words else None
         number = _measured_invoice_number(rows, size)
         has_header = any(required.issubset({r[0] for r in _header_roles(row)}) for row in rows)
@@ -476,6 +544,10 @@ def _decimal(value: Any) -> str | None:
     text = re.sub(r"^(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+", "", text)
     # OCR may split a thousands separator into its own token: "1 , 105.31".
     text = re.sub(r"(?<=\d)\s*,\s*(?=\d{3}(?:\D|$))", ",", text)
+    # OCR may read a thousands comma as a point: "1.234.56" has no other reading than 1234.56.
+    if re.fullmatch(r"[-+]?\d{1,3}(?:\.\d{3})+\.\d{2}", text):
+        head, _, cents = text.rpartition(".")
+        text = head.replace(".", ",") + "." + cents
     match = re.fullmatch(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?", text)
     if not match:
         return None
@@ -821,14 +893,17 @@ def extract_invoice_from_tables(
                     continue
                 if role not in {
                     "sku", "gtin", "description", "qty", "uom", "price",
-                    "net_amount", "tax_amount", "part_code",
+                    "net_amount", "tax_amount", "part_code", "other_amount",
                 }:
                     continue
                 raw = row[column]
-                if role in {"qty", "price", "net_amount", "tax_amount"}:
+                if role in {"qty", "price", "net_amount", "tax_amount", "other_amount"}:
                     parsed = _decimal(raw)
                     if parsed is not None:
-                        values[role] = parsed
+                        # A second printed amount per line (e.g. "Amount AED" beside
+                        # "Net Amount") is kept aside until the totals prove which
+                        # column is the line net; see _take_reconciled_amount.
+                        values["_other_amount" if role == "other_amount" else role] = parsed
                 elif role == "gtin":
                     parsed = _gtin(raw)
                     if parsed is not None:
@@ -906,7 +981,7 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
-                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount"):
+                    for field in ("sku", "gtin", "uom", "net_amount", "tax_amount", "_other_amount"):
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
@@ -939,6 +1014,7 @@ def extract_invoice_from_tables(
         }
         if len(printed) == 1:
             invoice[field] = next(iter(printed))
+    _take_reconciled_amount(invoice)
     headers = _table_header_values(tables)
     text_headers = _strict_text_headers(text)
     from .layout_extract import _extract_printed_date
@@ -955,6 +1031,43 @@ def extract_invoice_from_tables(
     if buyer_name is not None:
         invoice["buyer_name"] = buyer_name
     return invoice if invoice["lines"] else None
+
+
+def _take_reconciled_amount(invoice: dict[str, Any]) -> None:
+    """Prefer the printed amount column that reconciles when a layout prints two per line.
+
+    Some layouts print a pre-discount "Net Amount" and, after it, the amount actually
+    charged for the line ("Amount AED"). The line net is the column whose sum is the
+    printed net total and whose line VAT is the rate times the amount. Only then is the
+    second column taken; otherwise the reader behaves as before. Nothing is calculated.
+    """
+    lines = invoice.get("lines") or []
+    others = [line.pop("_other_amount", None) for line in lines]
+    if not lines or any(other is None for other in others):
+        return
+    header_net = _decimal(invoice.get("net"))
+    if header_net is None or Decimal(header_net) == 0:
+        return
+    amounts = [Decimal(other) for other in others]
+    nets = [Decimal(line["net_amount"]) for line in lines if line.get("net_amount") is not None]
+    if sum(amounts) != Decimal(header_net) or sum(nets) == Decimal(header_net):
+        return
+    taxed = [(Decimal(line["tax_amount"]), amount) for line, amount in zip(lines, amounts)
+             if line.get("tax_amount") is not None]
+    header_tax = _decimal(invoice.get("tax"))
+    if header_tax is not None:
+        rate = Decimal(header_tax) / Decimal(header_net)
+    elif taxed and sum(amount for _tax, amount in taxed) != 0:
+        # The printed VAT total is read later from the page header; until then the
+        # lines' own tax and amount columns give the rate the layout applied.
+        rate = sum(tax for tax, _amount in taxed) / sum(amount for _tax, amount in taxed)
+    else:
+        rate = Decimal(0)
+    rate = rate.quantize(Decimal("0.0001"))
+    if any(abs(tax - amount * rate) > Decimal("0.01") for tax, amount in taxed):
+        return
+    for line, other in zip(lines, others):
+        line["net_amount"] = other
 
 
 def _lines_equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:

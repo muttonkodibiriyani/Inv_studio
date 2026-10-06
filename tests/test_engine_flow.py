@@ -193,7 +193,7 @@ def test_invoice_heading_prevents_purchase_order_hint(monkeypatch,tmp_path):
     assert result['document_type_hint'] is None
 
 
-def test_scan_uses_selected_vision_before_heavy_ocr(monkeypatch,tmp_path):
+def test_scan_runs_the_local_ocr_readers_before_the_ai(monkeypatch,tmp_path):
     from app.models import Invoice
     calls,opts,store=setup(monkeypatch,tmp_path,'')
     opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
@@ -201,19 +201,23 @@ def test_scan_uses_selected_vision_before_heavy_ocr(monkeypatch,tmp_path):
         calls.append('vertex')
         return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5'}]),{}
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
-    assert calls==['invoice2data','vertex']
+    assert calls==['invoice2data','paddleocr','docling','vertex']
     assert len(result['invoice']['lines'])==1
     assert result['selected_engine']=='vertex / gemini-test'
+    assert result['readers']['ai']=={'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1,
+                                      'need':'fallback'}
+    assert result['readers']['header']['number']=='ai' and result['readers']['lines'][0]['qty']=='ai'
 
 
-def test_failed_vision_falls_back_once_to_local_readers(monkeypatch,tmp_path):
+def test_failed_vision_after_the_local_readers_keeps_their_result(monkeypatch,tmp_path):
     calls,opts,store=setup(monkeypatch,tmp_path,'')
     opts.ai_fallback=True;opts.model='vision'
     def ai(*args):
         calls.append('ai');raise ValueError('Unavailable')
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
-    assert calls==['invoice2data','ai','paddleocr','docling']
+    assert calls==['invoice2data','paddleocr','docling','ai']
     assert not result['invoice']['lines']
+    assert result['readers']['ai']=={'status':'failed','reason':'Unavailable','calls':1,'need':'fallback'}
 
 
 def test_empty_ai_response_is_not_reported_as_extracted(monkeypatch,tmp_path):
@@ -299,7 +303,7 @@ def ai_on(monkeypatch,tmp_path,native,ai_invoice,engine='paddleocr'):
 
 # The paddleocr choice checks the PDF text first; auto (the default) reads it through invoice2data.
 ENGINES=[('paddleocr',['invoice2data','paddleocr','ai'],'native PDF text'),
-         ('auto',['invoice2data','ai'],'invoice2data')]
+         ('auto',['invoice2data','paddleocr','docling','ai'],'invoice2data')]
 
 
 def invented_code_ai_read(number='AI-1'):
@@ -319,11 +323,16 @@ def test_ai_on_completeness_tie_keeps_the_native_read(monkeypatch,tmp_path,engin
 
 
 @pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
-def test_ai_on_strictly_more_complete_ai_read_is_kept(monkeypatch,tmp_path,engine,calls_expected,native_selected):
+def test_ai_on_a_more_complete_ai_read_fills_gaps_and_flags_disagreements(monkeypatch,tmp_path,engine,calls_expected,
+                                                                          native_selected):
     native=identityless_native_invoice();native['lines'][1]['tax_amount']=None
     result,calls=ai_on(monkeypatch,tmp_path,native,{**complete_native_invoice('AI-1'),'date':'2026-01-15'},engine)
     assert calls==calls_expected
-    assert result['selected_engine']=='openai / stub-model' and result['invoice']['number']=='AI-1'
+    # Per field, never the whole read: the local number stays and the AI's differing one is a review flag.
+    assert result['selected_engine']==native_selected and result['invoice']['number']=='NATIVE-1'
+    assert result['evidence']['header']['number']['review']['other_value']=='AI-1'
+    assert result['invoice']['lines'][1]['gtin']=='0123456789012' and result['readers']['lines'][1]['gtin']=='ai'
+    assert result['readers']['header']['number']!='ai' and result['readers']['ai']['status']=='gap_fill'
 
 
 @pytest.mark.parametrize('engine,calls_expected,native_selected',ENGINES)
@@ -341,5 +350,94 @@ def test_ai_on_identityless_line_with_every_amount_checking_skips_ocr_and_ai(mon
 def test_auto_identity_gap_that_fails_a_check_still_reaches_the_ai(monkeypatch,tmp_path):
     native=identityless_native_invoice();native['net']='15.01'
     result,calls=ai_on(monkeypatch,tmp_path,native,invented_code_ai_read(),'auto')
-    assert calls==['invoice2data','ai'] and result['extraction_note'] is None
+    assert calls==['invoice2data','paddleocr','docling','ai'] and result['extraction_note'] is None
+    # An identity gap the gate did not clear is a gap fill: the AI's code is marked as the AI's, for review.
+    assert result['readers']['ai']['status']=='gap_fill' and result['invoice']['net']=='15.01'
+    assert result['invoice']['lines'][1]['sku']=='INVENTED-9' and result['readers']['lines'][1]['sku']=='ai'
     assert 'line 2 item identity' in result['trace'][0]['reason']
+
+
+def test_ai_evidence_is_carried_beside_the_invoice_not_in_the_trace(monkeypatch,tmp_path):
+    from app.models import Invoice
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
+    def ai(*args):
+        return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5','evidence':'2 x 5.00','page':1}]),{
+            'promptTokenCount':1,'evidence':{'number':{'quote':'Invoice SYN-1','page':1},'po':{'quote':'PO 7','page':1}}}
+    result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
+    assert result['selected_engine']=='vertex / gemini-test'
+    assert result['evidence']['header']=={'number':{'quote':'Invoice SYN-1','page':1,'source':'ai'}}
+    assert result['evidence']['lines']==[{'qty':{'quote':'2 x 5.00','page':1,'source':'ai'},
+                                          'price':{'quote':'2 x 5.00','page':1,'source':'ai'}}]
+    assert next(t for t in result['trace'] if t['engine']=='vertex')['usage']=={'promptTokenCount':1}
+    assert 'header_evidence' not in result['invoice'] and 'evidence' not in result['invoice']
+    assert engines.needs_scan_evidence(result,opts)
+
+
+def test_native_evidence_locates_values_in_the_text_layer(monkeypatch,tmp_path):
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    boxes=[{'text':'NATIVE-1','page':1,'box':[100,50,160,60],'size':[600,800]},
+           {'text':'0123456789012','page':1,'box':[100,90,190,100],'size':[600,800]}]
+    def read(engine,*args):
+        return {'text':'Invoice NATIVE-1 '*20,'boxes':boxes,'invoice':complete_native_invoice()}
+    monkeypatch.setattr(engines,'local_read',read)
+    result=engines.process(tmp_path/'digital.pdf',opts,store,None)
+    number=result['evidence']['header']['number']
+    assert number['source']=='native' and number['page']==1 and number['box'][0]==round(100/600,4)
+    assert result['evidence']['lines'][1]['gtin']['quote']=='0123456789012'
+    assert result['evidence']['lines'][0]=={}
+    assert not engines.needs_scan_evidence(result,opts)
+
+
+def test_verify_scan_asks_the_local_reader_for_text_only_under_the_ocr_slots(monkeypatch,tmp_path):
+    seen=[]
+    def read(engine,path,root,language='en',extra=()):
+        seen.append((engine,tuple(extra)));return {'text':'INV-1','boxes':[{'text':'INV-1'}],'invoice':None}
+    monkeypatch.setattr(engines,'local_read',read)
+    assert engines.verify_scan(tmp_path/'scan.pdf',tmp_path)==([{'text':'INV-1'}],'INV-1')
+    assert seen==[('paddleocr',('--text-only',))]
+
+
+def scan_reads(monkeypatch,tmp_path,paddle_lines,docling_lines):
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    def invoice(lines):
+        return {'number':'SYN-SCAN','date':'2026-01-15','currency':'AED','net':'40.00','tax':'2.00','lines':[
+            {'sku':f'S{n}','qty':'1','uom':'PCE','price':'10.00','net_amount':'10.00','page':1+n//2} for n in range(lines)]}
+    def read(engine,*args):
+        calls.append(engine)
+        found={'paddleocr':paddle_lines,'docling':docling_lines}.get(engine)
+        return {'text':f'{engine} words','boxes':[],'invoice':invoice(found) if found else None}
+    monkeypatch.setattr(engines,'local_read',read)
+    return engines.process(tmp_path/'scan.pdf',opts,store,lambda *args:None),calls
+
+
+def test_a_scan_whose_paddle_lines_do_not_sum_to_the_net_still_reaches_docling(monkeypatch,tmp_path):
+    # A 2-page scan printing 4 lines; the PaddleOCR table read 2 of them, so its lines fall short of the net.
+    result,calls=scan_reads(monkeypatch,tmp_path,2,4)
+    assert calls==['invoice2data','paddleocr','docling']
+    assert result['selected_engine']=='docling' and len(result['invoice']['lines'])==4
+    # The existing score decides: a docling read no better than PaddleOCR's leaves PaddleOCR's read.
+    result,calls=scan_reads(monkeypatch,tmp_path,2,1)
+    assert calls==['invoice2data','paddleocr','docling'] and result['selected_engine']=='paddleocr'
+
+
+def test_a_scan_whose_paddle_lines_reconcile_stops_after_paddle(monkeypatch,tmp_path):
+    result,calls=scan_reads(monkeypatch,tmp_path,4,4)
+    assert calls==['invoice2data','paddleocr'] and result['selected_engine']=='paddleocr'
+    assert result['trace'][-1]['engine']=='docling' and result['trace'][-1]['status']=='skipped'
+
+
+def test_a_later_reader_that_loses_keeps_the_selected_readers_text_and_boxes(monkeypatch,tmp_path):
+    # Docling runs after an unreconciled PaddleOCR read, reads longer text but fewer lines, and loses:
+    # the target check must re-check PaddleOCR's values against PaddleOCR's own text and boxes.
+    calls,opts,store=setup(monkeypatch,tmp_path,'')
+    lines=lambda n:[{'sku':f'S{i}','qty':'1','uom':'PCE','price':'10.00','net_amount':'10.00'} for i in range(n)]
+    reads={'paddleocr':{'text':'paddle page','boxes':[{'text':'paddle box'}],'invoice':{'number':'SYN-SCAN','date':'2026-01-15','currency':'AED','net':'40.00','tax':'2.00','lines':lines(2)}},
+           'docling':{'text':'a much longer docling page text','boxes':[{'text':'docling box'}],'invoice':{'number':'SYN-SCAN','lines':lines(1)}}}
+    def read(engine,*args):
+        calls.append(engine)
+        return reads.get(engine,{'text':'','boxes':[],'invoice':None})
+    monkeypatch.setattr(engines,'local_read',read)
+    result=engines.process(tmp_path/'scan.pdf',opts,store,lambda *args:None)
+    assert calls==['invoice2data','paddleocr','docling'] and result['selected_engine']=='paddleocr'
+    assert result['text']=='paddle page' and result['boxes']==[{'text':'paddle box'}]

@@ -143,6 +143,26 @@ def test_printed_evidence_needs_text_and_equal_value():
     assert status(tc.check_view(v, sources()), "Header", "Document") == ("mismatch", "")
 
 
+def test_an_ai_value_with_no_box_is_not_verified_from_the_page_text():
+    # The AI gap-filled a quantity quoting just '5': the page text holds a '5', but nothing locates it on the page.
+    def quantity(source, reference):
+        cells = line(1)
+        cells["cells"]["Quantity"] = field("5", ev(source, reference, "5", "printed"))
+        return tc.check_view(view(lines=[cells]), sources())
+    unboxed = ev("Invoice (ai)", "page 1", "5", "printed")
+    assert tc.check_evidence("5", unboxed, sources(), None)[0] == tc.VERIFIED
+    r = quantity("Invoice (ai)", "page 1")
+    cell = next(c for c in r["cells"] if c["column"] == "Quantity")
+    assert (cell["status"], cell["sub"], cell["reason"]) == ("unverifiable", "", tc.AI_UNLOCATED_REASON)
+    # An engine value with a box is verified as before, and so is an AI value the reader located with a box.
+    for source in ("Invoice (ocr)", "Invoice (ai)"):
+        b = quantity(source, "page 1 box [1, 2, 3, 4]")
+        assert status(b, "Details", "Quantity", 1) == ("verified", "") and not tc.issues(b)
+    # The existing unverifiable status: one cell to check, and only the review-level issue a confirm accepts.
+    assert r["metric"]["needs_checking"] == 1 and r["metric"]["buckets"]["unverifiable"] == 1
+    assert [(i["code"], i["level"]) for i in tc.issues(r)] == [("Target Unverified", "review")]
+
+
 def test_location_type_master_and_prefix_fallback():
     v = view(fields={"location_type": field("Store (S)", ev("location master", "", "800001", "rule"))})
     assert status(tc.check_view(v, sources()), "Header", "Location Type") == ("mismatch", "")
@@ -198,11 +218,12 @@ def check(result, name):
 def test_arithmetic_at_currency_decimals():
     r = tc.check_view(view(), sources())
     assert check(r, "lines_to_net")["status"] == "pass" and check(r, "lines_to_net")["decimals"] == 3
-    assert check(r, "net_plus_tax_gross")["status"] == "pass"
+    assert check(r, "net_plus_tax_gross")["status"] == "pass" and "lines do not sum" not in r["summary"]
     assert check(r, "tax_breakdown_to_header")["status"] == "pass"
     off = view(lines=[line(1, cost="2.101")])
     r = tc.check_view(off, sources())
     assert check(r, "lines_to_net")["status"] == "fail" and r["holds"]
+    assert r["summary"].endswith(" · lines do not sum to net")  # missing lines cost no cells; say so
     assert any(i["rule"] == "TARGET-LINES_TO_NET" for i in tc.issues(r))
     wrong_tax = view(fields={"tax": field("0.600", ev("Invoice printed total", "page 1", "0.600", "printed"))})
     r = tc.check_view(wrong_tax, sources(text=TEXT + " 0.600"))
@@ -330,3 +351,144 @@ def test_lines_to_net_within_unit_cost_rounding_is_a_warning():
     assert k["status"] == "warning" and "rounding" in k["detail"]
     v = view(fields={"currency": field("SYD", sd), "net": net}, lines=[line(1, cost="0.66", qty="6")])
     assert check(tc.check_view(v, sources()), "lines_to_net")["status"] == "fail"
+
+
+def test_a_printed_date_with_an_ordinal_day_or_a_full_month_name_equals_its_iso_value():
+    assert tc.same("2031-03-03", "3rd March 2031") and tc.same("2031-03-03", "3 Mar 2031")
+    assert tc.same("2031-03-21", "21st-March-2031") and tc.same("2031-03-22", "March 22nd 2031")
+    assert not tc.same("2031-03-04", "3rd March 2031") and not tc.same("2031-03-03", "3rd Marchy 2031")
+
+
+# --------------------------------------------------------------------------- T2(b): missing item lines
+
+
+def missing(result):
+    return [c for c in result["cells"] if isinstance(c["line"], str) and c["line"].startswith("missing ")]
+
+
+def lines_check(result):
+    return next(k for k in result["checks"] if k["check"] == "lines_to_net")
+
+
+def test_missing_lines_from_the_residual_count_as_needs_checking_never_verified():
+    base = tc.check_view(view(), sources())
+    # One read line of 10.500 against a net of 31.500: two lines of the mean read-line net are missing.
+    r = tc.check_view(view(fields={"net": field("31.500", ev("Invoice printed total", "page 1", "31.500", "printed"))}),
+                      sources(text=TEXT + "\nNet 31.500"))
+    k = lines_check(r)
+    assert (k["status"], k["missing_lines"]) == (tc.FAIL, 2)
+    assert k["detail"].endswith("; 2 item line(s) missing or merged")
+    cells = missing(r)
+    assert {c["line"] for c in cells} == {"missing 1", "missing 2"}
+    assert all(c["scope"] == "metric" and c["value"] == "" for c in cells)
+    assert sorted(c["status"] for c in cells if c["line"] == "missing 1") == \
+        ["empty_owner_rule", "missing_line", "missing_line", "missing_line", "missing_line"]
+    m, b = r["metric"], base["metric"]
+    assert m["cells"] - b["cells"] == 10 and m["buckets"]["missing_line"] == 8
+    assert m["verified"] == b["verified"] and m["needs_checking"] - b["needs_checking"] == 8
+    assert r["holds"]
+    codes = [i["code"] for i in tc.issues(r)]
+    assert "Target Unverified" not in codes  # missing cells are not 'filled cells that could not be proven'
+    assert any(i["rule"] == "TARGET-LINES_TO_NET" and "2 item line(s)" in i["message"] for i in tc.issues(r))
+    assert r["summary"].endswith("lines do not sum to net")
+
+
+def test_printed_line_count_wins_over_the_residual():
+    lines = [line(n) for n in range(1, 5)]  # 4 read lines of 10.500 = 42.000
+    text = TEXT + "\nTotal Lines: 13"
+    r = tc.check_view(view(lines=lines, fields={"net": field("99.000", ev("Invoice printed total", "page 1", "99.000",
+                                                                            "printed"))}), sources(text=text))
+    assert lines_check(r)["missing_lines"] == 9  # 13 - 4: a printed count is exact, never capped at 2 x read
+    assert tc.missing_lines(2, tc.Decimal("10"), tc.Decimal("5"), "Total lines: 40") == 38  # printed - read > 2n
+    r = tc.check_view(view(lines=lines[:3] + [line(4)] * 4, fields={"net": field("99.000", ev(
+        "Invoice printed total", "page 1", "99.000", "printed"))}), sources(text=text))
+    assert lines_check(r)["missing_lines"] == 6  # 13 - 7 read lines
+    assert tc.printed_line_count("Total lines: 3\nTotal lines: 4") is None  # two different counts: not known
+
+
+def test_merged_lines_that_over_sum_and_clamps():
+    over = view(fields={"net": field("2.100", ev("Invoice printed total", "page 1", "2.100", "printed"))})
+    assert lines_check(tc.check_view(over, sources()))["missing_lines"] == 1  # |2.1 - 10.5| / 10.5 rounds to 1
+    huge = view(fields={"net": field("999.000", ev("Invoice printed total", "page 1", "999.000", "printed"))})
+    assert lines_check(tc.check_view(huge, sources()))["missing_lines"] == 2  # at most 2 x read lines
+    printed_fewer = tc.check_view(over, sources(text=TEXT + "\nTotal lines: 1"))
+    assert lines_check(printed_fewer)["missing_lines"] == 1  # printed - read <= 0 still counts one
+    free = view(lines=[line(1, cost="0.000")])  # mean read-line net 0
+    assert lines_check(tc.check_view(free, sources()))["missing_lines"] == 1
+    assert tc.missing_lines(3, tc.Decimal("10"), tc.Decimal("-5"), "") == 1
+
+
+def test_pass_warning_and_skipped_add_no_missing_lines():
+    assert not missing(tc.check_view(view(), sources()))  # pass
+    rounded = view(lines=[line(1, cost="2.1", qty="5")],
+                   fields={"net": field("10.520", ev("Invoice printed total", "page 1", "10.520", "printed"))})
+    r = tc.check_view(rounded, sources())
+    assert lines_check(r)["status"] == tc.WARNING and not missing(r) and "missing_lines" not in lines_check(r)
+    r = tc.check_view(view(lines=[]), sources())
+    assert lines_check(r)["status"] == tc.SKIPPED and not missing(r)
+
+
+def test_missing_lines_in_barcode_mode_and_downstream_consumers():
+    v = view(fields={"net": field("21.000", ev("Invoice printed total", "page 1", "21.000", "printed"))})
+    r = tc.check_view(v, sources(), upc="barcode")
+    assert [c["status"] for c in missing(r)] == ["missing_line"] * 5
+    rows = tc.checks_rows([r])
+    assert sum(1 for x in rows if x.get("Line") == "missing 1" and x.get("Detail") == "missing_line") == 5
+    records = tc.confirm_records(r, r)  # read lines are ints, missing lines strings: still sorts
+    assert sum(1 for x in records if x["line"] == "missing 1") == 5 and not any(x["changed"] for x in records)
+    assert tc.log_fields(r)["checks"]["lines_to_net"] == tc.FAIL
+
+
+def test_missing_line_cells_count_only_under_their_status_in_accuracy():
+    now = datetime(2026, 3, 1, tzinfo=timezone.utc)
+    read = tc.check_view(view(), sources())
+    short = tc.check_view(view(fields={"net": field("21.000", ev("Invoice printed total", "page 1", "21.000",
+                                                                 "printed"))}), sources())
+    a = tc.accuracy_summary(tc.confirm_records(read, read, at=now), now=now)["periods"]["all"]
+    b = tc.accuracy_summary(tc.confirm_records(short, short, at=now), now=now)["periods"]["all"]
+    assert b["overall"] == a["overall"] and b["fields"] == a["fields"]
+    assert b["by_status_before"]["missing_line"]["cells"] == 4
+    assert b["by_status_before"]["empty_owner_rule"]["cells"] == a["by_status_before"]["empty_owner_rule"]["cells"] + 1
+
+
+# --------------------------------------------------------------------------- RF-3: printed invoice-level discount
+
+
+def discounted(text):
+    # Two read lines of 10.500 (21.000) against a Header net of 14.700 after a printed discount of 6.300.
+    v = view(lines=[line(1), line(2)],
+             fields={"net": field("14.700", ev("Invoice printed total", "page 1", "14.700", "printed"))})
+    return tc.check_view(v, sources(text=text))
+
+
+def test_lines_equal_net_after_the_printed_invoice_discount_warn_not_fail():
+    r = discounted("SYNTHETIC INVOICE\nTotal 21.000\nDiscount (6.300)\nNet Total 14.700")
+    k = lines_check(r)
+    assert (k["status"], k["detail"]) == (tc.WARNING, "Lines equal the Header net after the printed invoice discount")
+    assert "missing_lines" not in k and not missing(r)
+    assert not any(i["rule"] == "TARGET-LINES_TO_NET" for i in tc.issues(r))
+    assert "lines do not sum to net" not in r["summary"]
+    assert lines_check(discounted("Total 21.0\nLess: DISCOUNT -6.3\nNet 14.700"))["status"] == tc.WARNING
+
+
+def test_discount_match_needs_both_the_labelled_amount_and_the_printed_total():
+    assert lines_check(discounted("Total 21.000\nDiscount 5.000\nNet 14.700"))["status"] == tc.FAIL  # wrong amount
+    assert lines_check(discounted("Total 21.000\nRebate 6.300\nNet 14.700"))["status"] == tc.FAIL  # no label
+    assert lines_check(discounted("Total 21.000\nDiscount\n6.300\nNet 14.700"))["status"] == tc.FAIL  # other line
+    assert lines_check(discounted("Subtotal 20.000\nDiscount 6.300\nNet 14.700"))["status"] == tc.FAIL  # no total
+    # Lines below the net are never a discount.
+    v = view(fields={"net": field("16.800", ev("Invoice printed total", "page 1", "16.800", "printed"))})
+    assert lines_check(tc.check_view(v, sources(text="Total 10.500\nDiscount 6.300")))["status"] == tc.FAIL
+    assert tc.printed_discount("Discount 6.300", tc.Decimal("6.3")) and not tc.printed_discount("6.300", tc.Decimal("6.3"))
+    assert not tc.printed_discount("Discounted 6.300", tc.Decimal("6.3"))  # whole word only
+    assert lines_check(discounted("Total 21.000\nDiscounted price 6.300\nNet 14.700"))["status"] == tc.FAIL
+    assert lines_check(discounted("Total 121.0005\nDiscount 6.300\nNet 14.700"))["status"] == tc.FAIL  # by value
+
+
+def test_discount_precision_is_the_header_net_as_read_at_least_two_decimals():
+    # Net read with 1 decimal: P = 2, so a discount printed as 6.30 matches; lines total 21.00 is printed.
+    v = view(lines=[line(1), line(2)], fields={"net": field("14.7", ev("Invoice printed total", "page 1", "14.7",
+                                                                        "printed"))})
+    assert lines_check(tc.check_view(v, sources(text="Total 21.00\nDiscount 6.30")))["status"] == tc.WARNING
+    assert tc.after_discount("Total 21.00\nDiscount 6.30", [(tc.Decimal("1"), tc.Decimal("21.004"))],
+                             tc.Decimal("14.7"))  # 21.004 quantizes to 21.00 at P = 2

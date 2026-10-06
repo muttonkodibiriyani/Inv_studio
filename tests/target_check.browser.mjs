@@ -81,8 +81,13 @@ const job = {
   provenance: [],
   completeness: 0.8,
   selected_engine: "invoice2data",
-  readers: { header: { number: "native", net: "ocr" }, lines: [{ price: "ai" }] },
-  evidence: { header: { net: { review: { reason: "The AI read a different value here", other_value: "SYNTHETIC" } } } },
+  readers: {
+    ai: { status: "gap_fill", reason: "The local readers left gaps; the AI filled only empty fields", calls: 1 },
+    header: { number: "native", net: "ocr" }, lines: [{ price: "ai" }],
+  },
+  evidence: { header: { net: { review: {
+    reason: "The AI read a different value here", other_value: "SYNTHETIC", other_quote: "Net SYNTHETIC", other_page: 1,
+  } } } },
   validation: {
     ready: false,
     source: "fine_rules",
@@ -164,11 +169,13 @@ try {
     assert.equal(await page.locator(".target-group.verified").evaluate((node) => node.open), false);
     assert.equal(await page.locator("#target-check-checks .target-check-row").count(), 5);
     assert.match(await page.locator("#validation-summary").textContent(), /Target Mismatch: 1 cell\(s\)/);
-    // TRAIN's reader badges and disagreement reasons, never the other reader's value.
+    // The reader per field, why the AI ran, and both values where the readers disagree.
     assert.deepEqual(await page.locator("#rules-fields .reader-badge").allTextContents(), ["native", "ocr"]);
     assert.deepEqual(await page.locator("#rules-lines .reader-badge").allTextContents(), ["ai"]);
     assert.match(await page.locator("#rules-fields").textContent(), /Readers disagree: The AI read a different value here/);
-    assert.doesNotMatch(await page.locator("#rules-fields").textContent(), /SYNTHETIC$/);
+    assert.match(await page.locator("#rules-fields").textContent(), /other read: SYNTHETIC \(page 1\)/);
+    assert.equal(await page.locator("#rules-ai-reader").textContent(),
+      "AI reader: Gap fill · 1 call — The local readers left gaps; the AI filled only empty fields");
     if (shots) await page.screenshot({ path: `${shots}/review-${tag}.png`, fullPage: true });
 
     await page.locator('[aria-label="Review SYNTHETIC-target-b.png"]').click();

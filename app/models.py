@@ -51,9 +51,15 @@ class ProcessingOptions(StrictModel):
     engine: Literal["auto", "invoice2data", "paddleocr", "docling", "ai"] = "auto"
     prefer_native_text: bool = True
     ai_fallback: bool = True
+    # An AI call on an invoice the local engines read completely: flags only, a cost, so off unless chosen.
+    ai_cross_check: bool = False
     provider: Literal["openai", "anthropic", "chatgpt", "claude_local", "vertex"] = "openai"
     model: str = Field(default="", max_length=150, pattern=r"^[A-Za-z0-9._:/-]*$")
     language: Literal["en", "ar", "ch", "fr", "de"] = "en"
+
+
+# Printed header fields an AI reader quotes with a page: the evidence sits beside the invoice, never inside it.
+HEADER_EVIDENCE_FIELDS = ("number", "supplier_name", "buyer_name", "po", "date", "currency", "net", "tax")
 
 
 def extraction_schema():
@@ -66,3 +72,34 @@ def extraction_schema():
     fields["lines"] = {"type": "array", "items": {"type": "object", "properties": line,
         "required": list(line), "additionalProperties": False}}
     return {"type": "object", "properties": fields, "required": list(fields), "additionalProperties": False}
+
+
+def ai_schema():
+    """The extraction schema plus header_evidence: one {quote, page} per printed header field."""
+    schema = extraction_schema()
+    entry = {"type": ["object", "null"], "properties": {"quote": {"type": ["string", "null"]},
+             "page": {"type": ["integer", "null"]}}, "required": ["quote", "page"], "additionalProperties": False}
+    schema["properties"]["header_evidence"] = {"type": ["object", "null"],
+        "properties": {field: dict(entry) for field in HEADER_EVIDENCE_FIELDS},
+        "required": list(HEADER_EVIDENCE_FIELDS), "additionalProperties": False}
+    schema["required"] = list(schema["properties"])
+    return schema
+
+
+def parse_ai_output(data):
+    """Split a reader's JSON (text or dict) into (Invoice, header evidence); evidence never enters the invoice."""
+    import json
+    if isinstance(data, (str, bytes)):
+        data = json.loads(data)
+    if not isinstance(data, dict):
+        raise ValueError("AI output is not an object")
+    raw = data.pop("header_evidence", None)
+    evidence = {}
+    for field in HEADER_EVIDENCE_FIELDS:
+        entry = (raw or {}).get(field) if isinstance(raw, dict) else None
+        quote = entry.get("quote") if isinstance(entry, dict) else None
+        page = entry.get("page") if isinstance(entry, dict) else None
+        if isinstance(quote, str) and quote.strip():
+            evidence[field] = {"quote": quote.strip()[:300],
+                               "page": page if isinstance(page, int) and 1 <= page <= 20 else None}
+    return Invoice.model_validate(data), evidence
