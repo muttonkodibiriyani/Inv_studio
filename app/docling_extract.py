@@ -544,6 +544,10 @@ def _decimal(value: Any) -> str | None:
     text = re.sub(r"^(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+", "", text)
     # OCR may split a thousands separator into its own token: "1 , 105.31".
     text = re.sub(r"(?<=\d)\s*,\s*(?=\d{3}(?:\D|$))", ",", text)
+    # OCR may read a thousands comma as a point: "1.234.56" has no other reading than 1234.56.
+    if re.fullmatch(r"[-+]?\d{1,3}(?:\.\d{3})+\.\d{2}", text):
+        head, _, cents = text.rpartition(".")
+        text = head.replace(".", ",") + "." + cents
     match = re.fullmatch(r"[-+]?(?:\d{1,3}(?:,\d{3})+|\d{1,3}(?: \d{3})+|\d+)(?:\.\d+)?", text)
     if not match:
         return None

@@ -136,3 +136,12 @@ def test_a_packing_list_page_contributes_no_invoice_lines():
     assert _tables_from_measured_words(packing) == []
     retitled = [dict(w, text="Delivery") if w["text"] == "Packing" else w for w in packing]
     assert len(_tables_from_measured_words(retitled)) == 1
+
+
+def test_a_thousands_comma_read_as_a_point_is_still_an_amount():
+    from app.docling_extract import _decimal
+
+    assert _decimal("AED 1.234.56") == "1234.56"
+    assert _decimal("12.345.678.90") == "12345678.90"
+    assert _decimal("1.234") == "1.234"
+    assert _decimal("1.23.45") is None and _decimal("1.234.5") is None and _decimal("1.234.567") is None
