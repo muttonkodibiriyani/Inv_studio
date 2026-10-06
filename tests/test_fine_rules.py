@@ -334,6 +334,21 @@ def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
     assert "POGRN Supplier Exception" in types(other, "SUP-002") and other["status"] == "Review"
 
 
+def test_D74_printed_po_needs_at_least_one_matched_invoice_item_on_the_order():
+    # The printed order of the supplier's code holding none of the matched items is flagged and never filled.
+    elsewhere = run(invoice(po="13000004"), rows=POGRN + [pogrn("13000004", "38091", "5", "70", item="345000099")])
+    assert elsewhere["header"]["Order No"] == "" and elsewhere["header"]["Location"] == ""
+    assert "PO Items Not On Order" in types(elsewhere, "R-024") and elsewhere["status"] == "Review"
+    assert not [x for x in elsewhere["lineage"] if x["target"] == "Order No"]
+    # One of the two matched items on the order is enough for the printed route.
+    one = run(invoice(po="13000004"), rows=POGRN + [pogrn("13000004", "38091", "3", "30")])
+    assert one["header"]["Order No"] == "13000004" and not types(one, "R-024")
+    # No matched invoice item: nothing to check the order against, so it is not filled.
+    unmatched = run(invoice(po="13000001", lines=lines(first={"gtin": None, "sku": None, "description": "Unknown"},
+                                                       second={"gtin": None, "sku": None, "description": "Unknown"})))
+    assert unmatched["header"]["Order No"] == "" and not [x for x in unmatched["lineage"] if x["target"] == "Order No"]
+
+
 def dated(rows, *dates):
     """Synthetic CREATED_DATE cell text per row (the last one repeats)."""
     return [{**row, "CREATED_DATE": dates[min(i, len(dates) - 1)]} for i, row in enumerate(rows)]

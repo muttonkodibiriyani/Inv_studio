@@ -1258,6 +1258,14 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
                           evidence="/".join(sorted({g["EBS Code"] for g in evaluated})), owner="Supplier operations")
             outcome.update(order=None, source=None, candidates=0, status="Printed PO not validated")
             return outcome
+        # Decision 74: the printed order must hold at least one of the invoice's matched items, else it is not filled.
+        if not set(parents) & {text(r.get("RMS_ITEM_ID")) for g in mine for r in g["_rows"]}:
+            run.exception("PO Items Not On Order", f"Printed PO {printed} is a POGRN order of the supplier's "
+                          "6-character EBS code but holds none of the invoice's matched items" if parents else
+                          f"Printed PO {printed}: no invoice item is matched, so the order's items cannot be "
+                          "checked", "R-024", evidence=_refs(rows), owner="Buyer")
+            outcome.update(order=None, source=None, candidates=0, status="Printed PO items not on order")
+            return outcome
         run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO of the supplier's "
                   "6-character EBS code", reference=_refs(rows), evidence_kind=EVIDENCE_PRINTED)
         outcome.update(order=printed, source=FROM_INVOICE, candidates=1, cited=rows)
