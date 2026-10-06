@@ -186,3 +186,14 @@ def test_fallback_lines_never_stand_in_against_a_net_the_ai_filled():
                                                           "fallback")
     assert merged["net"] == "30.00" and header["net"] == "ai"
     assert merged["lines"] == engine["lines"] and "the local lines are kept" in notes[0]
+
+
+def test_a_three_decimal_net_reconciles_quantity_times_price_only_to_its_own_precision():
+    lines = [{"sku": "A", "qty": "2", "price": "5.000", "net_amount": "9.000"}]
+    invoice = Invoice.model_validate({"number": "N-1", "net": "10.005", "lines": lines})
+    gap = [engines.UNRECONCILED + " with net total"]
+    assert engines._open_gaps(invoice, gap) == gap
+    invoice = Invoice.model_validate({"number": "N-1", "net": "10.000", "lines": lines})
+    assert engines._open_gaps(invoice, gap) == []
+    invoice = Invoice.model_validate({"number": "N-1", "net": "10.01", "lines": [{**lines[0], "price": "5.00"}]})
+    assert engines._open_gaps(invoice, gap) == []

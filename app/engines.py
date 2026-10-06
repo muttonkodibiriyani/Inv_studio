@@ -172,7 +172,9 @@ def _open_gaps(invoice,gaps):
     check's basis): a line-amount column read off by a discount or tax column is not a short read."""
     if invoice is None or invoice.net is None or not invoice.lines:return gaps
     if any(l.qty is None or l.price is None for l in invoice.lines):return gaps
-    if abs(sum((l.qty*l.price for l in invoice.lines),Decimal(0))-invoice.net)>Decimal("0.01"):return gaps
+    # Within one unit of the net's printed precision (at least cents), so a three-decimal net must match to 0.001.
+    unit=Decimal(1).scaleb(-max(2,-invoice.net.as_tuple().exponent))
+    if abs(sum((l.qty*l.price for l in invoice.lines),Decimal(0))-invoice.net)>unit:return gaps
     return [x for x in gaps if not x.startswith(UNRECONCILED)]
 
 
