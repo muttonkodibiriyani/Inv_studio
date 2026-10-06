@@ -1075,6 +1075,9 @@ def _well_formed(run, rows, outcome, touched):
     return [r for r in rows if not malformed_row(r)]
 
 
+RMS_ORDER_FORMAT = re.compile(r"[1-9]\d{0,14}")  # owner Order No format (RF-1)
+
+
 def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=()):
     """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
@@ -1090,9 +1093,18 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
                "candidates": 0, "malformed": 0}
     common = (keys, invoice_qty, invoice_value, currency, supplier_site, name_raw, name_master, supplier_site,
               parents)
+    no_po = "No printed PO"
     if printed:
         rows = [r for r in source.pogrn_by_order(printed) if text(r.get("RMS_ORDER_NO")) == printed]
         rows = _well_formed(run, rows, outcome, lambda r: True)
+        if not rows and not RMS_ORDER_FORMAT.fullmatch(printed):
+            # RF-1 (decision 39): a printed LPO that is not an owner order id is never Order No; the strict_6
+            # EBS-code route below decides it as if no PO were printed. The printed value stays in the evidence.
+            run.exception("Missing PO", "Printed PO is not in the POGRN report and the printed LPO is not an RMS "
+                          "order number; Order No follows the supplier's EBS code route", "POG-001", evidence=printed,
+                          owner="Buyer")
+            printed, no_po = "", "No printed RMS order number"
+    if printed:
         if not rows:
             run.exception("Missing PO", "Printed PO is not an RMS_ORDER_NO in the POGRN report (order not found)",
                           "POG-001", evidence=POGRN_REPORT, owner="Buyer")
@@ -1145,12 +1157,12 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
     outcome["validation"] = selected or evaluated
     outcome["candidates"] = len(selected)
     if not selected:
-        run.exception("Missing PO", f"No printed PO and none of the {len(evaluated)} order/location groups under the "
+        run.exception("Missing PO", f"{no_po} and none of the {len(evaluated)} order/location groups under the "
                       "supplier's 6-character EBS code agrees on quantity and value (order not found)", "POG-001",
                       evidence=POGRN_REPORT, owner="Buyer")
         return outcome
     if len(selected) > 1:
-        run.exception("Ambiguous PO", f"No printed PO and {len(selected)} order/location groups under the supplier's "
+        run.exception("Ambiguous PO", f"{no_po} and {len(selected)} order/location groups under the supplier's "
                       "6-character EBS code agree on quantity and value; owner review", "POG-001",
                       evidence=", ".join(f"{g['POGRN RMS Order No']}/{g['POGRN Location ID']}" for g in selected[:20]),
                       owner="Buyer")

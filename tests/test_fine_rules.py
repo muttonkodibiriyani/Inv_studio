@@ -260,6 +260,26 @@ def test_R_020_no_pogrn_rows_for_ebs_code_is_missing_po():
     assert result["header"]["Order No"] == "" and "POGRN Supplier Exception" in types(result, "SUP-002")
 
 
+def test_R_024_printed_lpo_that_is_not_an_owner_order_id_is_never_order_no():
+    def order(po, rows=POGRN):
+        result = run(invoice(po=po), rows=rows)
+        missing = [e for e in result["exceptions"] if e["Engine Type"] in ("Missing PO", "Ambiguous PO")]
+        trace = next((x for x in result["lineage"] if x["target"] == "Order No"), {})
+        return result["header"]["Order No"], trace.get("rule"), [(e["Description"][:40], e["Candidates / Evidence"])
+                                                                 for e in missing]
+
+    lpo = ("Printed PO is not in the POGRN report an", "LPO-A12")
+    # The supplier's EBS-code route still selects the one agreeing order; the printed LPO is only evidence.
+    assert order("LPO-A12") == ("13000001", "POG-001", [lpo])
+    assert order("0123")[0] == "13000001"
+    other = [pogrn("13000002", "38091", "9", "90")]
+    value, rule, missing = order("LPO-A12", rows=other)
+    assert (value, rule) == ("", None) and missing[0] == lpo
+    assert missing[1][0].startswith("No printed RMS order number and none")
+    # A printed owner-format order that is not in POGRN is still the unvalidated R-024 value.
+    assert order("99999999")[:2] == ("99999999", "R-024")
+
+
 def test_R_021_grn_quantity_difference_is_a_warning_on_the_invoice_figures():
     # Owner form 01a10c4d qty_cost_tolerance = invoice_flag: POG-006 and C-11 warn, they do not block.
     result = run(invoice(po="13000001"), rows=both("13000001", "38091", q2="1"))
