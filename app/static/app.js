@@ -20,12 +20,12 @@ function evidenceText(evidence) {
   return (evidence || []).map((entry) => {
     const where = entry.kind === "sheet" ? `owner sheet ${entry.reference}`
       : entry.kind === "table" ? `${entry.source} · ${entry.reference}`
-        : entry.kind === "owner_rule" ? `owner rule · ${entry.reference}`
+        : entry.kind === "owner_rule" ? (/^owner rule\b/i.test(entry.reference || "") ? entry.reference : `owner rule · ${entry.reference}`)
         : entry.kind === "selected" ? `selected by rule, not printed · ${entry.reference}`
         : entry.kind === "owner_entry" ? `entered by reviewer${entry.original ? ` · ${entry.original}` : ""}`
         : entry.kind === "printed" ? `printed on invoice${entry.reference ? ` · ${entry.reference}` : ""}${entry.original ? ` · “${entry.original}”` : ""}`
           : `${entry.source}${entry.reference ? ` · ${entry.reference}` : ""}`;
-    return `${where}${entry.rule ? ` (${entry.rule})` : ""}`;
+    return `${where}${entry.rule && !where.includes(entry.rule) ? ` (${entry.rule})` : ""}`;
   }).join("; ");
 }
 
@@ -281,6 +281,22 @@ function draftValue(job, field, fallback) {
   if (!rulesJob(job)) return fallback;
   return job.rules?.fields?.[field]?.value ?? "";
 }
+
+// On rules jobs the Buyer name shows the owner rule BUYER-NAME value, which the target sheet's Buyer uses; the
+// reader's printed Bill To stays stored and shows as a hint when it differs. Display only, like draftValue().
+function rulesBuyer(job) {
+  const field = rulesJob(job) ? job.rules?.fields?.buyer_name : null;
+  return field && field.value !== null && field.value !== undefined && field.value !== "" ? field : null;
+}
+
+function buyerEvidence(field) {
+  const entry = field.evidence?.[0];
+  if (entry?.kind === "printed") return `printed${entry.reference ? `, ${entry.reference}` : ""}`;
+  if (entry?.kind === "owner_rule") return `owner rule ${entry.rule || "BUYER-NAME"}`;
+  return evidenceText(field.evidence);
+}
+
+const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const HEADER_FIELDS = [
   ["number", "Invoice number", "text"],
@@ -1191,8 +1207,18 @@ function renderInvoiceForm(job) {
     if (type === "number") input.step = "any";
     if (name === "currency") { input.maxLength = 3; input.autocapitalize = "characters"; }
     input.value = invoice[name] ?? "";
+    const buyer = name === "buyer_name" ? rulesBuyer(job) : null;
+    if (buyer) {
+      input.value = buyer.value;
+      input.dataset.rulesValue = buyer.value;
+    }
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
+    if (buyer) {
+      wrapper.append(make("small", "buyer-evidence", buyerEvidence(buyer)));
+      const printed = String(invoice.buyer_name ?? "").trim();
+      if (printed && foldText(printed) !== foldText(buyer.value)) wrapper.append(make("small", "buyer-printed", `printed: ${printed}`));
+    }
     if (name === "date_printed") {
       wrapper.append(make("small", "", invoice.date_printed
         ? "Read-only source evidence. It is never converted automatically."
@@ -1417,6 +1443,11 @@ function collectInvoice() {
       return;
     }
     const value = input.value.trim();
+    // A rules value the reviewer did not edit is display only: the stored reader value is sent back unchanged.
+    if (input.dataset.rulesValue !== undefined && value === input.dataset.rulesValue.trim()) {
+      invoice[name] = app.currentJob?.invoice?.[name] ?? null;
+      return;
+    }
     invoice[name] = value === "" ? null : value;
     if (type === "number" && value !== "") invoice[name] = value;
   });

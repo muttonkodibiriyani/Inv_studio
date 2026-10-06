@@ -434,6 +434,7 @@ input::placeholder, textarea::placeholder { color: #9ba6a3; }
 input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d; box-shadow: var(--focus); }
 .field-wrap { min-width: 0; }
 .field-wrap > span { color: #4a5955; font-size: 11px; font-weight: 700; }
+.field-wrap small { overflow-wrap: anywhere; }
 .field-error input { border-color: #d9938d; background: #fffafa; }
 .field-error-text { display: block; margin-top: 3px; color: var(--danger); font-size: 9px; }
 
