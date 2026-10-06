@@ -22,6 +22,9 @@ class Line(StrictModel):
     tax_amount: Decimal | None = None
     evidence: str | None = None
     page: int | None = Field(default=None, ge=1, le=20)
+    # A complete printed barcode that fails the GTIN check digit, digits only; gtin stays empty.
+    # Set by the reader, never by an AI: it is not in the extraction schema.
+    barcode_unchecked: str | None = None
 
 
 class Invoice(StrictModel):
@@ -70,7 +73,7 @@ def extraction_schema():
     # values are strings so digits survive JSON decoding without float rounding.
     nullable = lambda: {"type": ["string", "null"]}
     fields = {k: nullable() for k in Invoice.model_fields if k != "lines"}
-    line = {k: nullable() for k in Line.model_fields if k not in ("page", "part_code")}
+    line = {k: nullable() for k in Line.model_fields if k not in ("page", "part_code", "barcode_unchecked")}
     line["page"] = {"type": ["integer", "null"]}
     fields["lines"] = {"type": "array", "items": {"type": "object", "properties": line,
         "required": list(line), "additionalProperties": False}}
@@ -108,4 +111,5 @@ def parse_ai_output(data):
     for line in data.get("lines") or []:
         if isinstance(line, dict):
             line.pop("part_code", None)  # a local table fact; an AI never supplies it
+            line.pop("barcode_unchecked", None)  # the reader's verdict on a printed code; an AI never sets it
     return Invoice.model_validate(data), evidence
