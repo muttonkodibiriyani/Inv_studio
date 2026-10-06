@@ -576,7 +576,7 @@ def create_app(data_dir=None):
         if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before downloading.")
         invoice=Invoice.model_validate(j["invoice"])
         if not invoice.number and not invoice.lines:raise HTTPException(409,"No extracted invoice fields are available")
-        content=extraction_workbook(invoice,j["filename"],j["revision"])
+        content=extraction_workbook(invoice,j["filename"],j["revision"],fresh_rules(j))
         store.audit("extraction_draft_downloaded",{"job_id":jid,"revision":j["revision"],"approved":False,"line_items":len(invoice.lines)})
         return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="EXTRACTION_REVIEW_ONLY_{jid[:8]}.xlsx"'})
 
@@ -751,7 +751,7 @@ def create_app(data_dir=None):
                 if j["revision"]!=request.revision:raise HTTPException(409,"A selected invoice changed. Refresh before downloading.")
                 invoice=Invoice.model_validate(j["invoice"])
                 if not invoice.number and not invoice.lines:raise HTTPException(409,"A selected invoice has no extracted fields. Complete it before downloading.")
-                entries.append((invoice,j["filename"],j["revision"]))
+                entries.append((invoice,j["filename"],j["revision"],fresh_rules(j)))
                 snapshots.append({"job_id":j["id"],"revision":j["revision"],"transaction_number":len(entries),"line_items":len(invoice.lines)})
         content=extraction_batch_workbook(entries)
         store.audit("extraction_batch_downloaded",{"invoices":snapshots,"approved":False,"count":len(entries)})
