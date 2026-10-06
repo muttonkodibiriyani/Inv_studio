@@ -862,6 +862,12 @@ function formatSize(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
+// selected_engine is an engine name, or "<provider> / <model>" for an AI read: the model ID shows as typed, as in the trace.
+function engineLabel(value) {
+  const [engine, ...model] = String(value || "").split(" / ");
+  return `${humanize(engine)}${model.length ? ` · ${model.join(" / ")}` : ""}`;
+}
+
 function humanize(value) {
   const names = {
     invoice2data: "invoice2data",
@@ -1150,7 +1156,7 @@ function renderSelectedJob(job) {
   $("#review-panel").hidden = false;
   $("#selected-filename").textContent = job.filename;
   $("#selected-file-icon").textContent = (job.filename.split(".").pop() || "DOC").slice(0, 4).toUpperCase();
-  const engine = job.selected_engine && job.selected_engine !== "pending" ? humanize(job.selected_engine) : "Engine pending";
+  const engine = job.selected_engine && job.selected_engine !== "pending" ? engineLabel(job.selected_engine) : "Engine pending";
   $("#selected-meta").textContent = `${engine}${job.created_at ? ` · Added ${formatDate(job.created_at)}` : ""}`;
   const processing = ["queued", "processing"].includes(job.status);
   const emptyExtraction = !processing && !hasStructuredInvoiceData(job);
@@ -1456,7 +1462,7 @@ function renderTrace(job) {
   });
   const chosen = trace.findLast?.((entry) => entry && typeof entry === "object" && entry.status === "extracted") || trace.find((entry) => entry && typeof entry === "object" && entry.status === "extracted");
   $("#trace-summary").textContent = job.selected_engine && job.selected_engine !== "none"
-    ? `Chosen: ${humanize(job.selected_engine)}`
+    ? `Chosen: ${engineLabel(job.selected_engine)}`
     : chosen ? `Fields returned by ${humanize(chosen.engine)}${chosen.model ? ` · ${chosen.model}` : ""}` : "How this result was produced";
 
   const provenance = $("#provenance-list");
@@ -2008,9 +2014,29 @@ function setupModelPicker(prefix) {
   status.setAttribute("role", "status");
   input.after(status);
   select.addEventListener("change", () => {
-    if (select.value) input.value = select.value;
+    if (select.value === OTHER_MODEL) {
+      input.hidden = false;
+      input.focus();
+      input.select();
+    } else {
+      if (select.value) input.value = select.value;
+      syncModelPicker(prefix);
+    }
     if (prefix === "upload") updateUploadReadiness();
   });
+}
+
+// A model the provider lists shows once, chosen in the list; the model ID box opens for "Other model ID…", for an
+// ID the list does not have, and whenever no list is loaded.
+const OTHER_MODEL = "__other_model__";
+function syncModelPicker(prefix) {
+  const input = $(`#${prefix}-model`);
+  const select = $(`#${prefix}-model-choices`);
+  if (!input || !select) return;
+  const offered = !select.disabled && [...select.options].some((option) => option.value === OTHER_MODEL);
+  const listed = offered && Boolean(input.value) && [...select.options].some((option) => option.value === input.value && option.value !== OTHER_MODEL);
+  if (offered) select.value = listed ? input.value : input.value ? OTHER_MODEL : "";
+  input.hidden = listed;
 }
 
 async function loadProviderModels(prefix, { providerChanged = false, force = false } = {}) {
@@ -2026,9 +2052,11 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
   if (!app.state?.connections?.[provider]) {
     select.replaceChildren(new Option("Connect this provider first", ""));
     status.textContent = `${humanize(provider)} is not connected. Open Engines & AI to connect it.`;
+    syncModelPicker(prefix);
     if (prefix === "upload") updateUploadReadiness();
     return;
   }
+  syncModelPicker(prefix);
   status.textContent = `Loading models from ${humanize(provider)}…`;
   try {
     let cached = app.providerModels[provider];
@@ -2043,11 +2071,11 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
     renderConnections();
     select.replaceChildren(new Option(models.length ? "Choose a model" : "No models returned", ""));
     models.forEach((model) => select.add(new Option(model.name && model.name !== model.id ? `${model.name} · ${model.id}` : model.id, model.id)));
+    if (models.length) select.add(new Option("Other model ID…", OTHER_MODEL));
     if (!input.value && models.length) {
       const saved = app.state.settings?.provider === provider ? app.state.settings.model : "";
       input.value = models.find((model) => model.id === saved)?.id || models[0].id;
     }
-    select.value = models.some((model) => model.id === input.value) ? input.value : "";
     select.disabled = !models.length;
     status.textContent = models.length ? `${models.length} models available. Check the model before confirming processing.` : "The provider returned no model choices. Check account access or enter a supported model ID.";
   } catch (error) {
@@ -2058,6 +2086,7 @@ async function loadProviderModels(prefix, { providerChanged = false, force = fal
     select.replaceChildren(new Option("Models could not be loaded", ""));
     status.textContent = error.message;
   } finally {
+    syncModelPicker(prefix);
     if (prefix === "upload") updateUploadReadiness();
   }
 }
@@ -2636,10 +2665,12 @@ function applySettings() {
   $("#settings-provider").value = settings.provider;
   $("#settings-model").value = settings.model;
   $("#settings-ai-fallback").checked = settings.ai_fallback !== false;
+  syncModelPicker("settings");
   if (!$("#upload-dialog").open) {
     $("#upload-provider").value = settings.provider;
     $("#upload-model").value = settings.model;
     $("#upload-ai-fallback").checked = settings.ai_fallback !== false;
+    syncModelPicker("upload");
   }
 }
 
@@ -2912,13 +2943,16 @@ function bindEvents() {
   $("#retry-job").addEventListener("click", () => {
     const rawOptions = app.currentJob?.options || app.state.settings;
     const options = { ...rawOptions, ...offeredAISettings(rawOptions) };
-    $("#retry-engine").value = options.engine || "auto";
+    // A job read with Engine "AI provider" re-reads with Auto and AI fallback: local readers first, then the AI for
+    // what they leave open. The reviewer can still choose AI provider here.
+    const aiOnly = options.engine === "ai";
+    $("#retry-engine").value = aiOnly ? "auto" : options.engine || "auto";
     $("#retry-language").value = options.language || "en";
     const preferNativeText = app.nativeTextPreferenceExplicit
       ? app.preferNativeText
       : options.prefer_native_text !== false;
     setNativeTextPreference(preferNativeText, { remember: false });
-    $("#retry-ai-fallback").checked = options.ai_fallback !== false;
+    $("#retry-ai-fallback").checked = aiOnly || options.ai_fallback !== false;
     $("#retry-provider").value = options.provider || "openai";
     $("#retry-model").value = options.model || "";
     $("#retry-dialog").showModal();

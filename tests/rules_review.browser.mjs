@@ -66,8 +66,10 @@ function rulesJob(id, buyerEvidence, readerBuyer) {
 }
 
 // A: the reader left Bill To empty and the owner entity is printed on page 2.
-// B: the reader read another company as Bill To; Buyer Name comes from the owner rule.
-const jobs = [rulesJob("a", printed("page 2", OWNER), null), rulesJob("b", ownerRule, "Synthetic Other Buyer Co")];
+// B: the reader read another company as Bill To; Buyer Name comes from the owner rule. B was read with Engine "AI provider".
+const AI_MODEL = "gemini-synthetic-flash";
+const aiReadJob = (job) => ({ ...job, selected_engine: `vertex / ${AI_MODEL}`, options: { ...job.options, engine: "ai", provider: "vertex", model: AI_MODEL } });
+const jobs = [rulesJob("a", printed("page 2", OWNER), null), aiReadJob(rulesJob("b", ownerRule, "Synthetic Other Buyer Co"))];
 
 // C: R-006 left three supplier codes for the printed supplier name.
 const PICK_ID = "rules-review-c";
@@ -164,6 +166,18 @@ try {
     assert.equal((await save()).invoice.buyer_name, "Synthetic Edited Buyer", "the reviewer's edit was not saved");
     if (shots) await buyerWrap.screenshot({ path: `${shots}/buyer-owner-rule-${tag}.png` });
 
+    // The AI read names its provider and model as in the trace, and Reprocess starts it on Auto with AI fallback.
+    assert.match(await page.locator("#selected-meta").textContent(), new RegExp(`^Google Cloud AI · ${AI_MODEL} · Added `));
+    await page.locator("#retry-job").click();
+    await page.locator("#retry-dialog").waitFor({ state: "visible" });
+    assert.equal(await page.locator("#retry-engine").inputValue(), "auto", "Reprocess kept Engine AI provider for an AI-read job");
+    assert.equal(await page.locator("#retry-ai-fallback").isChecked(), true, "Reprocess dropped the AI fallback for an AI-read job");
+    await page.locator("#retry-engine").selectOption("ai");
+    assert.equal(await page.locator("#retry-engine").inputValue(), "ai");
+    if (shots) await page.locator("#retry-dialog").screenshot({ path: `${shots}/reprocess-ai-read-${tag}.png` });
+    await page.keyboard.press("Escape");
+    await page.locator("#retry-dialog").waitFor({ state: "hidden" });
+
     const sitePanel = page.locator("#rules-fields dt", { hasText: "Supplier site" }).locator("xpath=following-sibling::dd[1]");
     const options = sitePanel.locator(".supplier-pick-option");
     const pressed = () => options.evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-pressed")));
@@ -218,7 +232,7 @@ try {
     assert.deepEqual(consoleErrors, []);
     await page.close();
   }
-  console.log(`Rules review browser test passed (buyer display, supplier-code pick; synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
+  console.log(`Rules review browser test passed (buyer display, supplier-code pick, AI-read engine label and Reprocess prefill; synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
 } finally {
   await browser.close();
 }
