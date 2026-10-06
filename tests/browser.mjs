@@ -760,7 +760,8 @@ try {
   const resavePromise = page.waitForResponse(responseMatches("POST", `/api/jobs/${thirdJob.id}/review`), { timeout });
   await page.locator("#save-review").click();
   await assertOk(await resavePromise, "Explicit save before review batch");
-  assert.equal(await page.locator("#review-save-state").textContent(), "Saved");
+  // The response resolves on its headers, before the app reads the body and re-renders the save state.
+  await waitFor("the explicit save to render Saved", async () => await page.locator("#review-save-state").textContent() === "Saved");
 
   const beforeReviewBatchSecond = await (await context.request.get(`${baseURL}/api/jobs/${secondJob.id}`)).json();
   const beforeReviewBatchThird = await (await context.request.get(`${baseURL}/api/jobs/${thirdJob.id}`)).json();
