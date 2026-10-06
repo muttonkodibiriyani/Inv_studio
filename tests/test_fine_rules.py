@@ -356,6 +356,41 @@ def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     assert split["header"]["Order No"] == "" and "Ambiguous PO" in types(split, "POG-001")
 
 
+def ordered(order, location, o1="3", o2="2", q="0", c="0", **kw):
+    """One order/location carrying both synthetic invoice items, ordered but not received (decisions 68/69)."""
+    return [{**row, "QTY_ORDERED": qty} for row, qty in zip(both(order, location, q, c, q, c, **kw), (o1, o2))]
+
+
+def test_POG_008_unreceived_order_holding_every_item_at_the_ordered_qty_only_after_none_selected():
+    result = run(rows=ordered("13000005", "38091", ref=7))
+    assert result["header"]["Order No"] == "13000005" and result["header"]["Location"] == "38091"
+    trace = next(x for x in result["lineage"] if x["target"] == "Order No")
+    assert trace["rule"] == "POG-008" and trace["evidence_kind"] == fr.EVIDENCE_ORDERED_NOT_RECEIVED
+    assert trace["source"] == "POGRN order matched on items and ordered qty, not received: RMS_ORDER_NO"
+    assert "POGRN!7" in trace["reference"] and not trace["source"].startswith("Selected by POG-001")
+    location = next(x for x in result["lineage"] if x["target"] == "Location")
+    assert location["source"] == "POGRN order matched on items and ordered qty, not received: LOCATION"
+    assert "Order Not Received" in types(result, "POG-008") and "Missing PO" not in types(result, "POG-001")
+    assert result["po"]["source"] == fr.ORDERED_NOT_RECEIVED and result["workbench"][0]["PO Source"] == fr.ORDERED_NOT_RECEIVED
+    assert result["status"] != "Approved"
+    # Decision 16 first: an agreeing order is selected and the unreceived one is never looked at.
+    agreeing = run(rows=POGRN + ordered("13000005", "38091"))
+    assert agreeing["header"]["Order No"] == "13000001" and not types(agreeing, "POG-008")
+    # Any matched item whose ordered quantity differs, or is missing, leaves it empty.
+    for rows in (ordered("13000005", "38091", o2="3"), ordered("13000005", "38091", o2=None)):
+        missed = run(rows=rows)
+        assert missed["header"]["Order No"] == "" and "Missing PO" in types(missed, "POG-001")
+        assert not types(missed, "POG-008")
+    # A second group holding every item is not unique; one holding a single item does not count.
+    two = run(rows=ordered("13000005", "38091") + ordered("13000006", "38091"))
+    assert two["header"]["Order No"] == "" and not types(two, "POG-008")
+    partial = run(rows=ordered("13000005", "38091") + [{**pogrn("13000006", "38091", "0", "0"), "QTY_ORDERED": "3"}])
+    assert partial["header"]["Order No"] == "13000005"
+    # An unknown invoice quantity on a matched line never fills.
+    unknown = run(invoice(lines=lines(second={"qty": None})), rows=ordered("13000005", "38091"))
+    assert unknown["header"]["Order No"] == "" and not types(unknown, "POG-008")
+
+
 # --------------------------------------------------------------------------- owner POGRN rules
 
 

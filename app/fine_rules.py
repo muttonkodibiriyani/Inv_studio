@@ -59,6 +59,10 @@ BUYER_RULE = "BUYER-NAME"
 BUYER_RULE_EVIDENCE = "owner rule BUYER-NAME (2026-10-05)"
 EVIDENCE_PRINTED, EVIDENCE_OWNER_RULE = "printed", "owner_rule"
 EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not printed on the invoice
+# Decisions 68/69/73: Order No from the one order holding every matched item at the ordered quantity, not received.
+EVIDENCE_ORDERED_NOT_RECEIVED = "ordered_not_received"
+ORDERED_NOT_RECEIVED = "POGRN ordered, not received"
+ORDERED_NOT_RECEIVED_SOURCE = "POGRN order matched on items and ordered qty, not received"
 # Decision 41: the owner's pick among the R-006 supplier-code candidates; cells resolved through it say so.
 OWNER_PICK, EVIDENCE_OWNER_ENTRY = "OWNER-PICK", "owner_entry"
 OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", "Market", "Currency", "Tax Code",
@@ -1178,13 +1182,36 @@ def _well_formed(run, rows, outcome, touched):
 RMS_ORDER_FORMAT = re.compile(r"[1-9]\d{0,14}")  # owner Order No format (RF-1)
 
 
-def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=()):
+def _ordered_not_received(evaluated, invoiced):
+    """POG-008 (decisions 68, 69, 73), only after POG-001 selected none: the one order/location group under the
+    supplier's 6-character EBS code that holds every matched invoice item, when its QTY_ORDERED equals the invoice
+    quantity on every matched item. ``invoiced`` is ITEM_PARENT -> invoice quantity; any unknown quantity, a second
+    group holding the items, or one unequal item leaves it None. Never a tolerance and never the nearest group."""
+    if not invoiced or None in invoiced.values():
+        return None
+    holding = [g for g in evaluated if g["Items Check"] == "Pass"]
+    if len(holding) != 1 or not holding[0]["_identity"]:
+        return None
+    ordered = defaultdict(Decimal)
+    for row in holding[0]["_rows"]:
+        parent = text(row.get("RMS_ITEM_ID"))
+        if parent in invoiced:
+            qty = to_decimal(row.get("QTY_ORDERED"))
+            if qty is None:
+                return None
+            ordered[parent] += qty
+    return holding[0] if all(ordered[p] == q for p, q in invoiced.items()) else None
+
+
+def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, name_raw, name_master, parents=(),
+               invoiced=None):
     """POG-001: the printed PO first (an exact RMS_ORDER_NO), else the SUP-002 6-character EBS link alone.
 
     Owner form 01a10c4d order_link = strict_6: Order No is the printed order under the supplier's 6-character EBS
     code, or (decision 16) the only order/location under that code whose quantity and value agree. Items never
     find an order.
-    Zero or several candidates leave it empty and flagged; never the closest.
+    Zero or several candidates leave it empty and flagged; never the closest. With zero, POG-008 may still take the
+    one order holding every matched item at its ordered quantity (not received), always for owner review.
     """
     invoice = run.invoice
     printed = text(invoice.po)
@@ -1256,6 +1283,20 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
     selected = [g for g in evaluated if g["_checks"]["qty"] and g["_checks"]["value"]]
     outcome["validation"] = selected or evaluated
     outcome["candidates"] = len(selected)
+    if not selected and (group := _ordered_not_received(evaluated, invoiced)):
+        derived = group["POGRN RMS Order No"]
+        run.exception("Order Not Received", f"{no_po} and none of the {len(evaluated)} order/location groups under "
+                      "the supplier's 6-character EBS code agrees on quantity and value. Order "
+                      f"{derived} is the only one holding every matched invoice item and its QTY_ORDERED equals the "
+                      "invoice quantity on every matched item, but it is not received, so quantity and value cannot be "
+                      "checked; owner review", "POG-008", evidence=group["POGRN Row Reference"], owner="Buyer")
+        run.trace("Order No", derived, "POG-008", f"{ORDERED_NOT_RECEIVED_SOURCE}: RMS_ORDER_NO",
+                  reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN,
+                  evidence_kind=EVIDENCE_ORDERED_NOT_RECEIVED)
+        group.update({"Derived PO Number": derived, "PO Source": ORDERED_NOT_RECEIVED})
+        outcome.update(order=derived, source=ORDERED_NOT_RECEIVED, group=group, validation=[group],
+                       status="Ordered, not received")
+        return outcome
     if not selected:
         run.exception("Missing PO", f"{no_po} and none of the {len(evaluated)} order/location groups under the "
                       "supplier's 6-character EBS code agrees on quantity and value (order not found)", "POG-001",
@@ -1592,7 +1633,13 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     invoice_value, value_source = _line_value(invoice)
     raw_name = candidates[0]["name"] if candidates else None
     parents = {m["parent"] for m in matches if m["status"] == "Matched"}
-    po = resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, raw_name, master_name, parents)
+    invoiced = {}
+    for m, line in zip(matches, invoice.lines):
+        if m["status"] == "Matched":
+            prior = invoiced.get(m["parent"], Decimal(0))
+            invoiced[m["parent"]] = None if prior is None or line.qty is None else prior + line.qty
+    po = resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, raw_name, master_name, parents,
+                    invoiced)
     group = po["group"]
     if family and not supplier_site:
         if group:
@@ -1619,7 +1666,9 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         if location and not market:
             run.exception("Market Mapping", "No approved market for the accepted location", "POG-004",
                           evidence=group["Exception Reason"], owner="Business")
-        run.trace("Location", location, "ALG-011", "Accepted POGRN LOCATION", reference=group["POGRN Row Reference"])
+        run.trace("Location", location, "ALG-011", f"{ORDERED_NOT_RECEIVED_SOURCE}: LOCATION"
+                  if group["PO Source"] == ORDERED_NOT_RECEIVED else "Accepted POGRN LOCATION",
+                  reference=group["POGRN Row Reference"])
         run.trace("Location Type", loc_type, "ALG-014" if group["_location_type"].get("source") == "location master"
                   else ("ALG-012" if loc_type == WAREHOUSE else "ALG-013"), group["_location_type"].get("source", ""),
                   original=location)
