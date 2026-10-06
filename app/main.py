@@ -312,6 +312,12 @@ def create_app(data_dir=None):
     def fresh_rules(j):
         r=j.get("rules")
         return r if r and r.get("revision")==j["revision"] else None
+    def mark_exported(j,**fields):
+        """The export bumps the revision; rules that were current for the exported revision stay current, so the draft
+        and the target check keep reading what was exported. Nothing is recomputed on an exported job; stale stays stale."""
+        current=fresh_rules(j) is not None
+        j.update(status="exported",revision=j["revision"]+1,**fields)
+        if current:j["rules"]={**j["rules"],"revision":j["revision"]}
     def ensure_rules(jid):
         """Re-run the rules when the invoice revision, mapping tables or catalog changed."""
         if demo_references:return
@@ -675,7 +681,7 @@ def create_app(data_dir=None):
                          "rules_status":j["rules"]["status"],"owner_accepted":accepted,"owner_entries":j.get("owner_entries") or {},
                          "allocations":[],"evidence":evidence.get(1,{}),"target_check":target[1]}
             c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(eid,key(inv),jid,json.dumps(receipt),content))
-            j.update(status="exported",export_id=eid,revision=j["revision"]+1);store.job(jid,j,c);store.audit("exported",audit_receipt(receipt),c)
+            mark_exported(j,export_id=eid);store.job(jid,j,c);store.audit("exported",audit_receipt(receipt),c)
         learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
@@ -791,7 +797,7 @@ def create_app(data_dir=None):
             c.execute("INSERT INTO batches VALUES (?,?,?)",(batch_id,json.dumps([r for _,r in selected]),content))
             for j,receipt in selected:
                 c.execute("INSERT INTO exports VALUES (?,?,?,?,?)",(receipt["id"],receipt["invoice_key"],j["id"],json.dumps(receipt),content))
-                j.update(status="exported",export_id=receipt["id"],batch_id=batch_id,transaction_number=receipt["transaction_number"],revision=j["revision"]+1)
+                mark_exported(j,export_id=receipt["id"],batch_id=batch_id,transaction_number=receipt["transaction_number"])
                 store.job(j["id"],j,c);store.audit("exported",audit_receipt(receipt),c)
         for j,_ in selected:learn_later(j)
         return {"id":batch_id,"url":"/api/batches/"+batch_id,"count":len(selected)}
