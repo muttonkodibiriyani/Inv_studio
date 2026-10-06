@@ -505,6 +505,7 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .rules-fields dd small, .rules-lines small { display: block; color: var(--muted); font-size: 10px; }
 .rules-entry { display: block; width: 100%; max-width: 220px; margin-top: 4px; padding: 4px 6px; font: inherit; font-size: 11px; border: 1px solid var(--danger); border-radius: 6px; }
 .rules-flagged { color: var(--danger); font-weight: 700; }
+.review-note { display: block; margin-top: 2px; font-size: 11px; line-height: 1.3; }
 .supplier-pick { margin-top: 6px; }
 .supplier-pick-options { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; margin-top: 5px; }
 .supplier-pick-option { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; color: var(--ink); background: var(--paper); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
