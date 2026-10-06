@@ -75,6 +75,13 @@ def test_export_appends_the_checks_sheet_and_the_receipt_reports_accuracy(produc
     rows = list(book["Checks"].values)
     assert rows[0][:7] == ("Transaction Number", "Sheet", "Column", "Line", "Value", "Status", "Detail")
     assert {r[1] for r in rows[1:]} >= {"Header", "Tax_Breakdown", "Details", "(check)", "(workbook)"}
+    # Decision 76: Order Date is one evidence-only Checks row per invoice, never a template column.
+    dated = [dict(zip(rows[0], r)) for r in rows[1:] if r[1] == "(evidence)"]
+    assert [(d["Transaction Number"], d["Column"], d["Rule"]) for d in dated] == [(1, "Order Date", "POG-009"),
+                                                                                    (1, "Receipt Date", "POG-010")]
+    assert dated[0]["Status"] in {"filled", "empty_flagged"} and "decision 76" in dated[0]["Detail"]
+    assert dated[0]["Evidence Source"].endswith(": CREATED_DATE")
+    assert all("Order Date" not in [c.value for c in book[name][1]] for name in ("Header", "Tax_Breakdown", "Details"))
     exported_event = [e for e in client.get("/api/jobs/job-1/audit").json() if e["event"] == "exported"][0]["payload"]
     target = exported_event["target_check"]
     assert target["summary"].startswith("Target sheet:") and target["workbook_checks"]["joins"] == "pass"

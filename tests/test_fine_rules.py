@@ -334,6 +334,97 @@ def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
     assert "POGRN Supplier Exception" in types(other, "SUP-002") and other["status"] == "Review"
 
 
+def test_D74_printed_po_needs_at_least_one_matched_invoice_item_on_the_order():
+    # The printed order of the supplier's code holding none of the matched items is flagged and never filled.
+    elsewhere = run(invoice(po="13000004"), rows=POGRN + [pogrn("13000004", "38091", "5", "70", item="345000099")])
+    assert elsewhere["header"]["Order No"] == "" and elsewhere["header"]["Location"] == ""
+    assert "PO Items Not On Order" in types(elsewhere, "R-024") and elsewhere["status"] == "Review"
+    assert not [x for x in elsewhere["lineage"] if x["target"] == "Order No"]
+    # One of the two matched items on the order is enough for the printed route.
+    one = run(invoice(po="13000004"), rows=POGRN + [pogrn("13000004", "38091", "3", "30")])
+    assert one["header"]["Order No"] == "13000004" and not types(one, "R-024")
+    # No matched invoice item: nothing to check the order against, so it is not filled.
+    unmatched = run(invoice(po="13000001", lines=lines(first={"gtin": None, "sku": None, "description": "Unknown"},
+                                                       second={"gtin": None, "sku": None, "description": "Unknown"})))
+    assert unmatched["header"]["Order No"] == "" and not [x for x in unmatched["lineage"] if x["target"] == "Order No"]
+
+
+def dated(rows, *dates):
+    """Synthetic CREATED_DATE cell text per row (the last one repeats)."""
+    return [{**row, "CREATED_DATE": dates[min(i, len(dates) - 1)]} for i, row in enumerate(rows)]
+
+
+def test_D76_order_date_is_the_cited_rows_created_date_text_only_when_constant():
+    # Selected route: the cited rows' one CREATED_DATE, kept as the cell's exact text, evidence only.
+    picked = run(rows=dated(both("13000003", "38091"), "2026-01-02 00:00:00"))
+    assert picked["header"]["Order No"] == "13000003" and "Order Date" not in picked["header"]
+    date = picked["order_date"]
+    assert date["value"] == "2026-01-02 00:00:00" and date["rule"] == "POG-009" and date["reason"] == ""
+    assert date["evidence_kind"] == fr.EVIDENCE_ORDER_DATE and date["source"].endswith(": CREATED_DATE")
+    assert date["reference"] == next(x for x in picked["lineage"] if x["target"] == "Order No")["reference"]
+    trace = next(x for x in picked["lineage"] if x["target"] == "Order Date")
+    assert trace["value"] == "2026-01-02 00:00:00" and trace["rule"] == "POG-009"
+    # Printed route: every row of the printed order is cited, so every one must agree.
+    printed = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00"))
+    assert printed["order_date"]["value"] == "2026-01-03 00:00:00"
+    # Differing or blank dates on the cited rows: empty with the reason, never RECEIPT_DATE, status unchanged.
+    differs = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00", "2026-01-04 00:00:00"))
+    assert differs["order_date"]["value"] is None and "differs" in differs["order_date"]["reason"]
+    assert differs["status"] == printed["status"] and types(differs) == types(printed)
+    undated = run(invoice(po="13000001"))  # no CREATED_DATE column: RECEIPT_DATE is never used
+    assert undated["order_date"]["value"] is None and "blank" in undated["order_date"]["reason"]
+    assert not [x for x in differs["lineage"] + undated["lineage"] if x["target"] == "Order Date"]
+    # A blank CREATED_DATE cell makes the row malformed: it is never cited, so it never gives the date.
+    blank = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00", ""))
+    assert "Malformed Source Row" in types(blank, "POG-001") and blank["order_date"]["reference"] == "POGRN!2"
+    # No order filled: nothing is cited.
+    missing = run(rows=[pogrn("13000001", "38091", "6", "70")])
+    assert missing["order_date"]["value"] is None and missing["order_date"]["reference"] == ""
+    unvalidated = run(invoice(po="13999999"), rows=dated(POGRN, "2026-01-03 00:00:00"))  # R-024: not in POGRN
+    assert unvalidated["header"]["Order No"] == "13999999" and unvalidated["order_date"]["value"] is None
+    assert "not a POGRN order" in unvalidated["order_date"]["reason"]
+    # Ordered, not received (POG-008) cites its holding group.
+    unreceived = run(rows=dated(ordered("13000005", "38091", ref=7), "2026-01-05 00:00:00"))
+    assert unreceived["header"]["Order No"] == "13000005" and unreceived["order_date"]["value"] == "2026-01-05 00:00:00"
+
+
+def received(rows, created, *receipts):
+    """Synthetic CREATED_DATE and RECEIPT_DATE cell text per row (the last receipt repeats)."""
+    return [{**row, "CREATED_DATE": created, "RECEIPT_DATE": receipts[min(i, len(receipts) - 1)]}
+            for i, row in enumerate(dated(rows, created))]
+
+
+def test_D83_receipt_date_check_only_flags_never_fills_or_changes_the_status():
+    # The invoice is dated 2026-01-15. The receipt text is listed exactly; within the limits there is no flag.
+    plain = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-01-17T00:00:00"))
+    check = plain["receipt_date"]
+    assert check["value"] == "2026-01-17T00:00:00" and check["flag"] is None and check["rule"] == "POG-010"
+    assert check["evidence_kind"] == fr.EVIDENCE_RECEIPT_DATE and check["reference"] == plain["order_date"]["reference"]
+    assert "1 receipt date(s) on 2 cited rows" in check["reason"]
+    assert not [x for x in plain["lineage"] if x["target"] == "Receipt Date"]
+    # Invoice more than 7 days before the order was created, or more than 30 days from every receipt: flagged only.
+    early = run(rows=received(both("13000003", "38091"), "2026-01-23T00:00:00", "2026-01-24T00:00:00"))
+    assert "8 days before the order's CREATED_DATE" in early["receipt_date"]["flag"]
+    far = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-02-15T00:00:00",
+                            "2026-02-20T00:00:00"))
+    assert far["receipt_date"]["value"] == "2026-02-15T00:00:00, 2026-02-20T00:00:00"
+    assert "31 days from the nearest RECEIPT_DATE" in far["receipt_date"]["flag"]
+    edge = run(rows=received(both("13000003", "38091"), "2026-01-22T00:00:00", "2026-02-14T00:00:00"))
+    assert edge["receipt_date"]["flag"] is None  # exactly 7 and 30 days: within the limits
+    for flagged in (early, far):
+        assert flagged["status"] == plain["status"] and types(flagged) == types(plain)
+        assert flagged["header"] == plain["header"] and flagged["lines"] == plain["lines"]
+    # POG-008 blank receipts are expected; an empty Order Date has nothing to compare.
+    unreceived = run(rows=received(ordered("13000005", "38091", ref=7), "2026-01-10T00:00:00", ""))
+    assert unreceived["receipt_date"]["flag"] is None and unreceived["receipt_date"]["value"] is None
+    assert "no receipt expected" in unreceived["receipt_date"]["reason"]
+    undated = run(rows=received(both("13000003", "38091"), "2026-01-10T00:00:00", "2026-01-17T00:00:00")[:1]
+                  + [{**both("13000003", "38091")[1], "CREATED_DATE": "2026-03-01T00:00:00"}])
+    assert undated["order_date"]["value"] is None
+    missing = run(rows=[pogrn("13000001", "38091", "6", "70")])
+    assert missing["receipt_date"]["flag"] is None and missing["receipt_date"]["reference"] == ""
+
+
 def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     # Decision 16: within the 6-character code, POG-001 picks the one order/location whose quantity and value agree.
     picked = run(rows=POGRN + both("13000003", "38091", q1="9"))
@@ -354,6 +445,54 @@ def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     assert two["header"]["Order No"] == "" and "Ambiguous PO" in types(two, "POG-001") and two["po_candidates"] == 2
     split = run(rows=both("13000001", "38091") + both("13000001", "38092"))
     assert split["header"]["Order No"] == "" and "Ambiguous PO" in types(split, "POG-001")
+
+
+def ordered(order, location, o1="3", o2="2", q="0", c="0", **kw):
+    """One order/location carrying both synthetic invoice items, ordered but not received (decisions 68/69)."""
+    return [{**row, "QTY_ORDERED": qty} for row, qty in zip(both(order, location, q, c, q, c, **kw), (o1, o2))]
+
+
+def test_POG_008_unreceived_order_holding_every_item_at_the_ordered_qty_only_after_none_selected():
+    result = run(rows=ordered("13000005", "38091", ref=7))
+    assert result["header"]["Order No"] == "13000005" and result["header"]["Location"] == "38091"
+    trace = next(x for x in result["lineage"] if x["target"] == "Order No")
+    assert trace["rule"] == "POG-008" and trace["evidence_kind"] == fr.EVIDENCE_ORDERED_NOT_RECEIVED
+    assert trace["source"] == "POGRN order matched on items and ordered qty, not received: RMS_ORDER_NO"
+    assert "POGRN!7" in trace["reference"] and not trace["source"].startswith("Selected by POG-001")
+    location = next(x for x in result["lineage"] if x["target"] == "Location")
+    assert location["source"] == "POGRN order matched on items and ordered qty, not received: LOCATION"
+    assert "Order Not Received" in types(result, "POG-008") and "Missing PO" not in types(result, "POG-001")
+    assert result["po"]["source"] == fr.ORDERED_NOT_RECEIVED and result["workbench"][0]["PO Source"] == fr.ORDERED_NOT_RECEIVED
+    assert result["status"] != "Approved"
+    # Decision 16 first: an agreeing order is selected and the unreceived one is never looked at.
+    agreeing = run(rows=POGRN + ordered("13000005", "38091"))
+    assert agreeing["header"]["Order No"] == "13000001" and not types(agreeing, "POG-008")
+    # Any matched item whose ordered quantity differs, or is missing, leaves it empty.
+    for rows in (ordered("13000005", "38091", o2="3"), ordered("13000005", "38091", o2=None)):
+        missed = run(rows=rows)
+        assert missed["header"]["Order No"] == "" and "Missing PO" in types(missed, "POG-001")
+        assert not types(missed, "POG-008")
+    # A second group holding every item is not unique; one holding a single item does not count.
+    two = run(rows=ordered("13000005", "38091") + ordered("13000006", "38091"))
+    assert two["header"]["Order No"] == "" and not types(two, "POG-008")
+    partial = run(rows=ordered("13000005", "38091") + [{**pogrn("13000006", "38091", "0", "0"), "QTY_ORDERED": "3"}])
+    assert partial["header"]["Order No"] == "13000005"
+    # An unknown invoice quantity on a matched line never fills.
+    unknown = run(invoice(lines=lines(second={"qty": None})), rows=ordered("13000005", "38091"))
+    assert unknown["header"]["Order No"] == "" and not types(unknown, "POG-008")
+    # Decision 78: a received order that fails the value check is never 'not received' (cost off, or cost blank).
+    for cost in ("1", None):
+        received = [{**r, "QTY_RECEIVED": r["QTY_ORDERED"], "TOTAL COST": cost} for r in ordered("13000005", "38091")]
+        held = run(rows=received)
+        assert held["header"]["Order No"] == "" and "Missing PO" in types(held, "POG-001")
+        assert not types(held, "POG-008")
+    # One received row is enough to rule it out.
+    one = ordered("13000005", "38091")
+    for received in ("1", "n/a"):
+        one[0] = {**one[0], "QTY_RECEIVED": received}
+        assert run(rows=one)["header"]["Order No"] == ""
+    one[0] = {**one[0], "QTY_RECEIVED": ""}
+    assert run(rows=one)["header"]["Order No"] == "13000005"
 
 
 # --------------------------------------------------------------------------- owner POGRN rules

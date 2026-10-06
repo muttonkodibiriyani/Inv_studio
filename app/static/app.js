@@ -346,6 +346,35 @@ function buyerEvidence(field) {
   return evidenceText(field.evidence);
 }
 
+// Decision 62: the reader's Purchase order is not Order No. When POG-001 found the order in POGRN, the review shows
+// that Order No beside it with its source, so an empty Purchase order does not read as "no order". Display only.
+function pogrnOrder(job) {
+  const field = rulesJob(job) ? job.rules?.fields?.po : null;
+  if (!field || field.value === null || field.value === undefined || field.value === "") return null;
+  const entry = (field.evidence || []).find((item) => (item.rule === "POG-001" && ["printed", "selected"].includes(item.kind))
+    || (item.rule === "POG-008" && item.kind === "sheet"));
+  if (!entry) return null;
+  // Decisions 68/69/78: POG-008 fills Order No only from the one unreceived order holding every invoiced item and qty.
+  const source = entry.rule === "POG-008" ? "POGRN order matched on items and ordered qty, not yet received"
+    : entry.kind === "printed" ? "Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code"
+      : "POGRN order selected by qty and value under the supplier code, not printed";
+  return { value: String(field.value), source };
+}
+
+// Decision 76: Order Date is evidence only (POG-009), the CREATED_DATE text of the POGRN rows cited for Order No. The
+// note formats an ISO date for display; the exact cell text stays in the tooltip. An empty value shows its reason.
+function orderDateNote(job) {
+  const date = rulesJob(job) ? job.rules?.order_date : null;
+  if (!date) return null;
+  const raw = date.value === null || date.value === undefined ? "" : String(date.value);
+  if (!raw) return { text: `Order Date empty · ${date.reason || "no POGRN order date"}`, title: "" };
+  const iso = /^(\d{4}-\d{2}-\d{2})(?:[T ]00:00:00)?$/.exec(raw.trim());
+  const parsed = iso ? new Date(`${iso[1]}T00:00:00Z`) : null;
+  const shown = parsed && !Number.isNaN(parsed.valueOf()) ? parsed.toLocaleDateString([], { dateStyle: "medium", timeZone: "UTC" }) : raw;
+  return { text: `Order Date ${shown} · POGRN CREATED_DATE of the rows cited for Order No, evidence only`,
+    title: [raw, date.reference].filter(Boolean).join(" · ") };
+}
+
 const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const HEADER_FIELDS = [
@@ -1293,6 +1322,14 @@ function renderInvoiceForm(job) {
       wrapper.append(make("small", "buyer-evidence", buyerEvidence(buyer)));
       const printed = String(invoice.buyer_name ?? "").trim();
       if (printed && foldText(printed) !== foldText(buyer.value)) wrapper.append(make("small", "buyer-printed", `printed: ${printed}`));
+    }
+    const order = name === "po" ? pogrnOrder(job) : null;
+    if (order) wrapper.append(make("small", "po-pogrn", `Order No ${order.value} · ${order.source}`));
+    const orderDate = name === "po" ? orderDateNote(job) : null;
+    if (orderDate) {
+      const note = make("small", "po-order-date", orderDate.text);
+      if (orderDate.title) note.title = orderDate.title;
+      wrapper.append(note);
     }
     if (name === "date_printed") {
       wrapper.append(make("small", "", invoice.date_printed

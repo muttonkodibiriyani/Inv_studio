@@ -149,6 +149,22 @@ def test_download_refuses_unapproved_or_unevidenced_values():
         rules_workbook([rules_view(result)])
 
 
+def test_order_date_is_shown_as_evidence_only_never_as_a_field():
+    date = {"value": "2026-01-02 00:00:00", "reason": "", "rule": "POG-009", "source": "s: CREATED_DATE",
+            "reference": "POGRN!2", "evidence_kind": "pogrn_order_date"}
+    view = rules_view(approved_result(order_date=date))
+    assert view["order_date"] == date and not [k for k in view["fields"] if "order_date" in k.lower()]
+    assert "order_date" not in rules_view(approved_result())
+    # Decision 83: a POG-010 flag is a non-blocking Buyer warning; the status and the fields stay as they are.
+    flag = {**date, "rule": "POG-010", "flag": "Invoice Date is 31 days from the nearest RECEIPT_DATE (limit 30)"}
+    flagged = rules_view(approved_result(receipt_date=flag))
+    warning = [i for i in flagged["issues"] if i["rule"] == "POG-010"]
+    assert warning == [{**warning[0], "owner": "Buyer", "blocking": False, "level": "warning"}]
+    assert flagged["status"] == "Approved" and flagged["fields"] == view["fields"] and flagged["receipt_date"] == flag
+    assert not [i for i in rules_view(approved_result(receipt_date={**flag, "flag": None}))["issues"]
+                if i["rule"] == "POG-010"]
+
+
 def job(text=PRINTED):
     return {"id": "job-1", "status": "review", "reviewed": False, "revision": 1, "filename": "synthetic.pdf",
             "invoice": INVOICE.model_dump(mode="json"), "text": text, "boxes": [], "provenance": []}

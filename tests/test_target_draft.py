@@ -101,6 +101,21 @@ def test_a_mixed_selection_skips_what_has_no_current_rules_and_changes_no_job(pr
     assert skipped[0][7] == "Extraction has not finished"
 
 
+def test_an_unknown_invoice_is_skipped_not_a_failed_draft(production):  # noqa: F811
+    app, client = production
+    store = app.state.store
+    store.job("job-1", job())
+    approved = confirm(client, client.get("/api/jobs/job-1").json())
+    response = draft(client, ("job-1", approved["revision"]), ("job-gone", 1))
+    assert response.status_code == 200, response.text
+    assert (response.headers["x-draft-included"], response.headers["x-draft-skipped"]) == ("1", "1")
+    skipped = [row for row in sheets(response.content)["Checks"] if row[1] == "(skipped)"]
+    assert [(row[2], row[5], row[7]) for row in skipped] == [("job-gone", "Skipped", "Invoice not found")]
+    alone = draft(client, ("job-gone", 1))
+    assert alone.status_code == 409 and "Invoice not found" in alone.json()["detail"]
+    assert store.job("job-gone") is None
+
+
 def test_a_stale_revision_is_skipped_and_nothing_qualifying_is_a_409(production):  # noqa: F811
     app, client = production
     store = app.state.store

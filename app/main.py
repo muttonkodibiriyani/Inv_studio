@@ -716,10 +716,36 @@ def create_app(data_dir=None):
             results.append({**check,"transaction":n,"cells":cells,"checks":check.get("checks",[])})
         currencies=[((v.get("fields") or {}).get("currency") or {}).get("value") for v in views]
         content,workbook_checks=tc.add_checks_sheet(content,results,currencies)
+        content=order_date_rows(content,views)
         receipts={r["transaction"]:{"summary":r.get("summary",""),"counts":r.get("counts",{}),"metric":r.get("metric",{}),
                   "checks":{k["check"]:k["status"] for k in r["checks"]},
                   "workbook_checks":{k["check"]:k["status"] for k in workbook_checks}} for r in results}
         return content,receipts
+    def order_date_rows(content,views):
+        """Decisions 76/83: per transaction, a Checks row with its POGRN Order Date and one with its Receipt Date(s)
+        check; evidence only, the template sheets are untouched."""
+        rows=[]
+        for n,v in enumerate(views,1):
+            for column,d in (("Order Date",v.get("order_date")),("Receipt Date",v.get("receipt_date"))):
+                if not d:continue
+                status="flagged" if d.get("flag") else "filled" if d.get("value") is not None else "empty_flagged"
+                reason="; ".join(x for x in (d.get("flag"),d.get("reason")) if x)
+                detail="Evidence only; not a template column (decision 76)" if column=="Order Date" else \
+                       "Date check only; flags, never blocks (decision 83)"
+                rows.append({"Transaction Number":n,"Sheet":"(evidence)","Column":column,"Value":d.get("value") or "",
+                             "Status":status,"Detail":detail,"Reason":reason,"Evidence Kind":d.get("evidence_kind") or "",
+                             "Evidence Source":d.get("source") or "","Evidence Reference":d.get("reference") or "","Rule":d.get("rule") or ""})
+        if not rows:return content
+        from openpyxl import load_workbook
+        book=load_workbook(io.BytesIO(content));sheet=book["Checks"]
+        for row in rows:
+            sheet.append([None]*len(tc.CHECKS_COLUMNS));r=sheet.max_row
+            for name,value in row.items():
+                if value=="":continue
+                cell=sheet.cell(r,tc.CHECKS_COLUMNS.index(name)+1)
+                if isinstance(value,int):cell.value=value
+                else:cell.value=str(value);cell.data_type="s"  # text only, never a formula
+        buffer=io.BytesIO();book.save(buffer);return buffer.getvalue()
     def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
     def audit_receipt(receipt):
         # Cell evidence holds owner rows; the audit keeps its size, the receipt keeps the rows.
@@ -775,10 +801,11 @@ def create_app(data_dir=None):
         if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")
         views=[];included=[];skipped=[]
         for request in body.jobs:
+            # Before ensure_rules, which 404s an unknown id: a deleted invoice is skipped, not a failed draft.
+            if not store.job(request.id):skipped.append(({"id":request.id,"filename":""},"Invoice not found"));continue
             # The same refresh as opening the invoice; it returns early on exported or unfinished invoices.
             ensure_rules(request.id)
             j=store.job(request.id)
-            if not j:skipped.append(({"id":request.id,"filename":""},"Invoice not found"));continue
             if j["status"] in ("queued","processing","error"):reason="Extraction has not finished"
             elif j["revision"]!=request.revision:reason="Invoice changed. Refresh before downloading."
             elif not fresh_rules(j):reason="No current fine-rules result for this revision"
