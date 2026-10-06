@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from app import engines, scan_guard
-from app.docling_extract import extract_invoice_from_tables, line_columns
+from app.docling_extract import extract_invoice_from_tables, heading_columns, line_columns
 from app.models import Invoice
 
 G1, G2 = "40000008", "96385074"  # GS1-valid synthetic EAN-8 codes
@@ -278,3 +278,102 @@ def test_scan_read_by_the_ai_flags_an_empty_barcode_under_a_printed_barcode_head
     assert [line["gtin"] for line in result["invoice"]["lines"]] == [G1, None]
     assert len(lines) == 2 and lines[1]["gtin"]["review"]["code"] == "not_read"
     assert "review" not in lines[0].get("gtin", {})
+
+
+G3 = "40000015"  # GS1-valid synthetic EAN-8
+
+# A heading printed on three stacked lines, every word its own OCR line. Qty and Price never share a row,
+# so no measured-word table accepts a line heading here.
+STACKED = [("SKU", 10, 88), ("Qty", 250, 88), ("Barcode", 50, 96), ("Description", 130, 96),
+           ("Price", 300, 104), ("Line", 360, 104), ("Amount", 390, 104)]
+
+
+def stacked_scan(rows, body_barcode=False):
+    boxes = [scan_box(text, x, top) for text, x, top in STACKED]
+    for n, (code, desc, qty, net) in enumerate(rows):
+        top = 140 + 20 * n
+        boxes += [scan_box(str(n + 1), 10, top), scan_box(code, 50, top), scan_box(desc, 130, top),
+                  scan_box(qty, 250, top), scan_box("5.00", 300, top), scan_box(net, 360, top)]
+    if body_barcode:
+        boxes += [scan_box("Barcode", 130, 300), scan_box("scanner", 180, 300), scan_box("12", 250, 300)]
+    return boxes
+
+
+def run_scan(monkeypatch, tmp_path, boxes, ai_lines):
+    monkeypatch.setattr(engines, "capabilities", lambda: [{"id": x, "installed": True} for x in ("invoice2data", "paddleocr")])
+    ocr_text = "\n".join(b["text"] for b in boxes)
+
+    def read(engine, *args, **kwargs):
+        if engine == "invoice2data":
+            return {"text": " ", "boxes": [], "invoice": None}
+        if engine == "paddleocr":
+            return {"text": ocr_text, "boxes": boxes, "invoice": None}
+        raise ValueError("not used")
+    monkeypatch.setattr(engines, "local_read", read)
+
+    def ai_reader(*args):
+        invoice = {"supplier_name": "SYN Supplier", "number": "SCAN-2", "date": "2026-01-15", "po": "PO-2",
+                   "net": "35.00", "tax": "1.75", "lines": [
+                       {"gtin": gtin, "description": desc, "qty": "1", "price": "5.00", "net_amount": net, "page": 1}
+                       for gtin, desc, net in ai_lines]}
+        return Invoice.model_validate(invoice), {"evidence": {"net": {"quote": "Net 35.00", "page": 1},
+                                                              "tax": {"quote": "VAT 1.75", "page": 1}}}
+    opts = SimpleNamespace(engine="auto", provider="vertex", model="gemini-test", ai_fallback=True, language="en",
+                           prefer_native_text=True)
+    result = engines.process(tmp_path / "scan.pdf", opts, SimpleNamespace(root=tmp_path), ai_reader)
+    Invoice.model_validate(result["invoice"])
+    return result
+
+
+def gtin_codes(result):
+    rows = result["evidence"]["lines"]
+    return [(rows[n].get("gtin") or {}).get("review", {}).get("code") if line["gtin"] in (None, "") else "read"
+            for n, line in enumerate(result["invoice"]["lines"])]
+
+
+def test_heading_words_on_stacked_ocr_lines_name_the_columns_and_the_first_block_only():
+    boxes = stacked_scan([(G1, "Soap", "1", "5.00")])
+    boxes += [scan_box("Net Amount", 300, 400), scan_box("VAT Amount", 400, 400)]
+    assert heading_columns(boxes[-2:]) == {"net_amount", "tax_amount"}  # alone, the totals band qualifies
+    assert line_columns(" ", [], boxes) == set()  # the table route accepts no heading row here
+    assert heading_columns(boxes) >= {"gtin", "description", "qty", "price"}
+    assert "tax_amount" not in heading_columns(boxes)  # the totals block below the lines adds nothing
+
+
+def test_a_body_word_barcode_is_never_a_heading():
+    body = [scan_box(t, x, 300) for t, x in (("Barcode", 130), ("scanner", 180), ("12", 250))]
+    assert heading_columns(body) == set()
+    one = body + [scan_box("Qty", 10, 200), scan_box("7", 40, 200)]
+    assert heading_columns(one) == set()
+
+
+def test_scan_with_an_unparseable_heading_row_flags_every_covered_barcode(monkeypatch, tmp_path):
+    """D179: no silent empty barcode when the heading is found only in the OCR words."""
+    rows = [(G1, "Soap", "1", "5.00"), ("####", "Towel", "1", "5.00"), ("####", "Brush", "1", "25.00")]
+    result = run_scan(monkeypatch, tmp_path, stacked_scan(rows, body_barcode=True),
+                      [(G1, "Soap", "5.00"), (None, "Towel", "5.00"), (None, "Brush", "25.00")])
+    assert gtin_codes(result) == ["read", "not_read", "not_read"]
+    assert len(result["evidence"]["lines"]) == 3
+    assert not any(k.startswith("_") for k in result["invoice"])
+
+
+def test_scan_with_only_a_body_word_barcode_adds_no_line_flags(monkeypatch, tmp_path):
+    boxes = [scan_box(t, x, 140 + 20 * n) for n in range(3) for t, x in ((str(n + 1), 10), ("Item", 50), ("5.00", 300))]
+    boxes += [scan_box("Barcode", 130, 300), scan_box("scanner", 180, 300), scan_box("12", 250, 300)]
+    result = run_scan(monkeypatch, tmp_path, boxes,
+                      [(G1, "Soap", "5.00"), (None, "Towel", "5.00"), (None, "Brush", "25.00")])
+    assert gtin_codes(result)[1:] == [None, None]
+    assert not any((cell.get("review") or {}).get("code") == "not_read"
+               for row in result["evidence"]["lines"] for cell in row.values())
+
+
+def test_a_failed_column_read_is_traced_not_silent(monkeypatch, tmp_path):
+    import app.docling_extract as docling_extract
+
+    def boom(*args, **kwargs):
+        raise ValueError("synthetic")
+    monkeypatch.setattr(docling_extract, "line_columns", boom)
+    rows = [(G1, "Soap", "1", "5.00"), ("####", "Towel", "1", "5.00"), ("####", "Brush", "1", "25.00")]
+    result = run_scan(monkeypatch, tmp_path, stacked_scan(rows),
+                      [(G1, "Soap", "5.00"), (None, "Towel", "5.00"), (None, "Brush", "25.00")])
+    assert {"engine": "guard_printed", "status": "columns_failed", "reason": "ValueError"} in result["trace"]

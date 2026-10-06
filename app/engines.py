@@ -371,12 +371,12 @@ LINE_COLUMNS={"sku":"SKU","gtin":"Barcode","description":"Description","qty":"Qu
 _PO_LABEL=re.compile(r"(?i)\b(?:customer\s+)?(?:p\.?\s*o\.?\s*(?:no\b\.?|number\b|#)|lpo\b|purchase\s+order\s*(?:no\b\.?|number\b|#|:))")
 
 
-def _line_columns_of(text,tables,boxes):
-    try:
-        from .docling_extract import line_columns
-        return line_columns(text,tables,boxes)
-    except Exception:
-        return set()
+def _line_columns_of(text,tables,boxes,headings=False):
+    """The line columns printed on the page. With headings (a scan with lines), an empty table-route set
+    falls back to the heading words in the OCR boxes. Raises: the caller records the failure."""
+    from .docling_extract import heading_columns,line_columns
+    columns=line_columns(text,tables,boxes) or (heading_columns(boxes) if headings else set())
+    return columns&set(LINE_COLUMNS)
 
 
 def _po_label(text):
@@ -687,7 +687,11 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         text,boxes=selected_page
     if best is not None:
         tables=selected_tables if selected_page is not None else page_tables
-        best_evidence=guard_printed(invoice,best_evidence,text,_line_columns_of(text,tables,boxes),best_source)
+        try:columns=_line_columns_of(text,tables,boxes or ocr_boxes,headings=scan and bool(invoice.get("lines")))
+        except Exception as e:
+            # Line flags could not be placed: say so rather than leave the empty cells silent.
+            columns=set();trace.append({"engine":"guard_printed","status":"columns_failed","reason":type(e).__name__})
+        best_evidence=guard_printed(invoice,best_evidence,text,columns,best_source)
     return {"invoice":invoice,"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
             "document_type_hint":document_type_hint,"extraction_note":extraction_note,

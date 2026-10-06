@@ -886,6 +886,40 @@ def line_columns(text: str, tables: list[dict[str, Any]] | None, boxes: list[dic
     return columns
 
 
+def heading_columns(boxes: list[dict[str, Any]] | None) -> set[str]:
+    """The roles of the printed column headings found in the measured words alone (no table needed).
+
+    Words are named with the same _role as table headings. A band is the words whose centres lie within
+    0.7 x a heading word's height, from any OCR line; it qualifies with at least two heading words and no
+    more number-bearing words than heading words, so a body word is never enough. Only the topmost
+    heading block of each page counts: its first qualifying band and the qualifying bands stacked under it,
+    each within a word height of the last (a heading printed on two or three lines). A totals band
+    below the lines adds nothing.
+    """
+    words = [word for word in boxes or [] if str(word.get("text", "")).strip()]
+    roles = {id(word): _role(word.get("text")) for word in words}
+
+    def centre(word: dict[str, Any]) -> float:
+        return (float(word["box"][1]) + float(word["box"][3])) / 2
+
+    columns: set[str] = set()
+    for page in sorted({int(word.get("page", 1)) for word in words}):
+        page_words = [word for word in words if int(word.get("page", 1)) == page]
+        last: float | None = None
+        for word in sorted((w for w in page_words if roles[id(w)]), key=centre):
+            height = max(1.0, float(word["box"][3]) - float(word["box"][1]))
+            band = [other for other in page_words if abs(centre(other) - centre(word)) <= height * 0.7]
+            named = [other for other in band if roles[id(other)]]
+            numbers = sum(1 for other in band if any(ch.isdigit() for ch in str(other.get("text", ""))))
+            if len(named) < 2 or numbers > len(named):
+                continue
+            if last is not None and centre(word) - last > height:
+                break
+            columns |= {roles[id(other)] for other in named}
+            last = centre(word)
+    return columns
+
+
 def extract_invoice_from_tables(
     text: str,
     tables: list[dict[str, Any]] | None,
