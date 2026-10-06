@@ -1403,6 +1403,8 @@ function printedLineAmounts(line) {
 
 function addLine(line = {}, disabled = false) {
   const row = make("tr");
+  // The printed part code has no input; it rides on the row so a save keeps it (the review replaces the lines).
+  if (line.part_code) row.dataset.partCode = line.part_code;
   const identity = make("td");
   identity.append(lineInput("item_id", line.item_id, "Internal item · confirmed reference"), lineInput("sku", line.sku, "Supplier SKU"), lineInput("gtin", line.gtin, "GTIN or barcode"));
   identity.querySelector('[name="item_id"]').placeholder = "Internal item · reference";
@@ -1569,7 +1571,7 @@ function collectInvoice() {
       return raw === "" ? null : raw;
     };
     const page = value("page");
-    return { item_id: value("item_id"), sku: value("sku"), gtin: value("gtin"), description: value("description"), qty: value("qty"), uom: value("uom"), price: value("price"), net_amount: value("net_amount"), tax_amount: value("tax_amount"), evidence: value("evidence"), page: page === null ? null : Number(page) };
+    return { item_id: value("item_id"), sku: value("sku"), gtin: value("gtin"), description: value("description"), qty: value("qty"), uom: value("uom"), price: value("price"), net_amount: value("net_amount"), tax_amount: value("tax_amount"), evidence: value("evidence"), page: page === null ? null : Number(page), ...(row.dataset.partCode ? { part_code: row.dataset.partCode } : {}) };
   });
   return invoice;
 }
