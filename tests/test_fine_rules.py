@@ -389,6 +389,19 @@ def test_POG_008_unreceived_order_holding_every_item_at_the_ordered_qty_only_aft
     # An unknown invoice quantity on a matched line never fills.
     unknown = run(invoice(lines=lines(second={"qty": None})), rows=ordered("13000005", "38091"))
     assert unknown["header"]["Order No"] == "" and not types(unknown, "POG-008")
+    # Decision 78: a received order that fails the value check is never 'not received' (cost off, or cost blank).
+    for cost in ("1", None):
+        received = [{**r, "QTY_RECEIVED": r["QTY_ORDERED"], "TOTAL COST": cost} for r in ordered("13000005", "38091")]
+        held = run(rows=received)
+        assert held["header"]["Order No"] == "" and "Missing PO" in types(held, "POG-001")
+        assert not types(held, "POG-008")
+    # One received row is enough to rule it out.
+    one = ordered("13000005", "38091")
+    for received in ("1", "n/a"):
+        one[0] = {**one[0], "QTY_RECEIVED": received}
+        assert run(rows=one)["header"]["Order No"] == ""
+    one[0] = {**one[0], "QTY_RECEIVED": ""}
+    assert run(rows=one)["header"]["Order No"] == "13000005"
 
 
 # --------------------------------------------------------------------------- owner POGRN rules

@@ -1185,12 +1185,15 @@ RMS_ORDER_FORMAT = re.compile(r"[1-9]\d{0,14}")  # owner Order No format (RF-1)
 def _ordered_not_received(evaluated, invoiced):
     """POG-008 (decisions 68, 69, 73), only after POG-001 selected none: the one order/location group under the
     supplier's 6-character EBS code that holds every matched invoice item, when its QTY_ORDERED equals the invoice
-    quantity on every matched item. ``invoiced`` is ITEM_PARENT -> invoice quantity; any unknown quantity, a second
-    group holding the items, or one unequal item leaves it None. Never a tolerance and never the nearest group."""
+    quantity on every matched item and no row of it is received (QTY_RECEIVED blank or 0; decision 78). ``invoiced``
+    is ITEM_PARENT -> invoice quantity; any unknown quantity, a second group holding the items, one unequal item or
+    one received row leaves it None. Never a tolerance and never the nearest group."""
     if not invoiced or None in invoiced.values():
         return None
     holding = [g for g in evaluated if g["Items Check"] == "Pass"]
     if len(holding) != 1 or not holding[0]["_identity"]:
+        return None
+    if any(text(row.get("QTY_RECEIVED")) and to_decimal(row.get("QTY_RECEIVED")) != 0 for row in holding[0]["_rows"]):
         return None
     ordered = defaultdict(Decimal)
     for row in holding[0]["_rows"]:
