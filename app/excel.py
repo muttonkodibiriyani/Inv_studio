@@ -66,7 +66,7 @@ def _id_cell(cell,value):
     else:text_cell(cell,value)
 
 
-def rules_workbook(views,upc="empty"):
+def rules_workbook(views,upc="empty",draft=False):
     """Target template (Header / Tax_Breakdown / Details) from fine-rules views only.
 
     UPC stays empty by default (owner answer: Details.Item = Item Master ITEM_PARENT is what populates);
@@ -74,10 +74,13 @@ def rules_workbook(views,upc="empty"):
 
     Every written cell comes from a view value that carries evidence; the
     returned map records that evidence per transaction and cell. Ref No./Comment stay truly empty.
+
+    ``draft``: a review copy of the same workbook for invoices nobody approved yet. Where the export would refuse
+    a cell (flagged, no value or no evidence), the cell stays empty; nothing is ever filled to look complete.
     """
     if upc not in UPC_MODES:raise ValueError("UPC mode must be barcode or empty")
     # Approved by the rules, or confirmed by a reviewer (owner_accepted lists the review issues they accepted).
-    if not views or any(v["status"]!="Approved" and "owner_accepted" not in v for v in views):
+    if not views or not draft and any(v["status"]!="Approved" and "owner_accepted" not in v for v in views):
         raise ValueError("Only invoices the fine rules approved or a reviewer confirmed can be exported")
     w=Workbook();w.remove(w.active);cells={}
     for name,cols in HEADERS.items():
@@ -86,21 +89,27 @@ def rules_workbook(views,upc="empty"):
         for col in s.columns:s.column_dimensions[col[0].column_letter].width=max(18,len(str(col[0].value))+2)
     dv=DataValidation(type="list",formula1='"Store (S),Warehouse (W)"');w["Header"].add_data_validation(dv)
     def need(f,where):
-        if f["flagged"] or f["value"] is None or not f["evidence"]:raise ValueError(f"{where} has no evidenced value")
+        if f["flagged"] or f["value"] is None or not f["evidence"]:
+            if draft:return None
+            raise ValueError(f"{where} has no evidenced value")
         return f["value"]
     for transaction,v in enumerate(views,1):
         f=v["fields"];s=w["Header"];row=transaction+1
         ev=cells.setdefault(transaction,{})
-        put=lambda sheet,r,c,field:ev.__setitem__(f"{sheet}!{w[sheet].cell(r,c).coordinate}",field["evidence"])
+        def put(sheet,r,c,field):
+            if not draft or w[sheet].cell(r,c).value not in (None,""):ev[f"{sheet}!{w[sheet].cell(r,c).coordinate}"]=field["evidence"]
         s.cell(row,1,transaction)
         text_cell(s.cell(row,2),need(f["number"],"Document"));put("Header",row,2,f["number"])
         for c,k in ((3,"site"),(4,"po"),(5,"location")):
             _id_cell(s.cell(row,c),need(f[k],f[k]["label"]));put("Header",row,c,f[k])
         loc_type=need(f["location_type"],"Location Type")
-        if loc_type not in ("Store (S)","Warehouse (W)"):raise ValueError("Location Type must be Store (S) or Warehouse (W)")
+        if loc_type not in ("Store (S)","Warehouse (W)"):
+            if not draft:raise ValueError("Location Type must be Store (S) or Warehouse (W)")
+            loc_type=None
         text_cell(s.cell(row,6),loc_type);dv.add(s.cell(row,6));put("Header",row,6,f["location_type"])
-        s.cell(row,7,date.fromisoformat(need(f["date"],"Document Date"))).number_format="m/d/yyyy";put("Header",row,7,f["date"])
-        net=Decimal(need(f["net"],"Net total"));tax=Decimal(need(f["tax"],"Tax total"))
+        when=need(f["date"],"Document Date")
+        s.cell(row,7,date.fromisoformat(when) if when else None).number_format="m/d/yyyy";put("Header",row,7,f["date"])
+        net,tax=(None if x is None else Decimal(x) for x in (need(f["net"],"Net total"),need(f["tax"],"Tax total")))
         s.cell(row,8,net);put("Header",row,8,f["net"]);s.cell(row,9,tax);put("Header",row,9,f["tax"])
         t=w["Tax_Breakdown"];t.cell(row,1,transaction);text_cell(t.cell(row,2),need(f["taxCode"],"Tax code"))
         t.cell(row,3,net);put("Tax_Breakdown",row,2,f["taxCode"]);put("Tax_Breakdown",row,3,f["net"])
@@ -111,6 +120,6 @@ def rules_workbook(views,upc="empty"):
             if upc=="barcode" and c["UPC"]["value"]:
                 text_cell(d.cell(n,3),c["UPC"]["value"]);d.cell(n,3).number_format="@";put("Details",n,3,c["UPC"])
             for col,k in ((4,"Unit Cost"),(5,"Quantity")):
-                d.cell(n,col,Decimal(need(c[k],f"Line {line['line']} {k}")));put("Details",n,col,c[k])
+                x=need(c[k],f"Line {line['line']} {k}");d.cell(n,col,None if x is None else Decimal(x));put("Details",n,col,c[k])
             text_cell(d.cell(n,6),need(c["Unit Tax Code"],f"Line {line['line']} Unit Tax Code"));put("Details",n,6,c["Unit Tax Code"])
     b=io.BytesIO();w.save(b);return b.getvalue(),cells
