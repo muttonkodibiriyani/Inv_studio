@@ -159,6 +159,14 @@ class DemoRequest(StrictModel):
     preflight_token: str
 
 
+def text_key(value):
+    """A line text cell keyed for "is this the same line" checks. The review client sends text back from an
+    <input type=text> (CR/LF dropped), trimmed and with '' as null; a client that shows a newline as a space sends
+    'a b' instead (D134). Removing all whitespace makes both compare equal to the stored 'a\\nb' (D130)."""
+    if not isinstance(value,str):return value
+    return re.sub(r"\s+","",value) or None
+
+
 def create_app(data_dir=None):
     app=FastAPI(title="Inv Studio",version="0.1.0")
     # TEST-ONLY: the synthetic demo validation references (matching.enrich/validate).
@@ -599,12 +607,27 @@ def create_app(data_dir=None):
         offered={str(c.get("supplier_code")) for c in (j.get("rules") or {}).get("supplier_site_candidates") or []}
         if code not in offered and code!=j.get("owner_supplier_code"):raise ValueError("Supplier code is not one of the candidates the rules offered")
         return code
+    def carry_unchecked(invoice,stored):
+        """D102(3): the review client does not send barcode_unchecked. The stored value stays on the line at the same
+        index while that line still has no gtin and the same description and code (compared through text_key); a
+        reviewer-typed gtin clears it, and a value the client sends is never kept: the field is the reader's alone (W1).
+        Inserting or deleting a line above shifts the index, so the key no longer matches and the value is dropped, never
+        moved onto another line."""
+        old=(stored or {}).get("lines") or [];lines=[]
+        for i,l in enumerate(invoice.lines):
+            was=old[i] if i<len(old) and isinstance(old[i],dict) else {}
+            same=not l.gtin and not was.get("gtin") and \
+                (text_key(l.description),text_key(l.sku))==(text_key(was.get("description")),text_key(was.get("sku")))
+            lines.append(l.model_copy(update={"barcode_unchecked":was.get("barcode_unchecked") if same else None}))
+        return invoice.model_copy(update={"lines":lines})
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
         view=entries=pick=None
         if not demo_references:
             j=job_or_404(jid);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
+            # Before the lines comparison below, so a client that drops the field does not clear the line entries.
+            body.invoice=carry_unchecked(body.invoice,j["invoice"])
             if body.entries is not None:entries=owner_entries(body.entries)
             else:
                 # Line entries are keyed by line number; they do not survive a change to the lines.
@@ -617,6 +640,7 @@ def create_app(data_dir=None):
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
+            body.invoice=carry_unchecked(body.invoice,j["invoice"])
             inv,provenance=enrich(body.invoice,references(c)) if demo_references else (body.invoice,[])
             before=j["invoice"]
             j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)

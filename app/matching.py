@@ -231,12 +231,12 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
     for x in lineage:found[(x.get("target"),x.get("line") or None)].append(_evidence(x))
     lines=result.get("lines") or []
     flags=[]
-    def field(name,value,evidence,label,line=None,entry=None):
+    def field(name,value,evidence,label,line=None,entry=None,reason=None):
         if not _blank(entry) and (_blank(value) or not evidence):
             return {"value":str(entry),"evidence":[_entered(entry,value)],"flagged":False,"reason":""}
         if _blank(value):
-            flags.append((label,line,"not found in the owner's sheets or printed on the invoice"))
-            return {"value":None,"evidence":[],"flagged":True,"reason":"Not found"}
+            flags.append((label,line,reason or "not found in the owner's sheets or printed on the invoice"))
+            return {"value":None,"evidence":[],"flagged":True,"reason":reason or "Not found"}
         if not evidence:
             flags.append((label,line,"has no evidence and is left empty"))
             return {"value":None,"evidence":[],"flagged":True,"reason":"No evidence"}
@@ -247,7 +247,7 @@ def rules_view(result,text="",boxes=(),printed=None,entries=None):
         for c in LINE_FIELDS:
             entry=(typed_lines.get(str(n)) or {}).get(c)
             if c=="Unit Tax Code" and _blank(entry):entry=typed.get("taxCode")
-            cells[c]=field(c,row.get(c),found.get((c,n),[]),c,n,entry)
+            cells[c]=field(c,row.get(c),found.get((c,n),[]),c,n,entry,(row.get("Field Reasons") or {}).get(c))
         out_lines.append({"line":n,"cells":cells,"status":row.get("Validation Status") or "","source_row":row.get("Source Row") or "",
                           "match_method":row.get("Match Method") or ""})
     fields={}
