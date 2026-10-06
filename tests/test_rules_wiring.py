@@ -428,3 +428,84 @@ def test_config_audit_records_field_names_and_lengths_never_values(production):
         audits = [json.loads(r[0]) for r in c.execute("SELECT payload FROM audit WHERE event='fine_rules_config_changed'")]
     assert audits[-1]["buyer_name"] == len(secret) and audits[-1]["version"] == len("syn-v9") and audits[-1]["value_decimals"] == "int"
     assert secret not in json.dumps(audits) and "syn-v9" not in json.dumps(audits)
+
+
+def test_D102_review_save_keeps_the_unchecked_barcode_and_a_typed_gtin_clears_it(production):
+    """D102(3): the review client does not send barcode_unchecked; a no-edit save keeps (i) filled and (ii) empty."""
+    from app.fine_rules import MISPRINT
+    app, client = production
+    stored = job()
+    # Synthetic: line 1 carries an exact Item Master code, line 2 a code with no master row (its VPN decides).
+    stored["invoice"]["lines"][0].update(gtin=None, barcode_unchecked="0012345678905")
+    stored["invoice"]["lines"][1].update(gtin=None, barcode_unchecked="0098765432108")
+    app.state.store.job("job-1", stored)
+
+    def upc(shown):
+        return [(l["cells"]["Item"]["value"], l["cells"]["UPC"]["value"], l["cells"]["UPC"]["reason"])
+                for l in shown["rules"]["lines"]]
+    shown = client.get("/api/jobs/job-1").json()
+    expected = [("345000001", "0012345678905", ""), ("345000002", None, MISPRINT)]
+    assert upc(shown) == expected
+    sent = {**shown["invoice"], "lines": [{k: v for k, v in l.items() if k != "barcode_unchecked"}
+                                          for l in shown["invoice"]["lines"]]}
+    saved = client.post("/api/jobs/job-1/review", headers=H,
+                        json={"invoice": sent, "revision": shown["revision"], "confirm": True}).json()
+    assert upc(saved) == expected
+    assert [l["barcode_unchecked"] for l in saved["invoice"]["lines"]] == ["0012345678905", "0098765432108"]
+    assert [m["gtin"] for m in saved["validation"]["matches"]] == ["0012345678905", ""]
+    # A second save from the same client still keeps it (the stored invoice carries the field).
+    again = client.post("/api/jobs/job-1/review", headers=H,
+                        json={"invoice": sent, "revision": saved["revision"]}).json()
+    assert upc(again) == expected
+    # A reviewer-typed gtin is a human value: the field clears and the typed code is matched as printed.
+    typed = {**sent, "lines": [sent["lines"][0], {**sent["lines"][1], "gtin": "0098765432109"}]}
+    edited = client.post("/api/jobs/job-1/review", headers=H,
+                         json={"invoice": typed, "revision": again["revision"]}).json()
+    assert edited["invoice"]["lines"][1]["barcode_unchecked"] is None
+    assert upc(edited)[1][:2] == ("345000002", "0098765432109")
+
+
+
+def test_D102_a_no_edit_save_keeps_the_unchecked_barcode_through_the_clients_text_normalisation(production):
+    """D130: the client sends each line cell as an <input type=text> value (CR/LF dropped), trimmed, '' as null. A
+    stored ''/'   '/'a\\nb'/' a ' comes back as null/null/'ab'/'a' and must still carry, as must 'a\\nb' sent as 'a b' by a
+    client that shows the newline as a space (D134); a real edit must not."""
+    app, client = production
+    stored = job()
+    base = stored["invoice"]["lines"][0]
+    cases = [("", None), ("   ", None), ("SYN A\nSYN B", "SYN ASYN B"), (" SYN A ", "SYN A"), ("SYN A\nSYN B", "SYN A SYN B")]
+    rows = []
+    for n, (raw, _) in enumerate(cases):
+        rows.append({**base, "gtin": None, "barcode_unchecked": "0012345678905", "sku": raw, "description": f"Syn {n}"})
+        rows.append({**base, "gtin": None, "barcode_unchecked": "0012345678905", "sku": f"S{n}", "description": raw})
+    rows.append({**base, "gtin": None, "barcode_unchecked": "0012345678905", "sku": "S9", "description": "Syn edited"})
+    stored["invoice"]["lines"] = rows
+    app.state.store.job("job-1", stored)
+    revision = client.get("/api/jobs/job-1").json()["revision"]
+
+    def as_client(v):
+        return (v.replace("\r", "").replace("\n", "").strip() or None) if isinstance(v, str) else v
+    sent_lines = [{k: as_client(v) for k, v in l.items() if k != "barcode_unchecked"} for l in rows]
+    for n, (_, sent) in enumerate(cases):
+        sent_lines[2 * n]["sku"] = sent_lines[2 * n + 1]["description"] = sent
+    sent_lines[-1]["description"] = "Syn really changed"
+    saved = client.post("/api/jobs/job-1/review", headers=H,
+                        json={"invoice": {**stored["invoice"], "lines": sent_lines}, "revision": revision}).json()
+    carried = [l["barcode_unchecked"] for l in saved["invoice"]["lines"]]
+    assert carried == ["0012345678905"] * (2 * len(cases)) + [None]
+
+
+def test_D102_a_barcode_unchecked_sent_by_a_client_is_never_kept(production):
+    """W1: the field is the reader's alone. A posted value on a line whose stored line has none is saved as None, and a
+    posted value never replaces the stored one."""
+    app, client = production
+    stored = job()
+    base = stored["invoice"]["lines"][0]
+    stored["invoice"]["lines"] = [{**base, "gtin": None, "sku": "S0", "description": "Syn 0"},
+                                  {**base, "gtin": None, "sku": "S1", "description": "Syn 1", "barcode_unchecked": "0012345678905"}]
+    app.state.store.job("job-1", stored)
+    revision = client.get("/api/jobs/job-1").json()["revision"]
+    sent = [{**l, "barcode_unchecked": "0098765432108"} for l in stored["invoice"]["lines"]]
+    saved = client.post("/api/jobs/job-1/review", headers=H,
+                        json={"invoice": {**stored["invoice"], "lines": sent}, "revision": revision}).json()
+    assert [l["barcode_unchecked"] for l in saved["invoice"]["lines"]] == [None, "0012345678905"]

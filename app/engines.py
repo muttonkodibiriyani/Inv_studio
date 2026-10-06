@@ -13,6 +13,7 @@ from datetime import date
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from .models import Invoice
 from .evidence import build as build_evidence
+from . import scan_guard
 
 ROOT=Path(__file__).resolve().parent
 # A recovery reader can coexist with its original process briefly. Keep heavy
@@ -279,6 +280,8 @@ def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
                 if theirs in (None,""):continue
                 if mine in (None,""):
                     if not aligned:continue
+                    # A printed barcode that failed its check digit is never replaced by the AI's digits.
+                    if field=="gtin" and mine_line.get("barcode_unchecked"):continue
                     line[field]=theirs;line_readers[n][field]="ai"
                     if their_ev.get(field):evidence["lines"][n][field]=their_ev[field]
                 elif field!="description" and not _same(field,mine,theirs):
@@ -287,10 +290,92 @@ def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
     return merged,evidence,header_readers,line_readers,notes
 
 
+def _review(entry,line,source,reason,other,code=None):
+    """An evidence entry carrying this reader's review reason; the value it names is the reader's, not the invoice's."""
+    entry=dict(entry) if entry else {"quote":"","page":(line or {}).get("page"),"source":source}
+    entry["review"]={"reason":reason,"other_value":None if other in (None,"") else str(other)[:300]}
+    if code:entry["review"]["code"]=code
+    return entry
+
+
+def _barcode_review(entry,line,source,reason,other):
+    return _review(entry,line,source,reason,other,scan_guard.BARCODE_CODES.get(reason))
+
+
+def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
+    """Barcodes as checked digits only; on a scan an AI barcode stands only where the page OCR prints it.
+
+    A local barcode that fails the check digit moves to barcode_unchecked; an incomplete one is cleared. An AI
+    barcode is cleared when it fails the check digit or, on a scan, when the same page's OCR does not print the
+    same complete digit run as often as lines claim it. A cleared value survives only as evidence.
+    """
+    lines=invoice.get("lines") or []
+    rows=evidence.setdefault("lines",[])
+    while len(rows)<len(lines):rows.append({})
+    while len(line_readers)<len(lines):line_readers.append({})
+    claims=[]
+    for n,line in enumerate(lines):
+        printed=line.get("gtin")
+        if printed in (None,""):
+            # A reader that already moved a failed-check code aside still owes the review flag.
+            if line.get("barcode_unchecked") and not (rows[n].get("gtin") or {}).get("review"):
+                rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
+            continue
+        gtin,unchecked,reason=scan_guard.classify_barcode(printed)
+        from_ai=line_readers[n].get("gtin")=="ai"
+        line["gtin"]=gtin
+        if not from_ai and unchecked:line["barcode_unchecked"]=unchecked
+        if gtin and line.get("barcode_unchecked"):
+            # Two reads of one printed code disagree: barcode_unchecked set means gtin None, flagged.
+            line["gtin"]=None;line_readers[n].pop("gtin",None)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
+            continue
+        if gtin is None:
+            line_readers[n].pop("gtin",None)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,"ai" if from_ai else source,
+                                    scan_guard.UNREADABLE if from_ai and unchecked else reason,printed)
+        elif from_ai and scan:
+            claims.append((n,line.get("page"),gtin))
+    if claims:
+        confirmed=scan_guard.corroborate(claims,scan_guard.page_occurrences(ocr_boxes))
+        for n,_,digits in claims:
+            if n in confirmed:continue
+            lines[n]["gtin"]=None;line_readers[n].pop("gtin",None)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),lines[n],"ai",scan_guard.UNCONFIRMED,digits)
+    return invoice,evidence
+
+
+def guard_header(invoice,evidence,header_readers,source,text):
+    """PO only from a PO label, never a P.O. Box; an absent VAT is flagged; inclusive VAT lines are one flag."""
+    header=evidence.setdefault("header",{})
+    po=invoice.get("po")
+    if po not in (None,"") and scan_guard.po_from_box(po,[(header.get("po") or {}).get("quote")],text):
+        invoice["po"]=None;header_readers.pop("po",None)
+        header["po"]=_review(header.get("po"),None,source,"a P.O. Box in an address is not a PO number",po)
+    if invoice.get("tax") in (None,""):
+        if not (header.get("tax") or {}).get("review"):
+            header["tax"]=_review(header.get("tax"),None,source,scan_guard.missing_tax_reason(text),None)
+            header["tax"]["review"]["code"]=scan_guard.missing_tax_code(text)
+    else:
+        count=scan_guard.inclusive_vat_lines(invoice.get("lines"))
+        if count and not (header.get("tax") or {}).get("review"):
+            header["tax"]=_review(header.get("tax"),None,source,f"{count} lines: {scan_guard.INCLUSIVE_VAT}",None)
+    return invoice,evidence
+
+
+def _absent_fields(evidence):
+    """Job-level read-time facts for empty header fields: absent_fields (not printed) and each field's reason_code."""
+    codes={field:entry["review"]["code"] for field,entry in ((evidence or {}).get("header") or {}).items()
+           if isinstance(entry,dict) and (entry.get("review") or {}).get("code")}
+    return {"absent_fields":[f for f,c in codes.items() if c==scan_guard.TAX_ABSENT_CODE],"reason_codes":codes}
+
+
 def process(path,options,store,ai_reader,progress=lambda *args:None):
     trace=[];best=None;best_score=-1;text="";boxes=[];selected="none";best_evidence={};best_source="native"
     document_type_hint=None;extraction_note=None;native_review=[]
     ai_attempted=False;invoice2data_ocr=False;ai_calls=0;ai_status="off";ai_notes=[];readers_maps=None
+    # A scan (no usable text layer) is told by the PDF's own text; its OCR boxes corroborate AI barcodes.
+    native_chars=None;ocr_boxes=[];scan=False;ai_reason=None
     # The text and boxes of the selected local read: the target check re-checks its values against them.
     selected_page=None
     cross_check=bool(getattr(options,"ai_cross_check",False)) or os.getenv("INV_STUDIO_AI_CROSS_CHECK","0")=="1"
@@ -330,13 +415,46 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             best_evidence=build_evidence(candidate.model_dump(mode="json"),boxes,"ai",header=ai_evidence)
     def merge_ai(mode):
         """The AI after the local engines: fills empty fields, flags disagreements, never overwrites."""
-        nonlocal best,best_score,selected,best_evidence,best_source,ai_status,ai_notes,readers_maps
+        nonlocal best,best_score,selected,best_evidence,best_source,ai_status,ai_notes,readers_maps,ai_reason
         read=call_ai(mode)
         if read is None:
             ai_status="failed";return
         candidate,ai_evidence,score=read
         ai_dict=candidate.model_dump(mode="json");ai_ev=build_evidence(ai_dict,boxes,"ai",header=ai_evidence)
         ai_status=mode
+        local=best.model_dump(mode="json") if best is not None else None
+        weak=scan_guard.weak_read(local) if scan else []
+        if weak:
+            # A weak local read of a scan: the AI read from the page image stands in when it passes its own
+            # checks; when it does not either, nothing is filled and the invoice is not read.
+            failed=scan_guard.ai_self_check(ai_dict)
+            if failed:
+                ai_status="not_read"
+                ai_reason=("Not read: the local OCR read is weak ("+"; ".join(weak)+") and the AI read fails its checks ("
+                           +"; ".join(failed)+"). Nothing was filled; enter the invoice manually.")
+                return
+            merged=dict(local or Invoice().model_dump(mode="json"))
+            header_readers=_reader_map(local,best_source)[0] if local else {}
+            evidence={"header":dict((best_evidence or {}).get("header") or {}) if local else {},"lines":[]}
+            replaced=[]
+            ai_header=ai_ev.get("header") or {}
+            for field in READER_HEADER_FIELDS:
+                mine,theirs=merged.get(field),ai_dict.get(field)
+                # A money total stands in only with the quote it was read from: no derived net or tax, no 0 for unprinted.
+                if field in ("net","tax") and not str((ai_header.get(field) or {}).get("quote") or "").strip():continue
+                if theirs in (None,"") or (mine not in (None,"") and _same(field,mine,theirs)):continue
+                merged[field]=theirs;header_readers[field]="ai";replaced.append(field)
+                evidence["header"][field]={**(ai_header.get(field) or {"quote":"","page":None}),
+                                           "source":"ai","origin":scan_guard.AI_PAGE_IMAGE}
+            merged["lines"]=ai_dict.get("lines") or []
+            evidence["lines"]=[{k:{**v,"origin":scan_guard.AI_PAGE_IMAGE} for k,v in row.items()}
+                               for row in ai_ev.get("lines") or []]
+            best=Invoice.model_validate(merged);best_score=quality(best)[0];best_evidence=evidence
+            selected=f"{options.provider} / {options.model}"
+            readers_maps=(header_readers,_reader_map(ai_dict,"ai")[1])
+            ai_notes=[f"The local OCR read is weak ({'; '.join(weak)}); the AI read from the page image passed its checks, "
+                      f"so its {len(merged['lines'])} lines and {len(replaced)} header fields replace the local read"]
+            return
         if best is None:
             best=candidate;best_score=score;selected=f"{options.provider} / {options.model}";best_source="ai";best_evidence=ai_ev
             return
@@ -403,6 +521,11 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
                 "Required extraction fields present" if not missing else "; ".join(missing))
             trace_entry={"engine":engine,"method":result.get("extraction_method","template" if candidate else "text_only"),"status":"extracted" if candidate else "text_only","seconds":round(time.monotonic()-start,2),"completeness":score,"extracted_fields":sum(v not in (None,"") for k,v in candidate.model_dump().items() if k!="lines") if candidate else 0,"line_items":len(candidate.lines) if candidate else 0,"text_characters":len(result["text"]),"table_count":len(result.get("tables",[])),"parser_error":result.get("parser_error"),"reason":reason}
             if queue_seconds is not None:trace_entry["queue_seconds"]=round(queue_seconds,2)
+            if engine in ("paddleocr","docling"):
+                trace_entry["ocr_status"]="ok";trace_entry["tokens_per_page"]=scan_guard.tokens_per_page(result.get("boxes"))
+                if not ocr_boxes and result.get("boxes"):ocr_boxes=result["boxes"]
+            elif engine in ("invoice2data","native_pdf_text") and not invoice2data_ocr and native_chars is None:
+                native_chars=len(str(result.get("text") or "").strip())
             trace.append(trace_entry)
             if result.get("recovery"):
                 trace[-1]["recovery"]=result["recovery"]
@@ -451,6 +574,7 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             if not missing:break
         except Exception as e:
             trace.append({"engine":engine,"status":"failed","reason":str(e)[:240],"seconds":round(time.monotonic()-start,2),"queue_seconds":round(queue_seconds,2) if queue_seconds is not None else None})
+            if engine in ("paddleocr","docling"):trace[-1]["ocr_status"]="timed_out" if "timed out" in str(e) else "failed"
             progress(engine,"Reader attempt finished",{"trace":list(trace),"characters":len(text)})
     def gaps_of(invoice):
         _,gaps=quality(invoice)
@@ -458,6 +582,12 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
             # The gate already checked every amount; an unprinted code is for review, not for the AI to supply.
             gaps=[x for x in gaps if not x.endswith(" item identity")]
         return _open_gaps(invoice,gaps)
+    scan=scan_guard.is_scan(native_chars,path)
+    if best is not None:
+        # The local read's barcodes are checked before the AI sees the gaps: a misprint is not a gap to fill.
+        local=best.model_dump(mode="json");local_readers=_reader_map(local,best_source)[1]
+        local,best_evidence=guard_lines(local,dict(best_evidence or {}),local_readers,best_source,scan,ocr_boxes)
+        best=Invoice.model_validate(local);best_score=quality(best)[0]
     missing=gaps_of(best);ai_reason=None
     # What the engines' result asks of the AI, recorded whether or not the AI runs, so AI calls per invoice
     # can be counted on an AI-off run: fallback when the engines could not read, gap fill when they left gaps,
@@ -479,12 +609,19 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
         elif need=="cross_check" and not cross_check:ai_status="skipped"
         else:merge_ai(need)
     if ai_status=="failed":ai_reason=str(trace[-1].get("reason") or "The AI read failed")[:240]
+    if ai_status=="not_read":extraction_note=ai_reason
+    if best is not None:
+        final=best.model_dump(mode="json")
+        header_map,line_map=readers_maps or _reader_map(final,best_source)
+        final,best_evidence=guard_lines(final,dict(best_evidence or {}),line_map,best_source,scan,ocr_boxes)
+        final,best_evidence=guard_header(final,best_evidence,header_map,best_source,text)
+        best=Invoice.model_validate(final);best_score=quality(best)[0];readers_maps=(header_map,line_map)
     ai_record={"status":ai_status,"reason":ai_reason or AI_REASONS.get(ai_status,""),"calls":ai_calls,"need":need}
     if ai_notes:ai_record["notes"]=ai_notes
     invoice=(best or Invoice()).model_dump(mode="json")
     header_readers,line_readers=readers_maps or _reader_map(invoice,best_source if best is not None else "native")
     readers={"ai":ai_record,"header":header_readers,"lines":line_readers,"gaps":gaps_of(best)}
-    if best is not None and best.lines and best.number and document_type_hint is None:
+    if best is not None and best.lines and best.number and document_type_hint is None and ai_status!="not_read":
         extraction_note=None
     if native_review and selected in ("native PDF text","invoice2data"):
         extraction_note="Read from the PDF text; every printed amount checks. Review: "+"; ".join(native_review)+"."
@@ -495,4 +632,4 @@ def process(path,options,store,ai_reader,progress=lambda *args:None):
     return {"invoice":invoice,"text":text,"boxes":boxes,
             "trace":trace,"selected_engine":selected,"completeness":max(0,best_score),
             "document_type_hint":document_type_hint,"extraction_note":extraction_note,
-            "evidence":best_evidence if best is not None else {},"readers":readers}
+            "evidence":best_evidence if best is not None else {},"readers":readers,**_absent_fields(best_evidence if best is not None else {})}
