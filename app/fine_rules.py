@@ -38,7 +38,8 @@ FAILURE_STATUS = {
     "Supplier Exception": ("Supplier Exception", "C-03"),
     "POGRN Supplier Exception": ("POGRN Supplier Exception", "C-04"),
     "Supplier Site Exception": ("Supplier Site Exception", "C-05"),
-    "Item Exception": ("Item Exception", "C-08"), "Item Review": ("Item Exception", "C-08"), "Item Conflict": ("Item Conflict", "C-09"),
+    "Item Exception": ("Item Exception", "C-08"), "Item Review": ("Item Exception", "C-08"),
+    "Item Conflict": ("Item Conflict", "C-09"),
     "Line Exception": ("Line Parsing Exception", "C-10"),
     "Item Quantity Mismatch": ("Quantity Mismatch", "C-11"),
     "Missing PO": ("Missing/Ambiguous PO", "C-12"), "Ambiguous PO": ("Missing/Ambiguous PO", "C-12"),
@@ -584,8 +585,12 @@ def ocr_read(job):
     selected = str(job.get("selected_engine") or "")
     if selected in OCR_ENGINES:
         return True
-    # The AI is selected as "<provider> / <model>"; its trace row names the provider.
-    return any(t.get("method") == "vision_ai" and selected.startswith(f"{t.get('engine')} /") for t in job.get("trace") or [])
+    # The AI is selected as "<provider> / <model>"; its trace row names the provider. Engines first selects the AI
+    # only when every local reader returned nothing, so a text-layer page qualifies here only in that case.
+    return any(t.get("method") == "vision_ai" and selected.startswith(f"{t.get('engine')} /")
+               for t in job.get("trace") or [])
+
+
 OCR_MAX_POSITIONS = 8
 
 

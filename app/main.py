@@ -278,7 +278,7 @@ def create_app(data_dir=None):
         with store.connection() as c:config=store.get("fine_rules_config",{},c);signature=rules_signature(c)
         entry={"invoice":invoice,"filename":j["filename"],"text":j.get("text",""),"boxes":j.get("boxes",[]),"job_id":j["id"]}
         if j.get("owner_supplier_code"):entry["owner_supplier_code"]=j["owner_supplier_code"]
-        # Decision 44: lines read by local OCR or the AI from a scan (never a text layer) may get the I/1, O/0 VPN lookup.
+        # Decision 44: lines read by local OCR or the AI from a scan may get the I/1, O/0 VPN lookup.
         entry["ocr_lines"]=ocr_read(j)
         result=run_batch([entry],LookupRulesSource(store),RulesConfig.from_dict(config))[0]
         entries=j.get("owner_entries") if entries is None else entries
