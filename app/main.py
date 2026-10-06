@@ -620,6 +620,17 @@ def create_app(data_dir=None):
                 (text_key(l.description),text_key(l.sku))==(text_key(was.get("description")),text_key(was.get("sku")))
             lines.append(l.model_copy(update={"barcode_unchecked":was.get("barcode_unchecked") if same else None}))
         return invoice.model_copy(update={"lines":lines})
+    def aligned_evidence(invoice,j):
+        """F5 (D146(2), D153): the reader's line reviews are kept by line index, so they stay only while every saved
+        line is the stored line at the same index (same count, same description and sku through text_key). Any insert,
+        delete or replacement drops them, header evidence stays."""
+        evidence=j.get("evidence")
+        old=(j.get("invoice") or {}).get("lines") or []
+        def key(line):return text_key(line.get("description")),text_key(line.get("sku"))
+        if not isinstance(evidence,dict) or not evidence.get("lines"):return evidence
+        if len(old)==len(invoice.lines) and all(isinstance(was,dict) and key(was)==key(l.model_dump()) for was,l in zip(old,invoice.lines)):
+            return evidence
+        return {**evidence,"lines":[]}
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
         view=entries=pick=None;cleared=0
@@ -637,14 +648,14 @@ def create_app(data_dir=None):
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
             pick=supplier_pick(j,body)
             picked_by=j.get("owner_supplier_pick") if pick and pick==j.get("owner_supplier_code") else {"actor":actor.get(),"at":datetime.now(timezone.utc).isoformat()} if pick else None
-            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution,"owner_supplier_code":pick,"owner_supplier_pick":picked_by},entries)
+            view=compute_rules(body.invoice,{**j,"evidence":aligned_evidence(body.invoice,j),"owner_entry_attribution":attribution,"owner_supplier_code":pick,"owner_supplier_pick":picked_by},entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
             body.invoice=carry_unchecked(body.invoice,j["invoice"])
             inv,provenance=enrich(body.invoice,references(c)) if demo_references else (body.invoice,[])
             before=j["invoice"]
-            j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
+            j.update(evidence=aligned_evidence(body.invoice,j),invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
             if view is not None:
                 j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries;j["owner_entry_attribution"]=attribution
                 if pick:j.update(owner_supplier_code=pick,owner_supplier_pick=picked_by)
