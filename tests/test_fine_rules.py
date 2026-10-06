@@ -141,6 +141,27 @@ def test_R_005_route_order_barcode_vpn_item_parent_then_description_only_as_revi
     assert fuzzy["lines"][0]["Item"] == "" and fuzzy["status"] != "Approved"
 
 
+
+def test_D87_barcode_then_vpn_then_description_last_and_review_only():
+    """D87 (owner): barcode, then the supplier item code (VPN), then the description, never by product name alone."""
+    def first(**line):
+        return run(invoice(lines=lines(first=line)))["lines"][0]
+    assert first(gtin="0012345678905", sku="100001")["Match Method"] == "Barcode exact"
+    # A barcode found only in the description text ranks after the VPN column.
+    in_text = first(gtin=None, sku="100001", description="Glow Serum Rose 0012345678905")
+    assert in_text["Item"] == "345000001" and in_text["Match Method"] == "VPN exact"
+    assert first(gtin=None, sku=None, description="Glow Serum Rose 0012345678905")["Match Method"] == "Barcode exact"
+    # The two identifiers disagree: no fill, the conflict stays.
+    other = run(invoice(lines=lines(first={"gtin": None, "sku": "100001",
+                                           "description": "Glow Serum Rose 0098765432109"})))
+    assert other["lines"][0]["Item"] == "" and "Item Conflict" in types(other, "ALG-020")
+    # A barcode cell left empty (unreadable on the page) falls to the VPN.
+    assert first(gtin=None, sku="100001")["Match Method"] == "VPN exact"
+    # The description alone never fills and is marked for review.
+    described = run(invoice(lines=lines(first={"gtin": None, "sku": None, "description": "Glow Serum Rose 30ml"})))
+    assert described["lines"][0]["Item"] == "" and described["lines"][0]["Match Method"] == "Description candidate"
+    assert "Item Exception" in types(described, "ALG-019") and described["status"] != "Approved"
+
 def test_R_006_supplier_name_to_item_master_and_several_sites_is_exception():
     by_name = run(invoice(supplier_name="ABC001RA1KWD", lines=lines(first={"gtin": "1"}, second={"gtin": "2"})))
     assert by_name["header"]["Supplier Site"] == "22001"
