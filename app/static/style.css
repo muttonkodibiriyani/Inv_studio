@@ -281,6 +281,7 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .batch-selection { display: grid; gap: 2px; min-width: 0; }
 .batch-selection > div { display: flex; gap: 10px; flex-wrap: wrap; }
 .batch-controls .link-button { font-size: 10px; text-align: left; }
+.batch-controls .select-all { display: inline-flex; align-items: center; gap: 5px; justify-self: start; color: var(--forest); font-size: 10px; font-weight: 700; }
 .batch-controls span, .batch-controls small { color: var(--muted); font-size: 9px; }
 .batch-actions { display: grid; grid-template-columns: 1fr; gap: 6px; }
 .batch-actions .button { width: 100%; white-space: normal; }

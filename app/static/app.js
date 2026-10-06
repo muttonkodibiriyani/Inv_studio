@@ -916,6 +916,12 @@ function isSelectableInvoice(job) {
   return Boolean(job.id) && !["queued", "processing", "deleting"].includes(job.status);
 }
 
+// Decision 64: "Select all" covers the selectable invoices in the list as shown, so a search narrows it.
+function visibleSelectableJobs() {
+  const visible = new Set(app.visibleJobIds || []);
+  return (app.state?.jobs || []).filter((job) => visible.has(job.id) && isSelectableInvoice(job));
+}
+
 function navigate(sectionName) {
   $$(".page-section").forEach((section) => {
     const active = section.id === `${sectionName}-section`;
@@ -972,6 +978,7 @@ function renderJobs() {
   const now = new Date();
   const list = $("#job-list");
   list.replaceChildren();
+  app.visibleJobIds = filtered.map((job) => job.id);
 
   filtered.forEach((job) => {
     const row = make("div", `job-row${job.id === app.selectedJobId ? " active" : ""}`);
@@ -1034,6 +1041,12 @@ function updateBatchControls() {
   $("#batch-export").disabled = valid.length === 0 || approvedSelected !== valid.length || app.reviewDirty;
   $("#batch-delete").disabled = valid.length === 0;
   $("#select-all-finished").disabled = !jobs.some(isSelectableInvoice);
+  const visible = visibleSelectableJobs();
+  const ticked = visible.filter((job) => app.selectedForBatch.has(job.id)).length;
+  const selectAll = $("#select-all-jobs");
+  selectAll.checked = visible.length > 0 && ticked === visible.length;
+  selectAll.indeterminate = ticked > 0 && ticked < visible.length;
+  selectAll.disabled = visible.length === 0;
   const processed = jobs.filter(isBatchReviewable);
   const allProcessedSelected = processed.length > 0 && processed.every((job) => app.selectedForBatch.has(job.id));
   $("#select-processed").textContent = allProcessedSelected ? "Clear selection" : `Select processed${processed.length ? ` (${processed.length})` : ""}`;
@@ -2907,6 +2920,10 @@ function bindEvents() {
   $("#confirm-delete-invoices").addEventListener("click", deleteInvoices);
   $("#delete-invoice-acknowledge").addEventListener("change", () => {
     $("#confirm-delete-invoices").disabled = !$("#delete-invoice-acknowledge").checked;
+  });
+  $("#select-all-jobs").addEventListener("change", (event) => {
+    visibleSelectableJobs().forEach((job) => (event.target.checked ? app.selectedForBatch.add(job.id) : app.selectedForBatch.delete(job.id)));
+    renderJobs();
   });
   $("#select-all-finished").addEventListener("click", () => {
     const finished = app.state.jobs.filter(isSelectableInvoice);
