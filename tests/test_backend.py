@@ -398,6 +398,7 @@ def test_preflight_requires_confirmation_is_file_bound_and_invalidates_on_rule_c
     )
     assert plan.status_code == 200
     assert any("No reference files loaded" in warning for warning in plan.json()["warnings"])
+    assert client.get("/api/state").json()["legacy_references"] is True
     token = plan.json()["token"]
 
     unconfirmed = client.post(

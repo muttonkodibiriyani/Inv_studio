@@ -2,7 +2,9 @@
  * Playwright check of the demo path polish at 1440 and 390 px: every bottom-bar item fits the phone bar, inbox
  * rows keep the number and time readable beside the target chip, another invoice opens at the top of its details,
  * a tap reveals the review on stacked layouts, long staged-source ids wrap, the target-check reason column is
- * readable, and the model inputs carry a valid pattern (no console error). Every job is mocked synthetic data.
+ * readable, and the model inputs carry a valid pattern (no console error). Production mode (no legacy references)
+ * shows no synthetic-demo or legacy-reference control, asks for none of their endpoints and names the owner sources in
+ * the preflight; a test build still shows them. Every job is mocked synthetic data.
  * SCREENSHOT_DIR=<dir> also saves screenshots.
  *
  *   BASE_URL=http://127.0.0.1:8765 node tests/demo_readiness.browser.mjs
@@ -95,7 +97,7 @@ try {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
     const baseline = await context.request.get(`${baseURL}/api/state`);
     assert(baseline.ok(), `Baseline state failed with HTTP ${baseline.status()}`);
-    const state = { ...(await baseline.json()), jobs: jobs.map((job) => ({ ...job, rules: trimmed(job.rules) })), exports: [], accounts: [], active_account: null };
+    const state = { ...(await baseline.json()), legacy_references: false, references: null, jobs: jobs.map((job) => ({ ...job, rules: trimmed(job.rules) })), exports: [], accounts: [], active_account: null };
     const page = await context.newPage();
     await page.setViewportSize(viewport);
     page.setDefaultTimeout(timeout);
@@ -103,6 +105,10 @@ try {
     const consoleErrors = [];
     page.on("pageerror", (error) => pageErrors.push(error.message));
     page.on("console", (message) => { if (message.type() === "error" && !/Failed to load resource/.test(message.text())) consoleErrors.push(message.text()); });
+    const failures = [];
+    const legacyAsked = [];
+    page.on("response", (response) => { if (response.status() >= 400) failures.push(`${response.status()} ${new URL(response.url()).pathname}`); });
+    page.on("request", (request) => { if (/\/api\/(references|demo)(\/|$)/.test(new URL(request.url()).pathname)) legacyAsked.push(new URL(request.url()).pathname); });
     await page.route("**/api/state", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) }));
     await page.route("**/api/jobs/*", (route) => (route.request().method() === "GET"
       ? route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(jobs.find((job) => route.request().url().endsWith(job.id)) || jobs[0]) })
@@ -115,6 +121,8 @@ try {
     await page.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
     await page.locator("#app-shell").waitFor({ state: "visible" });
     await page.locator(".target-chip").first().waitFor({ state: "visible" });
+    // Production: no control that only a test build can answer.
+    assert.equal(await page.locator("#load-demo").isHidden(), true, "Try synthetic demo is shown in production");
 
     // Every navigation item sits inside the phone's bottom bar (Engines & AI holds the AI toggle).
     if (phone) {
@@ -175,21 +183,57 @@ try {
     assert.match(await page.locator(".validation-details summary").textContent(), /^1 note accepted at review/);
     assert.match(await page.locator("#validation-summary li").first().textContent(), /\(accepted at review\)$/);
 
+    // The preflight names what production validates against instead of "References: Not loaded".
+    await page.locator("[data-open-upload]:visible").first().click();
+    await page.locator("#invoice-files").setInputFiles(resolve(repoRoot, "samples/invoice-scan.png"));
+    await page.locator("#start-upload").click();
+    await page.locator("#preflight-dialog").waitFor({ state: "visible" });
+    const preflight = await page.locator("#preflight-summary").innerText();
+    assert.match(preflight, /References\s+Owner catalog and mapping tables/);
+    assert.doesNotMatch(preflight, /Not loaded/);
+    if (shots) await page.screenshot({ path: `${shots}/preflight-${tag}.png` });
+    await page.locator("#cancel-preflight").click();
+    await page.locator("#preflight-dialog").waitFor({ state: "hidden" });
+    await page.locator('#upload-dialog [aria-label="Close upload panel"]').click();
+    await page.locator("#upload-dialog").waitFor({ state: "hidden" });
+
     // Long staged-source ids wrap inside the References cards.
     await page.locator('.sidebar [data-nav="references"]').click();
     await page.locator("#reference-source-summary", { hasText: "dataset:" }).waitFor();
     const wide = await page.evaluate(() => [...document.querySelectorAll("#references-section .card")]
       .filter((card) => card.offsetParent !== null && card.getBoundingClientRect().right > document.documentElement.clientWidth + 1).length);
     assert.equal(wide, 0, `${wide} References card(s) run past the viewport at ${tag}px`);
+    assert.equal(await page.locator("#legacy-reference-card").isHidden(), true, "the legacy reference snapshot is shown in production");
     if (shots) await page.screenshot({ path: `${shots}/references-${tag}.png`, fullPage: true });
 
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     assert(overflow <= 1, `Page scrolls horizontally by ${overflow}px at ${viewport.width}px`);
     assert.deepEqual(pageErrors, []);
     assert.deepEqual(consoleErrors, []);
+    assert.deepEqual(failures, []);
+    assert.deepEqual(legacyAsked, []);
     await page.close();
   }
-  console.log(`Demo-readiness browser test passed (synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
+
+  // A test build (the server's own state) still offers the synthetic demo and the legacy snapshot.
+  for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+    const page = await context.newPage();
+    await page.setViewportSize(viewport);
+    page.setDefaultTimeout(timeout);
+    const pageErrors = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    await page.goto(baseURL, { waitUntil: "domcontentloaded", timeout });
+    await page.locator("#app-shell").waitFor({ state: "visible" });
+    await waitFor(() => page.evaluate(() => Boolean(window.fetch) && document.querySelector("#reference-status")?.textContent !== ""));
+    const legacy = (await (await context.request.get(`${baseURL}/api/state`)).json()).legacy_references;
+    assert.equal(legacy, true, "run this test against a test build (INV_STUDIO_DEMO_REFERENCES=1), as CI does");
+    await waitFor(() => page.locator("#legacy-reference-card").evaluate((card) => !card.hidden));
+    assert.equal(await page.locator("#load-demo").evaluate((button) => button.hidden), false);
+    if (viewport.width > 700) assert(await page.locator("#load-demo").isVisible(), "Try synthetic demo is missing from a test build");
+    assert.deepEqual(pageErrors, []);
+    await page.close();
+  }
+  console.log(`Demo-readiness browser test passed (production and test-build modes; synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
 } finally {
   await browser.close();
 }

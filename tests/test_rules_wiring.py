@@ -237,6 +237,24 @@ def test_demo_references_are_test_only(production, monkeypatch, tmp_path):
         create_app(tmp_path / "cloud")
 
 
+PREFLIGHT = {"options": {"engine": "auto", "ai_fallback": False, "provider": "openai", "model": "", "language": "en"},
+             "files": [{"name": "synthetic.pdf", "size": 10}]}
+
+
+def test_production_preflight_names_the_owner_sources_not_legacy_references(production, monkeypatch, tmp_path):
+    _, client = production
+    assert client.get("/api/state").json()["legacy_references"] is False
+    warnings = client.post("/api/preflight", headers=H, json=PREFLIGHT).json()["warnings"]
+    assert not any("No reference files loaded" in w or "owner catalog" in w or "mapping tables" in w for w in warnings)
+
+    monkeypatch.setenv("INV_STUDIO_DATA", str(tmp_path / "empty-default"))
+    from app.main import create_app
+    with TestClient(create_app(tmp_path / "empty")) as empty:
+        warnings = empty.post("/api/preflight", headers=H, json=PREFLIGHT).json()["warnings"]
+    assert any(w.startswith("No owner catalog or mapping tables imported.") for w in warnings)
+    assert not any("No reference files loaded" in w for w in warnings)
+
+
 def test_legacy_demo_validation_is_still_available_to_tests():
     assert matching.validate and matching.enrich and Decimal("0.95") == matching.ITEM_THRESHOLD
 

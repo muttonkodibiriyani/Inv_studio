@@ -492,6 +492,7 @@ def create_app(data_dir=None):
                 "accounts":accounts,"active_account":active_account,"settings":settings,
                 "policy":rules.model_dump(mode="json"),"references":{"version":refs.get("version"),"imported_at":refs.get("imported_at"),"counts":{k:len(refs.get(k,[])) for k in ("sites","routes","items","orders","receipts","taxRules")}} if refs else None,
                 "jobs":[public(evaluate(j,validation_context=(refs,rules,ledger)),False) for j in jobs],"exports":exports,
+                "legacy_references":demo_references,
                 "samples":{"demo":{"name":"SYNTHETIC-demo-invoice.pdf","size":(ROOT/"samples/invoice.pdf").stat().st_size}}}
 
     @app.post("/api/preflight")
@@ -500,7 +501,11 @@ def create_app(data_dir=None):
         if opts.engine=="invoice2data":warnings.append("invoice2data reads native text and supplier templates. Scanned PDFs and images use PaddleOCR locally as the input reader; the trace names both components.")
         if opts.engine in ("auto","invoice2data","paddleocr"):
             warnings.append("Short scanned PDFs with unread quantities or prices may receive one higher-resolution local OCR pass, within a six-minute reader limit. It is retained only when consistency checks improve; all values still require review. Local OCR files wait their turn to keep the workspace responsive.")
-        if not references():warnings.append("No reference files loaded. Extraction can run, but Excel export stays on hold until references are imported and checked.")
+        if demo_references and not references():warnings.append("No reference files loaded. Extraction can run, but Excel export stays on hold until references are imported and checked.")
+        if not demo_references:
+            with store.connection() as c:
+                missing=[n for n,v in (("owner catalog",c.execute("SELECT 1 FROM lookup_sources LIMIT 1").fetchone()),("mapping tables",store.get("fine_rules_config",{},c))) if not v]
+            if missing:warnings.append(f"No {' or '.join(missing)} imported. Extraction can run, but the rules cannot check this batch and Excel export stays on hold until they are imported.")
         if opts.ai_fallback or opts.engine=="ai":
             if not opts.model:warnings.append("No AI model selected. If local reading fails, this batch will wait for an AI connection or manual review.")
             warnings.append("AI fallback sends the invoice document or its extracted text to the selected provider. Provider usage limits and charges may apply.")

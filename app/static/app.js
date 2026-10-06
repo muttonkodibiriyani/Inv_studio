@@ -2113,7 +2113,8 @@ function renderPreflight(plan, request) {
     ["AI fallback", plan.summary.ai_fallback ? "Allowed" : "Disabled (local only)"],
     ["Provider", plan.summary.ai_fallback || plan.summary.engine === "ai" ? humanize(plan.summary.provider) : "Not used"],
     ["Model", plan.summary.ai_fallback || plan.summary.engine === "ai" ? (plan.summary.model || "Not selected") : "Not used"],
-    ["References", plan.summary.reference_version ? `Version ${String(plan.summary.reference_version).slice(0, 12)}` : "Not loaded — export will be held"],
+    ["References", !app.state?.legacy_references ? "Owner catalog and mapping tables"
+      : plan.summary.reference_version ? `Version ${String(plan.summary.reference_version).slice(0, 12)}` : "Not loaded — export will be held"],
     ["Price tolerance", String(plan.summary.policy?.price_tolerance ?? "—")],
     ["Total tolerance", String(plan.summary.policy?.total_tolerance ?? "—")],
   ];
@@ -2459,6 +2460,11 @@ async function searchReferenceLookup({ append = false } = {}) {
 }
 
 function renderReferences() {
+  // Production validates against the owner catalog and mapping tables; the legacy snapshot and the synthetic demo
+  // that loads it exist only in test builds, where the server answers their endpoints.
+  const legacy = Boolean(app.state?.legacy_references);
+  $("#load-demo").hidden = !legacy;
+  $("#legacy-reference-card").hidden = !legacy;
   const refs = app.state?.references;
   $("#reference-status").textContent = refs ? `Version ${String(refs.version || "loaded").slice(0, 10)}` : "Not loaded";
   $("#reference-status").className = `status-pill ${refs ? "success" : "neutral"}`;

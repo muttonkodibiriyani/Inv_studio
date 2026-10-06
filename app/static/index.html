@@ -94,7 +94,7 @@
               <p>Extract, compare and approve every value against its source.</p>
             </div>
             <div class="heading-actions">
-              <button id="load-demo" class="button button-secondary" type="button">Try synthetic demo</button>
+              <button id="load-demo" class="button button-secondary" type="button" hidden>Try synthetic demo</button>
               <button class="button button-primary" type="button" data-open-upload>Add invoices</button>
             </div>
           </div>
@@ -327,7 +327,7 @@
             <div><p class="eyebrow">Matching foundation</p><h1 id="references-title">Reference data &amp; rules</h1><p>Upload the records that invoices are validated against.</p></div>
           </div>
           <div class="settings-grid">
-            <article class="card settings-card wide">
+            <article id="legacy-reference-card" class="card settings-card wide" hidden>
               <div class="settings-card-header">
                 <span class="section-icon mint"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M5 4h14v16H5zM8 8h8M8 12h8M8 16h5"/></svg></span>
                 <div><h2>Approved matching snapshot</h2><p>Sites, routes, items, purchase orders, receipts and tax rules used by validation.</p></div>
