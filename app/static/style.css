@@ -391,6 +391,8 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .completeness { display: grid; justify-items: end; }
 .completeness span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
 .completeness strong { color: var(--forest); font-size: 17px; }
+.completeness.not-read strong { color: var(--warning); }
+.completeness small { max-width: 260px; color: var(--warning); font-size: 11px; text-align: right; }
 .processing-result { min-height: 390px; padding: 24px; background: linear-gradient(180deg, #f8fbfa, #fff); }
 .processing-result-copy { display: flex; gap: 12px; align-items: center; padding: 15px; background: #edf6f2; border: 1px solid #d5e8e0; border-radius: 11px; }
 .processing-result-copy > div { min-width: 0; }

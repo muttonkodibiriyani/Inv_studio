@@ -230,8 +230,9 @@
                   <article class="card fields-card" aria-labelledby="fields-title">
                     <div class="card-header compact fields-heading">
                       <div><p class="eyebrow">Structured result</p><h2 id="fields-title">Invoice details</h2></div>
-                      <div id="completeness" class="completeness" aria-label="Extraction coverage, not accuracy or approval" title="Checks for required extracted fields and consistent totals. This is not a measured accuracy score or approval.">
-                        <span>Field completeness</span><strong>—</strong>
+                      <div id="completeness" class="completeness" aria-label="Fields found: counts fields present, not whether they are correct" title="Counts the invoice fields and item lines that were found, and whether the totals add up. It does not check that any value is correct, so it is not accuracy or approval.">
+                        <span>Fields found</span><strong>—</strong>
+                        <small id="completeness-reason" hidden></small>
                       </div>
                     </div>
                     <div id="processing-result" class="processing-result" aria-live="polite" hidden>
