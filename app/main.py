@@ -571,12 +571,14 @@ def create_app(data_dir=None):
     @app.post("/api/jobs/{jid}/extraction-draft")
     def download_extraction(jid:str,body:ExtractionDraftRequest):
         if not body.acknowledge_unvalidated:raise HTTPException(400,"Acknowledge that this is an unvalidated review copy")
+        # The same current rules the target export reads, so the draft's Item is the export's Item (decision 56).
+        ensure_rules(jid)
         j=job_or_404(jid)
         if j["status"] in ("queued","processing"):raise HTTPException(409,"Wait for extraction to finish")
         if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before downloading.")
         invoice=Invoice.model_validate(j["invoice"])
         if not invoice.number and not invoice.lines:raise HTTPException(409,"No extracted invoice fields are available")
-        content=extraction_workbook(invoice,j["filename"],j["revision"])
+        content=extraction_workbook(invoice,j["filename"],j["revision"],fresh_rules(j))
         store.audit("extraction_draft_downloaded",{"job_id":jid,"revision":j["revision"],"approved":False,"line_items":len(invoice.lines)})
         return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":f'attachment; filename="EXTRACTION_REVIEW_ONLY_{jid[:8]}.xlsx"'})
 
@@ -743,6 +745,7 @@ def create_app(data_dir=None):
     def download_extraction_batch(body:ExtractionBatch):
         if not body.acknowledge_unvalidated:raise HTTPException(400,"Acknowledge that this is an unvalidated review copy")
         if len({x.id for x in body.jobs})!=len(body.jobs):raise ValueError("Select each invoice only once")
+        for request in body.jobs:ensure_rules(request.id)
         entries=[];snapshots=[]
         with store.connection() as c:
             for request in body.jobs:
@@ -751,7 +754,7 @@ def create_app(data_dir=None):
                 if j["revision"]!=request.revision:raise HTTPException(409,"A selected invoice changed. Refresh before downloading.")
                 invoice=Invoice.model_validate(j["invoice"])
                 if not invoice.number and not invoice.lines:raise HTTPException(409,"A selected invoice has no extracted fields. Complete it before downloading.")
-                entries.append((invoice,j["filename"],j["revision"]))
+                entries.append((invoice,j["filename"],j["revision"],fresh_rules(j)))
                 snapshots.append({"job_id":j["id"],"revision":j["revision"],"transaction_number":len(entries),"line_items":len(invoice.lines)})
         content=extraction_batch_workbook(entries)
         store.audit("extraction_batch_downloaded",{"invoices":snapshots,"approved":False,"count":len(entries)})

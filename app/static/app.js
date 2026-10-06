@@ -693,10 +693,14 @@ function initializeManualDraft(job) {
   setDraftField("Tax_Breakdown", "Tax Code", draftValue(job, "taxCode", invoice.taxCode));
   setDraftField("Tax_Breakdown", "Tax Basis", draftValue(job, "net", invoice.net));
   $("#manual-draft-lines").replaceChildren();
+  const matchFor = (index) => matches.find((match) => match.line === index + 1);
+  // With matches, Item is what the target workbook writes for the line: the rules' match only.
+  // A typed item_id stays a review candidate (ITM-006); it fills Item only when there are no matches.
+  const typedItem = (line) => (matches.length ? "" : line.item_id || "");
   (invoice.lines?.length ? invoice.lines : [{}]).forEach((line, index) => addManualDraftLine({
     "Transaction Number": 1,
-    Item: matches[index]?.item || line.item_id || "",
-    UPC: matches[index]?.gtin || line.gtin || "",
+    Item: matchFor(index)?.item || typedItem(line),
+    UPC: matchFor(index)?.gtin || line.gtin || "",
     "Unit Cost": line.price ?? "",
     Quantity: line.qty ?? "",
     "Unit Tax Code": draftValue(job, "taxCode", invoice.taxCode) || "",
