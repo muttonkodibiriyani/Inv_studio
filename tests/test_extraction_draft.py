@@ -5,6 +5,12 @@ from app.models import Invoice
 from app.extraction_draft import extraction_workbook
 
 
+def _unchanged(job,record):
+    # A draft download may refresh the stored rules (as the target export does); nothing the reviewer owns changes.
+    derived=('rules','validation','target_system')
+    return {k:v for k,v in job.items() if k not in derived}=={k:v for k,v in record.items() if k not in derived}
+
+
 def test_review_copy_preserves_printed_values_and_leaves_unknown_codes_blank():
     invoice=Invoice(number='=NOT_A_FORMULA',date='2026-01-02',net='10.01',tax='0.50',
         lines=[{'sku':'00077','gtin':'00012345678905','qty':'3','price':'3.33','description':'Test only'}])
@@ -46,7 +52,7 @@ def test_review_copy_download_requires_ack_and_never_approves_or_changes_job(tmp
         response=client.post(url,headers=headers,json={'revision':2,'acknowledge_unvalidated':True})
         assert response.status_code==200
         assert 'EXTRACTION_REVIEW_ONLY' in response.headers['Content-Disposition']
-        assert app.state.store.job('synthetic')==record
+        assert _unchanged(app.state.store.job('synthetic'),record)
         with app.state.store.connection() as connection:assert app.state.store.ledger(connection)==[]
 
 
@@ -75,7 +81,7 @@ def test_batch_review_workbook_links_each_invoice_and_rejects_stale_or_unfinishe
         assert [r[0] for r in book['Details'].iter_rows(min_row=2,values_only=True)]==[1,2,2]
         assert book['Header']['B3'].value=='INVOICE-2'
         assert book['Details']['C4'].value=='00021'
-        assert [app.state.store.job(str(i)) for i in (1,2)]==originals
+        assert all(_unchanged(app.state.store.job(str(i)),original) for i,original in zip((1,2),originals))
         with app.state.store.connection() as c:assert app.state.store.ledger(c)==[]
         assert client.post(url,headers=headers,json={**body,'jobs':[selected[0],selected[0]]}).status_code==400
         assert client.post(url,headers=headers,json={**body,'jobs':[{'id':'1','revision':1}]}).status_code==409
@@ -121,21 +127,28 @@ def test_with_rules_the_draft_item_is_the_target_item_and_a_typed_item_never_ove
     assert book['Details']['B2'].value=='00042'
 
 
-def test_draft_download_uses_only_rules_of_the_current_revision(tmp_path,monkeypatch):
+def test_draft_download_refreshes_the_rules_like_the_export_and_never_uses_stale_or_typed_items(tmp_path,monkeypatch):
     monkeypatch.setenv('INV_STUDIO_DATA',str(tmp_path/'module-default'))
-    from app.main import create_app
-    app=create_app(tmp_path)
-    invoice=Invoice(number='REVIEW-2',net='2',lines=[{'sku':'VENDOR-1','qty':'1','price':'2'}]).model_dump(mode='json')
-    headers={'X-Studio-Request':'1'};url='/api/jobs/synthetic/extraction-draft'
-    with TestClient(app) as client:
-        for rules_revision,expected in ((2,'00099'),(1,None)):
-            record={'id':'synthetic','filename':'synthetic.pdf','status':'review','revision':2,'reviewed':False,
-                    'invoice':invoice,'rules':{**_rules_lines(),'revision':rules_revision}}
-            app.state.store.job('synthetic',record)
-            response=client.post(url,headers=headers,json={'revision':2,'acknowledge_unvalidated':True})
+    import app.main
+    from tests.test_rules_wiring import approved_result
+    monkeypatch.setattr(app.main,'run_batch',lambda entries,*a,**k:[approved_result() for _ in entries])
+    app_=app.main.create_app(tmp_path)
+    invoice=Invoice(number='INV-1',net='30',lines=[{'item_id':'00042','sku':'VENDOR-1','qty':'3','price':'10'}]).model_dump(mode='json')
+    headers={'X-Studio-Request':'1'}
+    stale={**_rules_lines(),'revision':1}
+    with TestClient(app_) as client:
+        for rules in (stale,{**_rules_lines(),'revision':2},None):
+            record={'id':'synthetic','filename':'synthetic.pdf','status':'review','revision':2,'reviewed':False,'invoice':invoice,
+                    **({'rules':rules} if rules else {})}
+            app_.state.store.job('synthetic',record)
+            response=client.post('/api/jobs/synthetic/extraction-draft',headers=headers,json={'revision':2,'acknowledge_unvalidated':True})
             assert response.status_code==200
-            assert load_workbook(io.BytesIO(response.content))['Details']['B2'].value==expected
-            assert app.state.store.job('synthetic')==record
+            # Absent, stale by revision, or stale by table signature: re-run, so the export's Item, never the typed one.
+            assert load_workbook(io.BytesIO(response.content))['Details']['B2'].value==345000001
+            assert _unchanged(app_.state.store.job('synthetic'),record)
+        response=client.post('/api/exports/extraction-batch',headers=headers,
+                             json={'jobs':[{'id':'synthetic','revision':2}],'acknowledge_unvalidated':True})
+        assert load_workbook(io.BytesIO(response.content))['Details']['B2'].value==345000001
 
 
 def test_draft_item_equals_the_target_export_item_line_by_line():

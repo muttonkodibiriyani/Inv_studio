@@ -72,5 +72,5 @@ def extraction_batch_workbook(entries):
 
 
 def extraction_workbook(invoice, source_name, revision, rules=None):
-    """``rules`` is the job's rules view for this revision: an Item typed in review wins, then the rules' evidenced Item."""
+    """``rules`` is the job's rules view for this revision: Item is the rules' evidenced Item; a typed item only when there are no rules."""
     return extraction_batch_workbook([(invoice,source_name,revision,rules)])
