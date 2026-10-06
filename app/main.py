@@ -370,9 +370,11 @@ def create_app(data_dir=None):
                 store.job(jid,j)
             if identity.cloud:store.ensure_blob(Path(job["path"]))
             result=process(Path(job["path"]),opts,store,providers.extract,progress)
+            lines=Invoice.model_validate(result["invoice"]).model_dump(mode="json")["lines"]
             view=None
             if not demo_references:
-                view=compute_rules(Invoice.model_validate(result["invoice"]),{**job,**result})
+                kept=reread_entries(job,lines)
+                view=compute_rules(Invoice.model_validate(result["invoice"]),{**job,**result,**(kept[0] if kept else {})})
             with plans_lock,store.connection(True) as c:
                 job=job_or_404(jid,c)
                 unchanged=job.get("confirmed_signature")==rule_signature(opts)
@@ -382,7 +384,12 @@ def create_app(data_dir=None):
                 outcome="fields_extracted" if header_fields or extracted_lines else "text_read" if result.get("text","").strip() else "extraction_failed"
                 if demo_references:inv,provenance=enrich(raw,references(c)) if unchanged else (raw,[])
                 else:inv,provenance=raw,[]
+                kept=reread_entries(job,lines)
                 job.update(result);job.update(evidence=annotate_evidence(result.get("evidence"),result["invoice"],filename=job.get("filename")))
+                if kept:
+                    job.update(kept[0])
+                    note=f"{kept[1]} line correction{' was' if kept[1]==1 else 's were'} cleared because the invoice was read again."
+                    job["extraction_note"]=" ".join(x for x in (note,job.get("extraction_note")) if x)
                 job.update(invoice=inv.model_dump(mode="json"),provenance=provenance,
                             extraction_status=outcome,
                             status="review" if unchanged else "error",reviewed=False,progress=None,revision=job["revision"]+1,
@@ -394,7 +401,7 @@ def create_app(data_dir=None):
                 store.audit(outcome,{"job_id":jid,"engine":job["selected_engine"],"trace":job["trace"],
                             "header_fields":header_fields,"line_items":extracted_lines,
                             "text_characters":len(result.get("text","")),"approved":False,
-                            "confirmed_rules_unchanged":unchanged},c)
+                            "confirmed_rules_unchanged":unchanged,"owner_line_entries_cleared":kept[1] if kept else 0},c)
             if unchanged and needs_scan_evidence(result,opts) and os.getenv("INV_STUDIO_VERIFY_SCANS","1")!="0":
                 # The result is saved and reviewable; a failing evidence pass must not turn it into an error.
                 try:scan_evidence(jid,Path(job["path"]),opts,result["selected_engine"])
@@ -670,6 +677,14 @@ def create_app(data_dir=None):
         learn_later(j)
         return {"id":eid,"url":"/api/exports/"+eid}
 
+    def reread_entries(j,lines):
+        """Line entries are keyed by line number, so a re-read that changes the lines drops them; header
+        entries stay. Returns the job fields to keep and the count of cleared line cells, or None."""
+        entries=j.get("owner_entries") or {}
+        cleared=sum(len(cells or {}) for cells in (entries.get("lines") or {}).values())
+        if not cleared or lines==(j.get("invoice") or {}).get("lines"):return None
+        attribution={k:v for k,v in (j.get("owner_entry_attribution") or {}).items() if not k.startswith("line:")}
+        return {"owner_entries":{**entries,"lines":{}},"owner_entry_attribution":attribution},cleared
     def entry_attribution(before,after,previous):
         """Actor and time per owner entry; an unchanged entry keeps its first attribution."""
         before,previous,out=before or {},previous or {},{}
