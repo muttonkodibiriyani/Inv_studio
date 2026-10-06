@@ -11,6 +11,9 @@ class Line(StrictModel):
     item_id: str | None = None
     sku: str | None = None
     gtin: str | None = None
+    # The printed non-GTIN code of a part-number column, kept whole as printed even when
+    # the description's own code fills sku. Local table reads only; never asked of an AI.
+    part_code: str | None = None
     description: str | None = None
     qty: Decimal | None = None
     uom: str | None = None
@@ -67,7 +70,7 @@ def extraction_schema():
     # values are strings so digits survive JSON decoding without float rounding.
     nullable = lambda: {"type": ["string", "null"]}
     fields = {k: nullable() for k in Invoice.model_fields if k != "lines"}
-    line = {k: nullable() for k in Line.model_fields if k != "page"}
+    line = {k: nullable() for k in Line.model_fields if k not in ("page", "part_code")}
     line["page"] = {"type": ["integer", "null"]}
     fields["lines"] = {"type": "array", "items": {"type": "object", "properties": line,
         "required": list(line), "additionalProperties": False}}
@@ -102,4 +105,7 @@ def parse_ai_output(data):
         if isinstance(quote, str) and quote.strip():
             evidence[field] = {"quote": quote.strip()[:300],
                                "page": page if isinstance(page, int) and 1 <= page <= 20 else None}
+    for line in data.get("lines") or []:
+        if isinstance(line, dict):
+            line.pop("part_code", None)  # a local table fact; an AI never supplies it
     return Invoice.model_validate(data), evidence
