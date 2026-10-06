@@ -994,8 +994,12 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
+                    # gtin and barcode_unchecked are one barcode slot: a line never holds both.
+                    barcode_read = any(measured_line.get(f) is not None for f in ("gtin", "barcode_unchecked"))
                     for field in ("sku", "gtin", "barcode_unchecked", "part_code", "uom",
                                   "net_amount", "tax_amount", "_other_amount"):
+                        if field in ("gtin", "barcode_unchecked") and barcode_read:
+                            continue
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)

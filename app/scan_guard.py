@@ -19,6 +19,8 @@ GTIN_LENGTHS=(8,12,13,14)
 UNREADABLE="barcode unreadable or incomplete"
 MISPRINT="printed barcode fails the GTIN check digit (likely misprint) - check the printout"
 UNCONFIRMED="barcode not confirmed on the page"
+# Machine codes for a line barcode review, set next to the reason text.
+BARCODE_CODES={MISPRINT:"misprint",UNREADABLE:"unreadable",UNCONFIRMED:"unconfirmed"}
 AI_PAGE_IMAGE="AI (page image)"
 KEY_HEADER=("number","date","po","net","tax")
 NO_TAX="no tax total printed on the invoice"

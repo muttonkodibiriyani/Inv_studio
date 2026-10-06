@@ -290,11 +290,16 @@ def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
     return merged,evidence,header_readers,line_readers,notes
 
 
-def _review(entry,line,source,reason,other):
+def _review(entry,line,source,reason,other,code=None):
     """An evidence entry carrying this reader's review reason; the value it names is the reader's, not the invoice's."""
     entry=dict(entry) if entry else {"quote":"","page":(line or {}).get("page"),"source":source}
     entry["review"]={"reason":reason,"other_value":None if other in (None,"") else str(other)[:300]}
+    if code:entry["review"]["code"]=code
     return entry
+
+
+def _barcode_review(entry,line,source,reason,other):
+    return _review(entry,line,source,reason,other,scan_guard.BARCODE_CODES.get(reason))
 
 
 def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
@@ -314,15 +319,20 @@ def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
         if printed in (None,""):
             # A reader that already moved a failed-check code aside still owes the review flag.
             if line.get("barcode_unchecked") and not (rows[n].get("gtin") or {}).get("review"):
-                rows[n]["gtin"]=_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
+                rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
             continue
         gtin,unchecked,reason=scan_guard.classify_barcode(printed)
         from_ai=line_readers[n].get("gtin")=="ai"
         line["gtin"]=gtin
         if not from_ai and unchecked:line["barcode_unchecked"]=unchecked
+        if gtin and line.get("barcode_unchecked"):
+            # Two reads of one printed code disagree: barcode_unchecked set means gtin None, flagged.
+            line["gtin"]=None;line_readers[n].pop("gtin",None)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,source,scan_guard.MISPRINT,line["barcode_unchecked"])
+            continue
         if gtin is None:
             line_readers[n].pop("gtin",None)
-            rows[n]["gtin"]=_review(rows[n].get("gtin"),line,"ai" if from_ai else source,
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),line,"ai" if from_ai else source,
                                     scan_guard.UNREADABLE if from_ai and unchecked else reason,printed)
         elif from_ai and scan:
             claims.append((n,line.get("page"),gtin))
@@ -331,7 +341,7 @@ def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
         for n,_,digits in claims:
             if n in confirmed:continue
             lines[n]["gtin"]=None;line_readers[n].pop("gtin",None)
-            rows[n]["gtin"]=_review(rows[n].get("gtin"),lines[n],"ai",scan_guard.UNCONFIRMED,digits)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),lines[n],"ai",scan_guard.UNCONFIRMED,digits)
     return invoice,evidence
 
 

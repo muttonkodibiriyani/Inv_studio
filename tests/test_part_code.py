@@ -122,3 +122,24 @@ def test_reader_only_line_facts_are_outside_the_ai_schema():
 
     assert "part_code" not in items
     assert "barcode_unchecked" not in items
+
+
+def test_a_line_never_holds_both_a_checked_gtin_and_an_unchecked_barcode():
+    # The measured words read a misprint; TableFormer read the same row's code as a valid barcode.
+    boxes = [box for box in measured_part_table()]
+    for box in boxes:
+        if box["text"] == "4000000000006":
+            box["text"] = MISPRINTED
+    tables = [{"page": 1, "rows": [
+        ["SN", "Barcode", "Description", "Qty", "Unit Price", "Net Amount"],
+        ["1", "SYN-VAR-01", "Synthetic cream", "2", "4.00", "8.00"],
+        ["2", "4000000000006", "Synthetic soap", "2", "4.00", "8.00"],
+        ["3", "PR-001234567890-OP", "Synthetic lotion SKU: SYN-B", "2", "4.00", "8.00"],
+    ]}]
+
+    lines = extract_invoice_from_tables("Tax Invoice", tables, boxes=boxes)["lines"]
+    soap = [line for line in lines if "soap" in (line.get("description") or "")]
+
+    assert soap
+    for line in soap:
+        assert not (line.get("gtin") and line.get("barcode_unchecked"))

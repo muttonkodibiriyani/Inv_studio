@@ -181,7 +181,7 @@ def test_ai_barcode_without_ocr_corroboration_is_cleared_to_evidence(monkeypatch
     first,second=result["invoice"]["lines"]
     assert first["gtin"] is None and second["gtin"]==OTHER
     review=result["evidence"]["lines"][0]["gtin"]["review"]
-    assert review=={"reason":scan_guard.UNCONFIRMED,"other_value":CODE}
+    assert review=={"reason":scan_guard.UNCONFIRMED,"other_value":CODE,"code":"unconfirmed"}
     assert "gtin" not in result["readers"]["lines"][0]
 
 
@@ -200,6 +200,7 @@ def test_covered_barcode_known_to_the_ai_is_not_filled(monkeypatch,tmp_path):
     result,_=run_scan(monkeypatch,tmp_path,partial,ocr_tokens=[CODE[:7],OTHER])
     assert result["invoice"]["lines"][0]["gtin"] is None
     assert result["evidence"]["lines"][0]["gtin"]["review"]["reason"]==scan_guard.UNREADABLE
+    assert result["evidence"]["lines"][0]["gtin"]["review"]["code"]=="unreadable"
 
 
 def test_substring_only_occurrence_does_not_corroborate(monkeypatch,tmp_path):
@@ -222,6 +223,7 @@ def test_local_misprinted_barcode_goes_to_barcode_unchecked(monkeypatch,tmp_path
     line=result["invoice"]["lines"][0]
     assert line["gtin"] is None and line["barcode_unchecked"]==wrong_check(CODE)
     assert result["evidence"]["lines"][0]["gtin"]["review"]["reason"]==scan_guard.MISPRINT
+    assert result["evidence"]["lines"][0]["gtin"]["review"]["code"]=="misprint"
 
 
 
@@ -233,6 +235,15 @@ def test_a_misprint_the_reader_already_set_aside_is_still_flagged(monkeypatch,tm
     assert line["gtin"] is None and line["barcode_unchecked"]==wrong_check(CODE)
     review=result["evidence"]["lines"][0]["gtin"]["review"]
     assert review["reason"]==scan_guard.MISPRINT and review["other_value"]==wrong_check(CODE)
+    assert review["code"]=="misprint"
+
+def test_a_line_with_an_unchecked_barcode_never_keeps_a_checked_gtin(monkeypatch,tmp_path):
+    local={"number":"LOCAL-1","date":"2026-01-15","net":"5.00","tax":"0.25",
+           "lines":[{"sku":"A","gtin":CODE,"barcode_unchecked":wrong_check(CODE),"qty":"1","price":"5.00","net_amount":"5.00"}]}
+    result,_=run_scan(monkeypatch,tmp_path,ai_scan_read(),local=local,ocr_tokens=[CODE])
+    line=result["invoice"]["lines"][0]
+    assert line["gtin"] is None and line["barcode_unchecked"]==wrong_check(CODE)
+    assert result["evidence"]["lines"][0]["gtin"]["review"]["reason"]==scan_guard.MISPRINT
 
 def test_po_is_never_read_from_a_po_box(monkeypatch,tmp_path):
     ai=ai_scan_read(po="4521")
