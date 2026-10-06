@@ -346,6 +346,17 @@ function buyerEvidence(field) {
   return evidenceText(field.evidence);
 }
 
+// Decision 62: the reader's Purchase order is not Order No. When POG-001 found the order in POGRN, the review shows
+// that Order No beside it with its source, so an empty Purchase order does not read as "no order". Display only.
+function pogrnOrder(job) {
+  const field = rulesJob(job) ? job.rules?.fields?.po : null;
+  if (!field || field.value === null || field.value === undefined || field.value === "") return null;
+  const entry = (field.evidence || []).find((item) => item.rule === "POG-001" && ["printed", "selected"].includes(item.kind));
+  return entry ? { value: String(field.value), source: entry.kind === "printed"
+    ? "Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code"
+    : "POGRN order selected by qty and value under the supplier code, not printed" } : null;
+}
+
 const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
 const HEADER_FIELDS = [
@@ -1294,6 +1305,8 @@ function renderInvoiceForm(job) {
       const printed = String(invoice.buyer_name ?? "").trim();
       if (printed && foldText(printed) !== foldText(buyer.value)) wrapper.append(make("small", "buyer-printed", `printed: ${printed}`));
     }
+    const order = name === "po" ? pogrnOrder(job) : null;
+    if (order) wrapper.append(make("small", "po-pogrn", `Order No ${order.value} · ${order.source}`));
     if (name === "date_printed") {
       wrapper.append(make("small", "", invoice.date_printed
         ? "Read-only source evidence. It is never converted automatically."
