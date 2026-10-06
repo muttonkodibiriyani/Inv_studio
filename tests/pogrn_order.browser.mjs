@@ -1,6 +1,7 @@
 /**
  * Playwright check that the review shows the POGRN Order No beside the reader's Purchase order (FT5a, decision 62).
- * Shown only when POG-001 found the order (printed and found, or selected by qty and value), as a note: the
+ * Shown only when POG-001 found the order (printed and found, or selected by qty and value) or POG-008 matched one
+ * unreceived order on items and ordered qty, as a note: the
  * Purchase order input keeps the reader's value and a save sends it unchanged. Every job is mocked synthetic data.
  *
  *   BASE_URL=http://127.0.0.1:8765 node tests/pogrn_order.browser.mjs
@@ -39,6 +40,10 @@ const cases = [
     note: "Order No SYN-ORD-1 · POGRN order selected by qty and value under the supplier code, not printed" },
   { id: "pogrn-printed", po: "SYN-ORD-2", order: value("SYN-ORD-2", ev("printed", "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO")),
     note: "Order No SYN-ORD-2 · Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code" },
+  { id: "pogrn-not-received", po: "", order: value("SYN-ORD-5", ev("sheet", "POG-008", "POGRN order matched on items and ordered qty, not received: RMS_ORDER_NO")),
+    note: "Order No SYN-ORD-5 · POGRN order matched on items and ordered qty, not yet received" },
+  // A sheet citation from another rule is not a POGRN order find: no note.
+  { id: "pogrn-sheet-other", po: "", order: value("SYN-ORD-6", ev("sheet", "ALG-011", "Synthetic sheet lookup")), note: null },
   // Not found in POGRN (R-024), entered by the reviewer, or empty: no note.
   { id: "pogrn-r024", po: "SYN-ORD-3", order: value("SYN-ORD-3", ev("printed", "R-024", "Invoice PO (not in POGRN)")), note: null },
   { id: "pogrn-entered", po: "", order: value("SYN-ORD-4", ev("owner_entry", "OWNER-ENTRY", "Reviewer")), note: null },
@@ -136,7 +141,7 @@ try {
       await page.close();
     }
   }
-  console.log(`POGRN Order No browser test passed (5 synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
+  console.log(`POGRN Order No browser test passed (7 synthetic mocked jobs at 1440 and 390 px; ${baseURL}).`);
 } finally {
   await browser.close();
 }

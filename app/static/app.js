@@ -351,10 +351,14 @@ function buyerEvidence(field) {
 function pogrnOrder(job) {
   const field = rulesJob(job) ? job.rules?.fields?.po : null;
   if (!field || field.value === null || field.value === undefined || field.value === "") return null;
-  const entry = (field.evidence || []).find((item) => item.rule === "POG-001" && ["printed", "selected"].includes(item.kind));
-  return entry ? { value: String(field.value), source: entry.kind === "printed"
-    ? "Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code"
-    : "POGRN order selected by qty and value under the supplier code, not printed" } : null;
+  const entry = (field.evidence || []).find((item) => (item.rule === "POG-001" && ["printed", "selected"].includes(item.kind))
+    || (item.rule === "POG-008" && item.kind === "sheet"));
+  if (!entry) return null;
+  // Decisions 68/69/78: POG-008 fills Order No only from the one unreceived order holding every invoiced item and qty.
+  const source = entry.rule === "POG-008" ? "POGRN order matched on items and ordered qty, not yet received"
+    : entry.kind === "printed" ? "Invoice PO / Reference # found in POGRN as RMS_ORDER_NO under the supplier code"
+      : "POGRN order selected by qty and value under the supplier code, not printed";
+  return { value: String(field.value), source };
 }
 
 const foldText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
