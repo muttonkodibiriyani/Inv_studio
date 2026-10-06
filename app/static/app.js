@@ -71,21 +71,52 @@ const AI_READER_LABELS = {
   unavailable: "Not connected", failed: "Failed", selected: "Selected reader",
 };
 
+// Why a reader set a value aside or left it empty (evidence.*.review), worded by review.code (decision 145). A review
+// without a known code reads "Check": the client cannot tell readers disagreeing from a P.O. Box or filename flag.
+const REVIEW_LABELS = {
+  not_read: "Not read", not_printed: "Not printed", misprint: "Barcode misprint",
+  unreadable: "Barcode unreadable", unconfirmed: "Barcode not confirmed",
+};
+const LINE_FIELD_LABELS = { net_amount: "Line net", tax_amount: "Line tax", description: "Description", uom: "Unit", page: "Page" };
+
+function reviewNote(review, field = "") {
+  if (!review?.reason) return null;
+  const other = review.other_value === null || review.other_value === undefined || review.other_value === "" ? "" : ` · other read: ${review.other_value}`;
+  const page = review.other_page ? ` (page ${review.other_page})` : "";
+  const note = make("small", "rules-flagged review-note", `${field ? `${field} · ` : ""}${REVIEW_LABELS[review.code] || "Check"}: ${review.reason}${other}${page}`);
+  if (review.code) note.dataset.reviewCode = review.code;
+  if (review.other_quote) note.title = review.other_quote;
+  return note;
+}
+
+// evidence.lines is positional and a review save leaves it as read, so once a line is added or removed its reviews
+// would sit beside the wrong row: they show only while the counts still match.
+function lineReviews(job) {
+  const lines = job?.evidence?.lines;
+  return Array.isArray(lines) && lines.length === (job?.invoice?.lines || []).length ? lines : null;
+}
+// A "not read" or "not printed" note explains an EMPTY value, so it hides while the reviewer's own entry fills the input
+// (decision 156); barcode notes (misprint, unreadable, unconfirmed) stay, since the printed code is still in doubt.
+const EMPTY_VALUE_CODES = new Set(["not_read", "not_printed"]);
+function noteFor(input, note) {
+  if (note && EMPTY_VALUE_CODES.has(note.dataset.reviewCode)) {
+    const sync = () => { note.hidden = String(input.value ?? "").trim() !== ""; };
+    input.addEventListener("input", sync);
+    sync();
+  }
+  return note;
+}
+const hasLineReview = (job) => (job?.evidence?.lines || []).some((entry) => Object.values(entry || {}).some((value) => value?.review?.reason));
+
 function readerNotes(job, scope, column, line) {
   const key = scope === "header" ? READER_HEADER_FIELDS[column] || column : READER_LINE_FIELDS[column];
   const readers = scope === "header" ? job?.readers?.header : job?.readers?.lines?.[line - 1];
-  const evidence = scope === "header" ? job?.evidence?.header : job?.evidence?.lines?.[line - 1];
+  const evidence = scope === "header" ? job?.evidence?.header : lineReviews(job)?.[line - 1];
   const notes = [];
   const reader = readers?.[key];
   if (typeof reader === "string" && reader) notes.push(make("span", `reader-badge reader-${reader}`, reader));
-  const review = evidence?.[key]?.review;
-  if (review?.reason) {
-    const other = review.other_value === null || review.other_value === undefined ? "" : ` · other read: ${review.other_value}`;
-    const page = review.other_page ? ` (page ${review.other_page})` : "";
-    const note = make("small", "rules-flagged", `Readers disagree: ${review.reason}${other}${page}`);
-    if (review.other_quote) note.title = review.other_quote;
-    notes.push(note);
-  }
+  const note = reviewNote(evidence?.[key]?.review);
+  if (note) notes.push(note);
   return notes;
 }
 
@@ -281,7 +312,14 @@ function renderRulesResult(job) {
   body.replaceChildren();
   (rules.lines || []).forEach((line) => {
     const tr = make("tr");
-    tr.append(make("td", "", String(line.line)));
+    const number = make("td", "", String(line.line));
+    // Line fields with no column here (line net, description, ...) show their reviews beside the line number.
+    const shown = new Set(Object.values(READER_LINE_FIELDS));
+    Object.entries(lineReviews(job)?.[line.line - 1] || {}).forEach(([field, entry]) => {
+      const note = shown.has(field) ? null : reviewNote(entry?.review, LINE_FIELD_LABELS[field] || field);
+      if (note) number.append(note);
+    });
+    tr.append(number);
     ["Item", "UPC", "Unit Cost", "Quantity", "Unit Tax Code"].forEach((name) => tr.append(rulesCell(line.cells?.[name], name, line.line)));
     body.append(tr);
   });
@@ -1400,14 +1438,16 @@ function renderInvoiceForm(job) {
     if (input.readOnly) input.setAttribute("aria-readonly", "true");
     if (type === "number") input.step = "any";
     if (name === "currency") { input.maxLength = 3; input.autocapitalize = "characters"; }
-    input.value = invoice[name] ?? "";
+    input.value = oneLine(invoice[name]);
     const buyer = name === "buyer_name" ? rulesBuyer(job) : null;
     if (buyer) {
-      input.value = buyer.value;
-      input.dataset.rulesValue = buyer.value;
+      input.value = oneLine(buyer.value);
+      input.dataset.rulesValue = input.value;
     }
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
+    const review = noteFor(input, reviewNote(job.evidence?.header?.[name]?.review));
+    if (review) wrapper.append(review);
     if (buyer) {
       wrapper.append(make("small", "buyer-evidence", buyerEvidence(buyer)));
       const printed = String(invoice.buyer_name ?? "").trim();
@@ -1433,7 +1473,15 @@ function renderInvoiceForm(job) {
   });
   const lines = $("#line-items");
   lines.replaceChildren();
-  (invoice.lines || []).forEach((line) => addLine(line, ["queued", "processing", "exported"].includes(job.status)));
+  const reviews = lineReviews(job);
+  (invoice.lines || []).forEach((line, n) => addLine(line, ["queued", "processing", "exported"].includes(job.status), reviews?.[n]));
+  let hiddenReviews = $("#line-reviews-hidden");
+  if (!hiddenReviews) {
+    hiddenReviews = make("p", "rules-flagged", "Line read notes hidden after a line was added or removed.");
+    hiddenReviews.id = "line-reviews-hidden";
+    $("#no-lines").before(hiddenReviews);
+  }
+  hiddenReviews.hidden = Boolean(reviews) || !hasLineReview(job);
   $("#no-lines").hidden = Boolean(invoice.lines?.length);
   $("#add-line").disabled = ["queued", "processing", "exported"].includes(job.status);
   renderRulesResult(job);
@@ -1466,17 +1514,23 @@ function markReviewDirty() {
   renderReviewSaveState();
 }
 
+// A text input drops line breaks from its value, fusing the words either side; show (and so save) each break as a space.
+const oneLine = (value) => String(value ?? "").replace(/\r\n?|\n/g, " ");
+
 function lineInput(name, value, label, type = "text") {
   const input = make("input");
   input.name = name;
-  input.value = value ?? "";
+  input.value = oneLine(value);
   input.type = type;
   if (type === "number") input.step = "any";
   input.setAttribute("aria-label", label);
   return input;
 }
 
-function printedLineAmounts(line) {
+// An input followed by its read review, if the reader left one for that line field.
+const withReview = (input, reviews) => [input, noteFor(input, reviewNote(reviews?.[input.name]?.review))].filter(Boolean);
+
+function printedLineAmounts(line, reviews) {
   const details = make("details", "line-amounts");
   const summary = make("summary");
   const net = lineInput("net_amount", line.net_amount, "Printed line net", "number");
@@ -1487,36 +1541,38 @@ function printedLineAmounts(line) {
   };
   [["Printed line net", net], ["Printed line tax", tax]].forEach(([labelText, input]) => {
     const label = make("label");
-    label.append(make("span", "", labelText), input);
+    label.append(make("span", "", labelText), ...withReview(input, reviews));
     details.append(label);
     input.addEventListener("input", update);
   });
   details.prepend(summary);
   details.open = line.net_amount !== null && line.net_amount !== undefined
-    || line.tax_amount !== null && line.tax_amount !== undefined;
+    || line.tax_amount !== null && line.tax_amount !== undefined
+    || Boolean(reviews?.net_amount?.review?.reason || reviews?.tax_amount?.review?.reason);
   update();
   return details;
 }
 
-function addLine(line = {}, disabled = false) {
+function addLine(line = {}, disabled = false, reviews = null) {
   const row = make("tr");
   // The printed part code has no input; it rides on the row so a save keeps it (the review replaces the lines).
   if (line.part_code) row.dataset.partCode = line.part_code;
   const identity = make("td");
-  identity.append(lineInput("item_id", line.item_id, "Internal item · confirmed reference"), lineInput("sku", line.sku, "Supplier SKU"), lineInput("gtin", line.gtin, "GTIN or barcode"));
+  identity.append(...withReview(lineInput("item_id", line.item_id, "Internal item · confirmed reference"), reviews),
+    ...withReview(lineInput("sku", line.sku, "Supplier SKU"), reviews), ...withReview(lineInput("gtin", line.gtin, "GTIN or barcode"), reviews));
   identity.querySelector('[name="item_id"]').placeholder = "Internal item · reference";
   identity.querySelector('[name="sku"]').placeholder = "Supplier SKU";
   identity.querySelector('[name="gtin"]').placeholder = "Barcode / GTIN";
   const description = make("td");
-  description.append(lineInput("description", line.description, "Description"));
+  description.append(...withReview(lineInput("description", line.description, "Description"), reviews));
   const find = make("button", "line-lookup", "Find item by description");
   find.type = "button";
   find.disabled = disabled;
   find.addEventListener("click", () => beginLineReferenceLookup("review", row));
   description.append(find);
-  const qty = make("td"); qty.append(lineInput("qty", line.qty, "Quantity", "number"));
-  const uom = make("td"); uom.append(lineInput("uom", line.uom, "Unit of measure"));
-  const price = make("td"); price.append(lineInput("price", line.price, "Unit price", "number"), printedLineAmounts(line));
+  const qty = make("td"); qty.append(...withReview(lineInput("qty", line.qty, "Quantity", "number"), reviews));
+  const uom = make("td"); uom.append(...withReview(lineInput("uom", line.uom, "Unit of measure"), reviews));
+  const price = make("td"); price.append(...withReview(lineInput("price", line.price, "Unit price", "number"), reviews), printedLineAmounts(line, reviews));
   const evidence = make("td");
   evidence.append(lineInput("evidence", line.evidence, "Evidence text"), lineInput("page", line.page, "Evidence page", "number"));
   const action = make("td");
@@ -2599,7 +2655,11 @@ function applyReferenceCandidate(action) {
   if (!selected.sku && !selected.internal_item && !selected.gtin && !selected.uom) return;
   const names = target.mode === "draft" ? { internal_item: "Item", gtin: "UPC" } : { internal_item: "item_id", sku: "sku", gtin: "gtin", uom: "uom", description: "description" };
   Object.entries(names).forEach(([field, inputName]) => {
-    if (selected[field]) $(`[name="${inputName}"]`, target.row).value = selected[field];
+    if (!selected[field]) return;
+    const input = $(`[name="${inputName}"]`, target.row);
+    input.value = selected[field];
+    // As if typed: a filled field hides its "Not read" note (decision 160) and draft totals update.
+    input.dispatchEvent(new Event("input", { bubbles: true }));
   });
   const mode = target.mode;
   const evidence = $('[name="evidence"]', target.row);

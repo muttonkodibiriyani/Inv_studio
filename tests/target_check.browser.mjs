@@ -87,7 +87,7 @@ const job = {
   },
   evidence: { header: { net: { review: {
     reason: "The AI read a different value here", other_value: "SYNTHETIC", other_quote: "Net SYNTHETIC", other_page: 1,
-  } } } },
+  } } }, lines: [{ net_amount: { review: { reason: "a line net column is printed but this value was not read", code: "not_read" } } }] },
   validation: {
     ready: false,
     source: "fine_rules",
@@ -172,7 +172,10 @@ try {
     // The reader per field, why the AI ran, and both values where the readers disagree.
     assert.deepEqual(await page.locator("#rules-fields .reader-badge").allTextContents(), ["native", "ocr"]);
     assert.deepEqual(await page.locator("#rules-lines .reader-badge").allTextContents(), ["ai"]);
-    assert.match(await page.locator("#rules-fields").textContent(), /Readers disagree: The AI read a different value here/);
+    // A review without a code reads neutrally; a line field with no rules column shows beside the line number.
+    assert.match(await page.locator("#rules-fields").textContent(), /Check: The AI read a different value here/);
+    assert.equal(await page.locator('#rules-lines [data-review-code="not_read"]').textContent(),
+      "Line net · Not read: a line net column is printed but this value was not read");
     assert.match(await page.locator("#rules-fields").textContent(), /other read: SYNTHETIC \(page 1\)/);
     assert.equal(await page.locator("#rules-ai-reader").textContent(),
       "AI reader: Gap fill · 1 call — The local readers left gaps; the AI filled only empty fields");
