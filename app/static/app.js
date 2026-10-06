@@ -1400,11 +1400,11 @@ function renderInvoiceForm(job) {
     if (input.readOnly) input.setAttribute("aria-readonly", "true");
     if (type === "number") input.step = "any";
     if (name === "currency") { input.maxLength = 3; input.autocapitalize = "characters"; }
-    input.value = invoice[name] ?? "";
+    input.value = oneLine(invoice[name]);
     const buyer = name === "buyer_name" ? rulesBuyer(job) : null;
     if (buyer) {
-      input.value = buyer.value;
-      input.dataset.rulesValue = buyer.value;
+      input.value = oneLine(buyer.value);
+      input.dataset.rulesValue = input.value;
     }
     input.disabled = ["queued", "processing", "exported"].includes(job.status);
     wrapper.append(input);
@@ -1466,10 +1466,13 @@ function markReviewDirty() {
   renderReviewSaveState();
 }
 
+// A text input drops line breaks from its value, fusing the words either side; show (and so save) each break as a space.
+const oneLine = (value) => String(value ?? "").replace(/\r\n?|\n/g, " ");
+
 function lineInput(name, value, label, type = "text") {
   const input = make("input");
   input.name = name;
-  input.value = value ?? "";
+  input.value = oneLine(value);
   input.type = type;
   if (type === "number") input.step = "any";
   input.setAttribute("aria-label", label);
