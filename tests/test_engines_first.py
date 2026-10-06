@@ -129,7 +129,7 @@ def test_fallback_lines_stand_in_only_when_the_ai_lines_sum_to_the_net():
     unreconciled = reconciled[:2]
     merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"lines": unreconciled}, {}, {}, "native", "fallback")
     assert merged["lines"] == engine["lines"] and lines == [{f: "native" for f in engine["lines"][0]}]
-    assert notes[0].endswith("the local lines are kept; the AI lines do not sum to the net either")
+    assert notes[0].endswith("the local lines are kept; the AI lines do not sum to the local net either")
 
 
 def test_lines_whose_quantity_times_price_sums_to_the_net_need_no_ai_call(monkeypatch, tmp_path):
@@ -144,3 +144,45 @@ def test_lines_whose_quantity_times_price_sums_to_the_net_need_no_ai_call(monkey
     native["lines"][0]["qty"] = "3"
     result, calls = run(monkeypatch, tmp_path, native, {**native, "number": "AI-1"})
     assert calls.count("ai") == 1 and result["readers"]["ai"]["need"] == "fallback"
+
+
+def test_fallback_for_a_missing_number_keeps_local_lines_that_reconcile():
+    engine = {"number": None, "net": "30.00",
+              "lines": [{"sku": s, "qty": "1", "price": "10.00", "net_amount": "10.00"} for s in ("A", "B", "C")]}
+    ai = {"number": "INV-1", "net": "30.00", "lines": [{"sku": "A", "qty": "2", "price": "10.00", "net_amount": "20.00"},
+                                                        {"sku": "C", "qty": "1", "price": "10.00", "net_amount": "10.00"}]}
+    merged, _, header, lines, notes = engines.merge_ai_fields(engine, ai, {}, {}, "ocr", "fallback")
+    assert merged["lines"] == engine["lines"] and all(set(x.values()) == {"ocr"} for x in lines)
+    assert merged["number"] == "INV-1" and header["number"] == "ai"
+    assert not any("the AI lines are shown" in n or "either" in n for n in notes)
+
+
+def test_fallback_keeps_local_lines_whose_quantity_times_price_reconciles():
+    # The net-amount column reads 33.00, but quantity x price sums to the net: the lines count as reconciled.
+    engine = {"number": None, "net": "30.00", "lines": [{"sku": "A", "qty": "2", "price": "10.00", "net_amount": "23.00"},
+                                                         {"sku": "B", "qty": "1", "price": "10.00", "net_amount": "10.00"}]}
+    ai_lines = [{"sku": s, "qty": "1", "price": "10.00", "net_amount": "10.00"} for s in ("A", "B", "C")]
+    merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"number": "INV-1", "lines": ai_lines}, {}, {}, "ocr",
+                                                         "fallback")
+    assert merged["lines"] == engine["lines"] and all(set(x.values()) == {"ocr"} for x in lines)
+    assert merged["number"] == "INV-1" and not any("the AI lines are shown" in n for n in notes)
+
+
+def test_fallback_lines_stand_in_for_local_lines_that_do_not_reconcile():
+    engine = {"number": "N-1", "net": "30.00",
+              "lines": [{"sku": s, "qty": "1", "price": a, "net_amount": a} for s, a in (("A", "10.00"), ("B", "10.00"),
+                                                                                       ("C", "5.00"))]}
+    ai_lines = [{"sku": "A", "qty": "2", "price": "10.00", "net_amount": "20.00"},
+                {"sku": "C", "qty": "1", "price": "10.00", "net_amount": "10.00"}]
+    merged, _, _, lines, notes = engines.merge_ai_fields(engine, {"lines": ai_lines}, {}, {}, "ocr", "fallback")
+    assert merged["lines"] == ai_lines and all(set(x.values()) == {"ai"} for x in lines)
+    assert notes[0].endswith("the local lines do not sum to the net, so the AI lines are shown")
+
+
+def test_fallback_lines_never_stand_in_against_a_net_the_ai_filled():
+    engine = {"number": "N-1", "net": None, "lines": [{"sku": "A", "qty": "1", "price": "10.00"}]}
+    ai_lines = [{"sku": s, "qty": "1", "price": "15.00", "net_amount": "15.00"} for s in ("A", "B")]
+    merged, _, header, _, notes = engines.merge_ai_fields(engine, {"net": "30.00", "lines": ai_lines}, {}, {}, "ocr",
+                                                          "fallback")
+    assert merged["net"] == "30.00" and header["net"] == "ai"
+    assert merged["lines"] == engine["lines"] and "the local lines are kept" in notes[0]

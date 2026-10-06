@@ -224,12 +224,20 @@ def _lines_reconcile(lines,net):
     except (InvalidOperation,ValueError):return False
 
 
+def _engine_lines_open(engine):
+    """The engines read no lines, or lines that do not reconcile with the net they read."""
+    if not engine.get("lines"):return True
+    try:invoice=Invoice.model_validate(engine)
+    except ValueError:return True
+    return any(x.startswith(UNRECONCILED) for x in _open_gaps(invoice,quality(invoice)[1]))
+
+
 def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
     """Fill the engines' empty fields from the AI read and flag every disagreement; never overwrite a value.
 
     ``engine`` and ``ai`` are invoice dicts. Lines merge pairwise when both reads have the same count and the
-    pair aligns; in ``fallback`` (the engines' lines failed the basic checks) the AI's lines stand in when the
-    counts differ and the AI's lines sum to the net; otherwise the local lines are kept. Returns (invoice, evidence, header readers, line readers, notes).
+    pair aligns; in ``fallback``, when the engines' lines do not sum to their net, the AI's lines stand in if the
+    counts differ and the AI's lines sum to the engines' net; otherwise the local lines are kept. Returns (invoice, evidence, header readers, line readers, notes).
     """
     merged=dict(engine)
     evidence={"header":dict((engine_evidence or {}).get("header") or {}),"lines":[dict(x) for x in ((engine_evidence or {}).get("lines") or [])]}
@@ -245,15 +253,19 @@ def merge_ai_fields(engine,ai,engine_evidence,ai_evidence,source,mode):
             evidence["header"][field]=_disagreement(evidence["header"].get(field),source,theirs,ai_header.get(field))
     engine_lines=list(engine.get("lines") or []);ai_lines=list(ai.get("lines") or [])
     while len(evidence["lines"])<len(engine_lines):evidence["lines"].append({})
-    stand_in=mode=="fallback" and len(ai_lines)!=len(engine_lines) and _lines_reconcile(ai_lines,merged.get("net"))
+    # The AI lines stand in only for local lines that do not reconcile (a fallback for a missing number keeps
+    # reconciled lines), and only against the engines' own net, never one the AI filled in this merge.
+    stand_in=(mode=="fallback" and _engine_lines_open(engine) and len(ai_lines)!=len(engine_lines)
+              and _lines_reconcile(ai_lines,engine.get("net")))
     if ai_lines and (not engine_lines or stand_in):
         merged["lines"]=ai_lines;evidence["lines"]=[dict(x) for x in ai_lines_ev]
         line_readers=_reader_map(ai,"ai")[1]
         notes.append(f"The AI read {len(ai_lines)} lines where the local readers read {len(engine_lines)}"
-                     +("; the local lines failed the basic checks, so the AI lines are shown" if engine_lines else ""))
+                     +("; the local lines do not sum to the net, so the AI lines are shown" if engine_lines else ""))
     elif ai_lines and len(ai_lines)!=len(engine_lines):
         notes.append(f"The AI read {len(ai_lines)} lines where the local readers read {len(engine_lines)}; the local lines are kept"
-                     +("; the AI lines do not sum to the net either" if mode=="fallback" else ""))
+                     +("; the AI lines do not sum to the local net either" if mode=="fallback" and _engine_lines_open(engine)
+                       else ""))
     elif ai_lines:
         merged["lines"]=[]
         for n,(mine_line,their_line) in enumerate(zip(engine_lines,ai_lines)):
