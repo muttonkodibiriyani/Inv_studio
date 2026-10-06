@@ -334,6 +334,45 @@ def test_POG_001_printed_po_is_searched_first_and_needs_the_supplier_ebs_code():
     assert "POGRN Supplier Exception" in types(other, "SUP-002") and other["status"] == "Review"
 
 
+def dated(rows, *dates):
+    """Synthetic CREATED_DATE cell text per row (the last one repeats)."""
+    return [{**row, "CREATED_DATE": dates[min(i, len(dates) - 1)]} for i, row in enumerate(rows)]
+
+
+def test_D76_order_date_is_the_cited_rows_created_date_text_only_when_constant():
+    # Selected route: the cited rows' one CREATED_DATE, kept as the cell's exact text, evidence only.
+    picked = run(rows=dated(both("13000003", "38091"), "2026-01-02 00:00:00"))
+    assert picked["header"]["Order No"] == "13000003" and "Order Date" not in picked["header"]
+    date = picked["order_date"]
+    assert date["value"] == "2026-01-02 00:00:00" and date["rule"] == "POG-009" and date["reason"] == ""
+    assert date["evidence_kind"] == fr.EVIDENCE_ORDER_DATE and date["source"].endswith(": CREATED_DATE")
+    assert date["reference"] == next(x for x in picked["lineage"] if x["target"] == "Order No")["reference"]
+    trace = next(x for x in picked["lineage"] if x["target"] == "Order Date")
+    assert trace["value"] == "2026-01-02 00:00:00" and trace["rule"] == "POG-009"
+    # Printed route: every row of the printed order is cited, so every one must agree.
+    printed = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00"))
+    assert printed["order_date"]["value"] == "2026-01-03 00:00:00"
+    # Differing or blank dates on the cited rows: empty with the reason, never RECEIPT_DATE, status unchanged.
+    differs = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00", "2026-01-04 00:00:00"))
+    assert differs["order_date"]["value"] is None and "differs" in differs["order_date"]["reason"]
+    assert differs["status"] == printed["status"] and types(differs) == types(printed)
+    undated = run(invoice(po="13000001"))  # no CREATED_DATE column: RECEIPT_DATE is never used
+    assert undated["order_date"]["value"] is None and "blank" in undated["order_date"]["reason"]
+    assert not [x for x in differs["lineage"] + undated["lineage"] if x["target"] == "Order Date"]
+    # A blank CREATED_DATE cell makes the row malformed: it is never cited, so it never gives the date.
+    blank = run(invoice(po="13000001"), rows=dated(POGRN, "2026-01-03 00:00:00", ""))
+    assert "Malformed Source Row" in types(blank, "POG-001") and blank["order_date"]["reference"] == "POGRN!2"
+    # No order filled: nothing is cited.
+    missing = run(rows=[pogrn("13000001", "38091", "6", "70")])
+    assert missing["order_date"]["value"] is None and missing["order_date"]["reference"] == ""
+    unvalidated = run(invoice(po="13999999"), rows=dated(POGRN, "2026-01-03 00:00:00"))  # R-024: not in POGRN
+    assert unvalidated["header"]["Order No"] == "13999999" and unvalidated["order_date"]["value"] is None
+    assert "not a POGRN order" in unvalidated["order_date"]["reason"]
+    # Ordered, not received (POG-008) cites its holding group.
+    unreceived = run(rows=dated(ordered("13000005", "38091", ref=7), "2026-01-05 00:00:00"))
+    assert unreceived["header"]["Order No"] == "13000005" and unreceived["order_date"]["value"] == "2026-01-05 00:00:00"
+
+
 def test_strict_6_orders_come_only_from_the_ebs_code_never_from_items():
     # Decision 16: within the 6-character code, POG-001 picks the one order/location whose quantity and value agree.
     picked = run(rows=POGRN + both("13000003", "38091", q1="9"))

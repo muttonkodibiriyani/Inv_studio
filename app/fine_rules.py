@@ -63,6 +63,9 @@ EVIDENCE_SELECTED = "selected"  # Order No picked by POG-001 (decision 16), not 
 EVIDENCE_ORDERED_NOT_RECEIVED = "ordered_not_received"
 ORDERED_NOT_RECEIVED = "POGRN ordered, not received"
 ORDERED_NOT_RECEIVED_SOURCE = "POGRN order matched on items and ordered qty, not received"
+# Decision 76: evidence only (a Checks row and the review note), never a template column.
+EVIDENCE_ORDER_DATE = "pogrn_order_date"
+ORDER_DATE_SOURCE = "POGRN order date of the rows cited for Order No: CREATED_DATE"
 # Decision 41: the owner's pick among the R-006 supplier-code candidates; cells resolved through it say so.
 OWNER_PICK, EVIDENCE_OWNER_ENTRY = "OWNER-PICK", "owner_entry"
 OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", "Market", "Currency", "Tax Code",
@@ -1257,7 +1260,7 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
             return outcome
         run.trace("Order No", printed, "POG-001", "Invoice PO found as POGRN RMS_ORDER_NO of the supplier's "
                   "6-character EBS code", reference=_refs(rows), evidence_kind=EVIDENCE_PRINTED)
-        outcome.update(order=printed, source=FROM_INVOICE, candidates=1)
+        outcome.update(order=printed, source=FROM_INVOICE, candidates=1, cited=rows)
         if len(mine) > 1:
             run.exception("Location ID", "Printed order has several locations; no approved multi-location rule",
                           "POG-002", evidence=f"{len(mine)} locations", owner="Buyer")
@@ -1298,7 +1301,7 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
                   evidence_kind=EVIDENCE_ORDERED_NOT_RECEIVED)
         group.update({"Derived PO Number": derived, "PO Source": ORDERED_NOT_RECEIVED})
         outcome.update(order=derived, source=ORDERED_NOT_RECEIVED, group=group, validation=[group],
-                       status="Ordered, not received")
+                       status="Ordered, not received", cited=group["_rows"])
         return outcome
     if not selected:
         run.exception("Missing PO", f"{no_po} and none of the {len(evaluated)} order/location groups under the "
@@ -1318,11 +1321,35 @@ def resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, nam
               f"candidates under the supplier's 6-character EBS code {'/'.join(sorted(keys))}: the only one whose "
               "quantity and value agree (form 01a10c4d, decision 16); not printed on the invoice",
               reference=_refs(group["_rows"]), confidence=DERIVED_FROM_POGRN, evidence_kind=EVIDENCE_SELECTED)
-    outcome.update(order=derived, source=DERIVED_FROM_POGRN)
+    outcome.update(order=derived, source=DERIVED_FROM_POGRN, cited=group["_rows"])
     group.update({"Derived PO Number": derived, "PO Source": DERIVED_FROM_POGRN})
     _validate_accepted(run, group)
     outcome.update(group=group, status="Approved" if group["_passed"] else "Accepted, checks to verify")
     return outcome
+
+
+def resolve_order_date(run, po):
+    """POG-009 (decision 76): Order Date is the CREATED_DATE text of the same POGRN rows cited for Order No, only
+    when every cited row holds one and the same non-blank value; it is written exactly as the cell's text. Else it
+    stays empty with the reason. Evidence only: never a template cell, and it never changes the status."""
+    rows = po.get("cited") or []
+    out = {"value": None, "reason": "", "rule": "POG-009", "source": ORDER_DATE_SOURCE, "reference": "",
+           "evidence_kind": EVIDENCE_ORDER_DATE}
+    if not po["order"] or not rows:
+        out["reason"] = ("Order No is not a POGRN order (no rows cited)" if po["order"] else
+                         "No POGRN order rows cited for Order No")
+        return out
+    out["reference"] = _refs(rows)
+    dates = {text(r.get("CREATED_DATE")) for r in rows}
+    if "" in dates:
+        out["reason"] = "CREATED_DATE blank on a cited row"
+    elif len(dates) > 1:
+        out["reason"] = f"CREATED_DATE differs across the {len(rows)} cited rows ({len(dates)} values)"
+    else:
+        out["value"] = dates.pop()
+        run.trace("Order Date", out["value"], "POG-009", ORDER_DATE_SOURCE, reference=out["reference"],
+                  confidence=DERIVED_FROM_POGRN, evidence_kind=EVIDENCE_ORDER_DATE)
+    return out
 
 
 # --------------------------------------------------------------------------- currency
@@ -1644,6 +1671,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
     po = resolve_po(run, source, keys, invoice_qty, invoice_value, supplier_site, raw_name, master_name, parents,
                     invoiced)
     group = po["group"]
+    order_date = resolve_order_date(run, po)
     if family and not supplier_site:
         if group:
             supplier_site, master_name = choose_site(run, family, group)
@@ -1780,6 +1808,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
         "tax": tax_rows(invoice, tax_code), "scan": {k: v for k, v in scan.items() if k != "pages"},
         "supplier_candidates": candidates, "missing_mandatory": missing,
         "po": {"order": po["order"], "source": po["source"], "status": po["status"], "value_source": value_source},
+        "order_date": order_date,
         "ebs_supplier_code": key or "/".join(sorted(keys)), "entity_hint": hint, "config_version": config.version,
         "item_resolution": resolution, "po_candidates": po["candidates"],
         "supplier_site_candidates": [] if supplier_site and not run.owner_pick else run.site_candidates,

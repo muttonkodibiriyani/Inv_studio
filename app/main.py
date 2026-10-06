@@ -716,10 +716,30 @@ def create_app(data_dir=None):
             results.append({**check,"transaction":n,"cells":cells,"checks":check.get("checks",[])})
         currencies=[((v.get("fields") or {}).get("currency") or {}).get("value") for v in views]
         content,workbook_checks=tc.add_checks_sheet(content,results,currencies)
+        content=order_date_rows(content,views)
         receipts={r["transaction"]:{"summary":r.get("summary",""),"counts":r.get("counts",{}),"metric":r.get("metric",{}),
                   "checks":{k["check"]:k["status"] for k in r["checks"]},
                   "workbook_checks":{k["check"]:k["status"] for k in workbook_checks}} for r in results}
         return content,receipts
+    def order_date_rows(content,views):
+        """Decision 76: one Checks row per transaction with its POGRN Order Date; the template sheets are untouched."""
+        dates=[(n,v["order_date"]) for n,v in enumerate(views,1) if v.get("order_date")]
+        if not dates:return content
+        from openpyxl import load_workbook
+        book=load_workbook(io.BytesIO(content));sheet=book["Checks"]
+        for n,d in dates:
+            filled=d.get("value") is not None
+            row={"Transaction Number":n,"Sheet":"(evidence)","Column":"Order Date","Value":d.get("value") or "",
+                 "Status":"filled" if filled else "empty_flagged","Detail":"Evidence only; not a template column (decision 76)",
+                 "Reason":d.get("reason") or "","Evidence Kind":d.get("evidence_kind") or "","Evidence Source":d.get("source") or "",
+                 "Evidence Reference":d.get("reference") or "","Rule":d.get("rule") or ""}
+            sheet.append([None]*len(tc.CHECKS_COLUMNS));r=sheet.max_row
+            for name,value in row.items():
+                if value=="":continue
+                cell=sheet.cell(r,tc.CHECKS_COLUMNS.index(name)+1)
+                if isinstance(value,int):cell.value=value
+                else:cell.value=str(value);cell.data_type="s"  # text only, never a formula
+        buffer=io.BytesIO();book.save(buffer);return buffer.getvalue()
     def target_upc(c=None):return store.get("target_export",{},c).get("upc","empty")
     def audit_receipt(receipt):
         # Cell evidence holds owner rows; the audit keeps its size, the receipt keeps the rows.
