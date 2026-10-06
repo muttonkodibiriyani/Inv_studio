@@ -139,7 +139,9 @@ def _evidence(entry):
     elif source.startswith("Invoice"):kind="printed"
     else:kind="rule"
     return {"kind":kind,"source":source,"reference":reference,"original":str(entry.get("original") or ""),
-            "rule":str(entry.get("rule") or ""),"confidence":str(entry.get("confidence") or "")}
+            "rule":str(entry.get("rule") or ""),"confidence":str(entry.get("confidence") or ""),
+            # A value the rules derived after the owner's supplier-code pick: kept for the owner-assisted sub-count.
+            **({"assisted_by":str(entry["assisted_by"])} if entry.get("assisted_by") else {})}
 
 
 def _amount_forms(value):
