@@ -107,7 +107,7 @@ def test_e71a_line_10_leading_vpn_resolves_after_barcode_and_vpn_column_fail():
     line = {"gtin": "4006000000001", "sku": None, "description": "100002 Matte Lipstick Red 4g 12pcs 2024"}
     result = run(invoice(lines=lines(second=line)))
     assert result["lines"][1]["Item"] == "345000002" and result["lines"][1]["Match Method"] == "VPN exact"
-    other = ITEMS + [item("345000099", "ULT_7770001112223", "100002", site="22099", name="QRS001RA1KWD", ref=9)]
+    other = ITEMS + [item("345000099", "ULT_7770001112223", "100002", site="99099", name="QRS001RA1KWD", ref=9)]
     assert run(invoice(lines=lines(second=line)), items=other)["lines"][1]["Item"] == "345000002"
 
 

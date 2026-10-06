@@ -23,7 +23,7 @@ for number,received in [("70001",100),("70002",100),("70003",6)]:
            {"id":"2","item":"345000102","ordered":"100","invoiced":"0","price":"40","uom":"EA"}]})
  receipts.extend([{"id":f"GRN-{number}-{line}","po":number,"line":line,"qty":str(received),"status":"accepted"} for line in ("1","2")])
 refs={"sites":sites,"routes":routes,"items":items,"orders":orders,"receipts":receipts,
-      "taxRules":[{"origin":"AE","market":"AE","currency":"AED","code":"UEPV05","rate":"0.05"}]}
+      "taxRules":[{"origin":"AE","market":"AE","currency":"AED","code":"XEPV05","rate":"0.05"}]}
 (out/"reference.json").write_text(json.dumps(refs,indent=2))
 
 def invoice(filename,number,po,lines):

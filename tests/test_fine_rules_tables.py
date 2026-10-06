@@ -37,7 +37,7 @@ def workbook(path):
     sites.append([1, "Sample Supplier", 22001, "ABC001RT1TKD", "Active", "KWD"])
     sites.append([1, "Sample Supplier", 22002, "ABC001RZ1ZZD", "Inactive", "AED"])
     sites.append([2, "Other Sample", None, None, "Active", "USD"])
-    sites.append([3, "Third Sample", 22003, "XYZ001RT1TKD", "Active", ""])  # row 5: no currency
+    sites.append([3, "Third Sample", 99013, "XYZ001RT1TKD", "Active", ""])  # row 5: no currency
     sites.append([1, "Sample Supplier", 22001, "ABC001RT1TKD", "Active", "KWD"])  # row 6: repeat
     book.save(path)
     return path
