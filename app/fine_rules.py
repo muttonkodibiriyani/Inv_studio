@@ -1409,6 +1409,11 @@ def check_receipt_dates(po, order_date, document_date):
         return out
     flags = []
     created = _day(order_date.get("value"))
+    # Decision 86: a date cell that cannot be read is skipped, and the reason says so.
+    unread = ["CREATED_DATE"] if order_date.get("value") is not None and not created else []
+    unread += [f"{sum(not _day(x) for x in receipts)} RECEIPT_DATE"] if any(not _day(x) for x in receipts) else []
+    if unread:
+        out["reason"] += f"; not checked, date could not be parsed: {', '.join(unread)}"
     if created and (created - invoiced).days > DAYS_BEFORE_ORDER:
         flags.append(f"Invoice Date is {(created - invoiced).days} days before the order's CREATED_DATE "
                      f"(limit {DAYS_BEFORE_ORDER})")
