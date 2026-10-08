@@ -172,7 +172,7 @@ try {
     const figure = page.locator("#completeness strong");
     const reason = page.locator("#completeness-reason");
 
-    assert.equal(await page.locator("#completeness span").textContent(), "Fields found", `${at}: the box is not named Fields found`);
+    assert.equal(await page.locator("#completeness span").textContent(), "Fields filled", `${at}: the box is not named Fields filled`);
     assert.match(await box.getAttribute("title"), /does not check that any value is correct/, `${at}: the tooltip does not say it is not correctness`);
 
     await open(jobs[0]);

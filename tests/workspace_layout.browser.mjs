@@ -222,7 +222,7 @@ try {
   await page.locator("#select-ready").click();
   await page.locator("#select-processed").click();
   assert.deepEqual(await checkedKeys(), ["a", "c", "e", "x"], "Select processed changed");
-  assert(await page.locator("#batch-review").isEnabled(), "Download review workbook did not enable");
+  assert(await page.locator("#batch-review").isEnabled(), "Printed values only did not enable");
   assert(await page.locator("#batch-fine-rules").isEnabled(), "Run ULTA rules did not enable");
   await page.locator("#select-processed").click();
   const oldestRowC = page.locator("#job-list .job-row").filter({ has: page.locator('[aria-label="Review SYNTHETIC-sort-c.png"]') });
