@@ -167,6 +167,10 @@ def text_key(value):
     return re.sub(r"\s+","",value) or None
 
 
+BACKGROUND_WAIT=45  # seconds one request waits for a bulk download; under the 60 s Hosting proxy
+BACKGROUND_KEEP=1800  # seconds an uncollected bulk download is kept
+
+
 def create_app(data_dir=None):
     app=FastAPI(title="Inv Studio",version="0.1.0")
     # TEST-ONLY: the synthetic demo validation references (matching.enrich/validate).
@@ -1156,6 +1160,43 @@ def create_app(data_dir=None):
             except ValueError as exc:raise HTTPException(409,str(exc))
         store.audit("fine_rules_target_downloaded",{"job_ids":body.job_ids,"sha256":hashlib.sha256(content).hexdigest()})
         return Response(content,media_type=MIME_XLSX,headers={"Content-Disposition":'attachment; filename="ULTA_Target.xlsx"',"Cache-Control":"no-store"})
+
+    # A bulk download over dozens of invoices outlasts the 60 s Firebase Hosting proxy (owner, 2026-10-08: 74-163 s), so
+    # the browser got no file although the server finished. The work runs in a thread; the start and each poll wait at
+    # most BACKGROUND_WAIT seconds for it, so a request is always open while it runs (Cloud Run CPU is request-billed).
+    background_tasks={};background_lock=threading.Lock()
+    background_kinds={"target-draft":(Batch,download_target_draft),"extraction-batch":(ExtractionBatch,download_extraction_batch),
+                      "export-batch":(Batch,export_batch),"fine-rules-target":(FineRulesRequest,fine_rules_target),
+                      "fine-rules-review":(FineRulesRequest,fine_rules_review)}
+    def background_work(task,handler,body):
+        try:
+            result=handler(body)
+            task["response"]=result if isinstance(result,Response) else JSONResponse(result)
+        except HTTPException as exc:task["response"]=JSONResponse({"detail":exc.detail},exc.status_code)
+        except (ValidationError,ValueError) as exc:task["response"]=JSONResponse({"detail":str(exc)[:400]},400)
+        except Exception:task["response"]=JSONResponse({"detail":"The download failed on the server. Try again."},500)
+        finally:task["done"].set()
+    def background_answer(tid,task):
+        if not task["done"].wait(BACKGROUND_WAIT):return JSONResponse({"id":tid,"status":"running"},202)
+        with background_lock:background_tasks.pop(tid,None)
+        return task["response"]
+
+    @app.post("/api/background/{kind}")
+    def background_start(kind:str,body:dict):
+        if kind not in background_kinds:raise HTTPException(404,"Unknown download")
+        model,handler=background_kinds[kind];request=model.model_validate(body)
+        tid=uuid.uuid4().hex;task={"actor":actor.get(),"started":time.monotonic(),"done":threading.Event()}
+        with background_lock:
+            for old in [k for k,t in background_tasks.items() if time.monotonic()-t["started"]>BACKGROUND_KEEP]:del background_tasks[old]
+            background_tasks[tid]=task
+        threading.Thread(target=copy_context().run,args=(background_work,task,handler,request),daemon=True).start()
+        return background_answer(tid,task)
+
+    @app.get("/api/background/tasks/{tid}")
+    def background_poll(tid:str):
+        with background_lock:task=background_tasks.get(tid)
+        if not task or task["actor"]!=actor.get():raise HTTPException(404,"This download is no longer running. Start it again.")
+        return background_answer(tid,task)
 
     @app.get("/api/fine-rules/feedback")
     def fine_rules_feedback():return store.get("fine_rules_feedback",[])
