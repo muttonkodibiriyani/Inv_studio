@@ -1262,3 +1262,49 @@ def test_supplier_variant_code_reads_the_part_code_cell_first_then_the_vpn_colum
     assert fr.variant_code(Line(part_code="777123456785-AB", sku="AB-777123456785", description="x")) == \
         ("777123456785", "777123456785-AB")
     assert fr.variant_code(Line(gtin="1", part_code="AB-777123456785", description="x")) == (None, None)
+
+
+def test_D102_barcode_failing_the_check_digit_fills_only_on_an_exact_master_code():
+    """D99(4)/D102: a complete printed barcode that fails the GTIN check digit is never corrected or filled."""
+    from app.matching import rules_view
+    internal = ITEMS + [item("345000004", "ULT_0012345678906", "100004", desc="Glow Serum Rose 30ml", ref=5)]
+    assert not fr.upc_valid("012345678906") and not fr.upc_valid("012345678904")
+
+    def first(items=ITEMS, **line):
+        result = run(invoice(lines=lines(first={"gtin": None, **line})), items=items)
+        return result, result["lines"][0]
+    # (i) Exact Item Master code: filled, with the non-blocking internal-code note.
+    result, row = first(internal, sku=None, barcode_unchecked="0012345678906")
+    assert (row["Item"], row["UPC"], row["Match Method"]) == ("345000004", "0012345678906", "Barcode exact")
+    note = [e for e in result["exceptions"] if e["Rule ID"] == "D102"]
+    assert [(e["Engine Type"], e["Description"]) for e in note] == [("Item Review", "internal code, exact master match")]
+    assert "Field Reasons" not in row and rules_view(result)["lines"][0]["cells"]["UPC"]["value"] == "0012345678906"
+    # (ii) No master code: UPC empty with the misprint reason, the VPN decides the item (D87).
+    result, row = first(barcode_unchecked="0012345678904")
+    assert (row["Item"], row["UPC"], row["Match Method"]) == ("345000001", "", "VPN exact")
+    assert row["Barcode Check"] == fr.CHECK_DIGIT_FAILED and row["Field Reasons"] == {"UPC": fr.MISPRINT}
+    assert [(e["Engine Type"], e["Description"]) for e in result["exceptions"] if e["Rule ID"] == "D102"] == \
+        [("Data Quality", fr.MISPRINT)]
+    view = rules_view(result)
+    cell = view["lines"][0]["cells"]["UPC"]
+    assert cell == {"value": None, "evidence": [], "flagged": True, "reason": fr.MISPRINT}
+    assert not any(e["target"] == "UPC" and e["line"] == 1 for e in result["lineage"])
+    # ... and with no VPN either, the Item stays empty too.
+    _, row = first(sku=None, barcode_unchecked="0012345678904")
+    assert (row["Item"], row["UPC"]) == ("", "")
+    # A barcode-shaped code never reaches the UPC through the description or the barcode-column fallback.
+    _, row = first(sku=None, barcode_unchecked="0012345678904", description="Glow Serum Rose 30 ml")
+    assert row["UPC"] == ""
+    # (iii) A check-digit-valid gtin is unchanged, and wins over a stale unchecked value.
+    assert run()["lines"][0] == run(invoice(lines=lines(first={"barcode_unchecked": "0012345678904"})))["lines"][0]
+
+
+def test_D102_failed_check_digits_inside_an_sku_cell_never_resolve_identity_by_barcode():
+    """D104(4) regression guard: barcode candidates come from the barcode column and the description only. An sku
+    cell that embeds a failed-check digit run (or a variant shape around one) is not mined for a barcode."""
+    master = ITEMS + [item("345000005", "ULT_0012345678904", "100005", desc="Glow Serum Rose 30ml", ref=5),
+                      item("345000006", "ULT_012345678904", "100006", desc="Glow Serum Lily 30ml", ref=6)]
+    for sku in ("X0012345678904-7", "AB-012345678904"):
+        row = run(invoice(lines=lines(first={"gtin": None, "sku": sku, "description": "Glow Serum"})), items=master)["lines"][0]
+        assert row["UPC"] == "" and row["Item"] not in {"345000005", "345000006"}
+        assert not (row["Match Method"] or "").startswith("Barcode")

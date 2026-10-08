@@ -199,13 +199,15 @@ def test_scan_runs_the_local_ocr_readers_before_the_ai(monkeypatch,tmp_path):
     opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
     def ai(*args):
         calls.append('vertex')
-        return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5'}]),{}
+        # D95: the AI read of a scan stands in for the weak local read only when its printed line nets sum to its net.
+        return Invoice(number='SYN-1',date='2026-01-15',net='10',lines=[{'qty':'2','price':'5','net_amount':'10'}]),{}
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
     assert calls==['invoice2data','paddleocr','docling','vertex']
     assert len(result['invoice']['lines'])==1
     assert result['selected_engine']=='vertex / gemini-test'
-    assert result['readers']['ai']=={'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1,
-                                      'need':'fallback'}
+    ai_record=result['readers']['ai']
+    assert {k:ai_record[k] for k in ('status','reason','calls','need')}=={
+        'status':'fallback','reason':engines.AI_REASONS['fallback'],'calls':1,'need':'fallback'}
     assert result['readers']['header']['number']=='ai' and result['readers']['lines'][0]['qty']=='ai'
 
 
@@ -293,7 +295,8 @@ def ai_on(monkeypatch,tmp_path,native,ai_invoice,engine='paddleocr'):
     opts.engine=engine;opts.ai_fallback=True;opts.model='stub-model'
     def read(engine,*args):
         calls.append(engine)
-        return {'text':f'{engine} text','boxes':[],'invoice':native if engine=='invoice2data' else None}
+        # A text layer of 40+ characters: a digital PDF, not a scan (scan_guard.is_scan).
+        return {'text':f'{engine} text layer '*3,'boxes':[],'invoice':native if engine=='invoice2data' else None}
     monkeypatch.setattr(engines,'local_read',read)
     def ai_reader(*args):
         calls.append('ai')
@@ -362,13 +365,16 @@ def test_ai_evidence_is_carried_beside_the_invoice_not_in_the_trace(monkeypatch,
     calls,opts,store=setup(monkeypatch,tmp_path,'')
     opts.ai_fallback=True;opts.provider='vertex';opts.model='gemini-test'
     def ai(*args):
-        return Invoice(number='SYN-1',net='10',lines=[{'qty':'2','price':'5','evidence':'2 x 5.00','page':1}]),{
+        return Invoice(number='SYN-1',date='2026-01-15',tax='0',net='10',
+                       lines=[{'qty':'2','price':'5','net_amount':'10','evidence':'2 x 5.00','page':1}]),{
             'promptTokenCount':1,'evidence':{'number':{'quote':'Invoice SYN-1','page':1},'po':{'quote':'PO 7','page':1}}}
     result=engines.process(tmp_path/'scan.pdf',opts,store,ai)
     assert result['selected_engine']=='vertex / gemini-test'
-    assert result['evidence']['header']=={'number':{'quote':'Invoice SYN-1','page':1,'source':'ai'}}
-    assert result['evidence']['lines']==[{'qty':{'quote':'2 x 5.00','page':1,'source':'ai'},
-                                          'price':{'quote':'2 x 5.00','page':1,'source':'ai'}}]
+    image='AI (page image)'
+    assert result['evidence']['header']['number']=={'quote':'Invoice SYN-1','page':1,'source':'ai','origin':image}
+    assert 'po' not in result['evidence']['header']
+    assert result['evidence']['lines'][0]['qty']=={'quote':'2 x 5.00','page':1,'source':'ai','origin':image}
+    assert result['evidence']['lines'][0]['price']=={'quote':'2 x 5.00','page':1,'source':'ai','origin':image}
     assert next(t for t in result['trace'] if t['engine']=='vertex')['usage']=={'promptTokenCount':1}
     assert 'header_evidence' not in result['invoice'] and 'evidence' not in result['invoice']
     assert engines.needs_scan_evidence(result,opts)

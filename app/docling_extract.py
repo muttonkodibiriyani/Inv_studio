@@ -9,6 +9,7 @@ from statistics import median
 from typing import Any
 
 from app.layout_extract import is_packing_page
+from app.scan_guard import classify_barcode, lines_reconcile, tax_label_printed
 
 
 def _value(obj: Any, name: str, default: Any = None) -> Any:
@@ -542,6 +543,7 @@ def _decimal(value: Any) -> str | None:
     if negative:
         text = text[1:-1].strip()
     text = re.sub(r"^(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+", "", text)
+    text = re.sub(r"\s+(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)$", "", text)
     # OCR may split a thousands separator into its own token: "1 , 105.31".
     text = re.sub(r"(?<=\d)\s*,\s*(?=\d{3}(?:\D|$))", ",", text)
     # OCR may read a thousands comma as a point: "1.234.56" has no other reading than 1234.56.
@@ -602,6 +604,13 @@ def _semantic_row_roles(row: list[str | None]) -> dict[int, str]:
             "sno", "srno", "serial",
         ))
     ]
+    for index, cell in enumerate(row):
+        if index not in roles and _normalized(cell).replace(" ", "") == "totalamount":
+            # 'Total Amount' is the line net only beside no other amount or tax heading;
+            # otherwise it is kept aside until the printed totals decide.
+            amounts = {"net_amount", "tax_amount", "gross_amount"} & set(roles.values())
+            taxed = any(tax_label_printed(str(other or "")) for other in row)
+            roles[index] = "other_amount" if amounts or taxed else "net_amount"
     if merged:
         # TableFormer can merge the first three visible headings into a cell
         # spanning the serial and item-code columns, leaving the immediately
@@ -823,13 +832,104 @@ def _strict_text_headers(text: str) -> dict[str, str]:
     return result
 
 
+def _fill_edge_headings(tables: list[dict[str, Any]], boxes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fill a native table's empty first or last heading from the words printed beside its others.
+
+    A ruled grid can leave an edge heading outside its cells while the column's data sits inside.
+    Only an edge cell over a filled data column is filled, and only with the words on the same
+    measured row left of the first (or right of the last) printed heading. Nothing is guessed.
+    """
+    result = []
+    for table in tables:
+        rows = _table_rows(table) if table.get("source") == "pdfplumber" else []
+        if len(rows) < 2 or not rows[0]:
+            result.append(table)
+            continue
+        header = list(rows[0])
+        width = len(header)
+        edges = [column for column in (0, width - 1)
+                 if header[column] is None and width >= 3
+                 and header[1 if column == 0 else width - 2] is not None
+                 and any(column < len(row) and str(row[column] or "").strip() for row in rows[1:])]
+        known = [" ".join(str(cell).split()) for cell in header if cell is not None and str(cell).strip()]
+        page_words = [box for box in boxes or [] if int(box.get("page", 1)) == int(table.get("page", 1))]
+        if not edges or not known or not page_words:
+            result.append(table)
+            continue
+        wanted = " ".join(known).split()
+        for row in _rows_from_words(page_words):
+            texts = [str(word["text"]).strip() for word in row]
+            starts = [i for i in range(len(texts) - len(wanted) + 1) if texts[i:i + len(wanted)] == wanted]
+            if len(starts) != 1:
+                continue
+            first, last = starts[0], starts[0] + len(wanted) - 1
+            beside = {0: texts[:first], width - 1: texts[last + 1:]}
+            for column in edges:
+                if beside[column]:
+                    header[column] = " ".join(beside[column])
+            break
+        if header != rows[0]:
+            table = {**table, "rows": [header, *rows[1:]]}
+        result.append(table)
+    return result
+
+
+_BARE_TOTAL = re.compile(
+    r"(?im)^\s*total\s*:?\s+((?:(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR)\s+)?[0-9][0-9, ]*\.[0-9]{2})"
+    r"(?:\s+(?:AED|USD|EUR|GBP|KWD|SAR|QAR|BHD|OMR))?\s*$")
+
+
+def line_columns(text: str, tables: list[dict[str, Any]] | None, boxes: list[dict[str, Any]] | None = None) -> set[str]:
+    """The line roles under a printed column heading of the page's line table (empty when none was found)."""
+    columns: set[str] = set()
+    extract_invoice_from_tables(text, tables, boxes=boxes, columns=columns)
+    return columns
+
+
+def heading_columns(boxes: list[dict[str, Any]] | None) -> set[str]:
+    """The roles of the printed column headings found in the measured words alone (no table needed).
+
+    Words are named with the same _role as table headings. A band is the words whose centres lie within
+    0.7 x a heading word's height, from any OCR line; it qualifies with at least two heading words and no
+    more number-bearing words than heading words, so a body word is never enough. Only the topmost
+    heading block of each page counts: its first qualifying band and the qualifying bands stacked under it,
+    each within a word height of the last (a heading printed on two or three lines). A totals band
+    below the lines adds nothing.
+    """
+    words = [word for word in boxes or [] if str(word.get("text", "")).strip()]
+    roles = {id(word): _role(word.get("text")) for word in words}
+
+    def centre(word: dict[str, Any]) -> float:
+        return (float(word["box"][1]) + float(word["box"][3])) / 2
+
+    columns: set[str] = set()
+    for page in sorted({int(word.get("page", 1)) for word in words}):
+        page_words = [word for word in words if int(word.get("page", 1)) == page]
+        last: float | None = None
+        for word in sorted((w for w in page_words if roles[id(w)]), key=centre):
+            height = max(1.0, float(word["box"][3]) - float(word["box"][1]))
+            band = [other for other in page_words if abs(centre(other) - centre(word)) <= height * 0.7]
+            named = [other for other in band if roles[id(other)]]
+            numbers = sum(1 for other in band if any(ch.isdigit() for ch in str(other.get("text", ""))))
+            if len(named) < 2 or numbers > len(named):
+                continue
+            if last is not None and centre(word) - last > height:
+                break
+            columns |= {roles[id(other)] for other in named}
+            last = centre(word)
+    return columns
+
+
 def extract_invoice_from_tables(
     text: str,
     tables: list[dict[str, Any]] | None,
     boxes: list[dict[str, Any]] | None = None,
+    columns: set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Extract only values explicitly represented by table columns or labels."""
     tables = list(tables or [])
+    if boxes:
+        tables = _fill_edge_headings(tables, boxes)
     has_native_line_tables = any(
         table.get("source") == "pdfplumber"
         and any(_is_line_header(_semantic_row_roles(row)) for row in _table_rows(table))
@@ -843,6 +943,12 @@ def extract_invoice_from_tables(
         tables.extend(_tables_from_measured_words(boxes))
     if boxes and not has_native_line_tables:
         tables.extend(_header_tables_from_measured_words(boxes))
+    # A native line table keeps its own header values; label/value rows rebuilt from
+    # measured words only fill the header fields it left empty.
+    measured_headers = (
+        _table_header_values(_header_tables_from_measured_words(boxes))
+        if boxes and has_native_line_tables else {}
+    )
     if not tables:
         return None
     invoice: dict[str, Any] = {"lines": []}
@@ -874,6 +980,8 @@ def extract_invoice_from_tables(
             if _is_line_header(row_roles):
                 roles = row_roles
                 active_by_source[table_source] = roles, len(row)
+                if columns is not None:
+                    columns.update(row_roles.values())
                 continue
             total = _totals_row(row)
             if total is not None:
@@ -906,12 +1014,21 @@ def extract_invoice_from_tables(
                         values["_other_amount" if role == "other_amount" else role] = parsed
                 elif role == "gtin":
                     parsed = _gtin(raw)
-                    if parsed is not None:
-                        values[role] = parsed
+                    gtin, unchecked, _reason = classify_barcode(parsed)
+                    if unchecked:
+                        # A complete code failing the GS1 check digit is never gtin.
+                        values["barcode_unchecked"] = unchecked
+                    elif parsed is not None:
+                        # A checked code, or unreadable text that guard_lines clears and flags.
+                        values[role] = gtin or parsed
                 elif role == "part_code":
                     part_code = str(raw or "").strip() or None
                     if part_code and re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
-                        values["gtin"] = part_code
+                        gtin, unchecked, _reason = classify_barcode(part_code)
+                        if gtin:
+                            values["gtin"] = gtin
+                        else:
+                            values["barcode_unchecked"] = unchecked
                 elif str(raw or "").strip():
                     values[role] = str(raw).strip()
             if values.get("description"):
@@ -928,7 +1045,7 @@ def extract_invoice_from_tables(
             if part_code and not re.fullmatch(r"(?:\d{8}|\d{12,14})", part_code):
                 # Kept even when the description's printed code already set sku.
                 values["part_code"] = part_code
-            if part_code and "gtin" not in values:
+            if part_code and "gtin" not in values and "barcode_unchecked" not in values:
                 values.setdefault("sku", part_code)
             identity = any(values.get(key) for key in ("sku", "gtin", "description"))
             priced_quantity = values.get("qty") is not None and values.get("price") is not None
@@ -984,7 +1101,12 @@ def extract_invoice_from_tables(
                     # A measured header can miss a column that TableFormer
                     # read. Preserve complementary explicit cell facts from
                     # the same uniquely matched row, never calculated values.
-                    for field in ("sku", "gtin", "part_code", "uom", "net_amount", "tax_amount", "_other_amount"):
+                    # gtin and barcode_unchecked are one barcode slot: a line never holds both.
+                    barcode_read = any(measured_line.get(f) is not None for f in ("gtin", "barcode_unchecked"))
+                    for field in ("sku", "gtin", "barcode_unchecked", "part_code", "uom",
+                                  "net_amount", "tax_amount", "_other_amount"):
+                        if field in ("gtin", "barcode_unchecked") and barcode_read:
+                            continue
                         if measured_line.get(field) is None and matches[0].get(field) is not None:
                             measured_line[field] = matches[0][field]
             invoice["lines"].extend(measured)
@@ -1018,6 +1140,12 @@ def extract_invoice_from_tables(
         if len(printed) == 1:
             invoice[field] = next(iter(printed))
     _take_reconciled_amount(invoice)
+    if "net" not in invoice and not tax_label_printed(text):
+        # A bare 'Total' is the net only when no tax is printed and the line nets sum to it.
+        printed = {parsed for match in _BARE_TOTAL.finditer(text or "")
+                   if (parsed := _decimal(match.group(1))) is not None}
+        if len(printed) == 1 and lines_reconcile(invoice["lines"], next(iter(printed))):
+            invoice["net"] = next(iter(printed))
     headers = _table_header_values(tables)
     text_headers = _strict_text_headers(text)
     from .layout_extract import _extract_printed_date
@@ -1030,6 +1158,8 @@ def extract_invoice_from_tables(
             invoice[field] = headers[field]
         elif field in text_headers:
             invoice[field] = text_headers[field]
+        elif field in measured_headers:
+            invoice[field] = measured_headers[field]
     buyer_name = _table_buyer_name(text, tables, boxes)
     if buyer_name is not None:
         invoice["buyer_name"] = buyer_name

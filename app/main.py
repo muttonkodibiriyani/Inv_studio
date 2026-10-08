@@ -36,7 +36,7 @@ from .fine_rules_export import review_workbook, target_workbook
 from .fine_rules_source import LookupRulesSource
 from .product_candidates import ProductCandidates
 from .matching import accepted_ids, enrich, key, owner_entries, rules_key, rules_validation, rules_view, validate
-from .models import Invoice, Policy, ProcessingOptions, StrictModel
+from .models import Invoice, Line, Policy, ProcessingOptions, StrictModel
 from .oauth import ChatGPTAuth
 from .providers import Providers
 from .references import import_references, reference_workbook
@@ -157,6 +157,14 @@ class PreflightToken(StrictModel):
 
 class DemoRequest(StrictModel):
     preflight_token: str
+
+
+def text_key(value):
+    """A line text cell keyed for "is this the same line" checks. The review client sends text back from an
+    <input type=text> (CR/LF dropped), trimmed and with '' as null; a client that shows a newline as a space sends
+    'a b' instead (D134). Removing all whitespace makes both compare equal to the stored 'a\\nb' (D130)."""
+    if not isinstance(value,str):return value
+    return re.sub(r"\s+","",value) or None
 
 
 def create_app(data_dir=None):
@@ -599,27 +607,55 @@ def create_app(data_dir=None):
         offered={str(c.get("supplier_code")) for c in (j.get("rules") or {}).get("supplier_site_candidates") or []}
         if code not in offered and code!=j.get("owner_supplier_code"):raise ValueError("Supplier code is not one of the candidates the rules offered")
         return code
+    def carry_unchecked(invoice,stored):
+        """D102(3): the review client does not send barcode_unchecked. The stored value stays on the line at the same
+        index while that line still has no gtin and the same description and code (compared through text_key); a
+        reviewer-typed gtin clears it, and a value the client sends is never kept: the field is the reader's alone (W1).
+        Inserting or deleting a line above shifts the index, so the key no longer matches and the value is dropped, never
+        moved onto another line."""
+        old=(stored or {}).get("lines") or [];lines=[]
+        for i,l in enumerate(invoice.lines):
+            was=old[i] if i<len(old) and isinstance(old[i],dict) else {}
+            same=not l.gtin and not was.get("gtin") and \
+                (text_key(l.description),text_key(l.sku))==(text_key(was.get("description")),text_key(was.get("sku")))
+            lines.append(l.model_copy(update={"barcode_unchecked":was.get("barcode_unchecked") if same else None}))
+        return invoice.model_copy(update={"lines":lines})
+    def aligned_evidence(invoice,j):
+        """F5 (D146(2), D153): the reader's line reviews are kept by line index, so they stay only while every saved
+        line is the stored line at the same index (same count, same description and sku through text_key). Any insert,
+        delete or replacement drops them, header evidence stays."""
+        evidence=j.get("evidence")
+        old=(j.get("invoice") or {}).get("lines") or []
+        def key(line):return text_key(line.get("description")),text_key(line.get("sku"))
+        if not isinstance(evidence,dict) or not evidence.get("lines"):return evidence
+        if len(old)==len(invoice.lines) and all(isinstance(was,dict) and key(was)==key(l.model_dump()) for was,l in zip(old,invoice.lines)):
+            return evidence
+        return {**evidence,"lines":[]}
     @app.post("/api/jobs/{jid}/review")
     def review(jid:str,body:Review):
-        view=entries=pick=None
+        view=entries=pick=None;cleared=0
         if not demo_references:
             j=job_or_404(jid);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
+            # Before the lines comparison below, so a client that drops the field does not clear the line entries.
+            body.invoice=carry_unchecked(body.invoice,j["invoice"])
             if body.entries is not None:entries=owner_entries(body.entries)
             else:
                 # Line entries are keyed by line number; they do not survive a change to the lines.
                 entries=owner_entries(j.get("owner_entries"))
-                if body.invoice.model_dump(mode="json")["lines"]!=stored_lines(j):entries["lines"]={}
+                if not same_lines(body.invoice.lines,j):
+                    cleared=sum(len(cells or {}) for cells in (entries.get("lines") or {}).values());entries["lines"]={}
             attribution=entry_attribution(j.get("owner_entries"),entries,j.get("owner_entry_attribution"))
             pick=supplier_pick(j,body)
             picked_by=j.get("owner_supplier_pick") if pick and pick==j.get("owner_supplier_code") else {"actor":actor.get(),"at":datetime.now(timezone.utc).isoformat()} if pick else None
-            view=compute_rules(body.invoice,{**j,"owner_entry_attribution":attribution,"owner_supplier_code":pick,"owner_supplier_pick":picked_by},entries)
+            view=compute_rules(body.invoice,{**j,"evidence":aligned_evidence(body.invoice,j),"owner_entry_attribution":attribution,"owner_supplier_code":pick,"owner_supplier_pick":picked_by},entries)
         with store.connection(True) as c:
             j=job_or_404(jid,c);assert_editable(j)
             if j["revision"]!=body.revision:raise HTTPException(409,"Invoice changed. Refresh before saving.")
+            body.invoice=carry_unchecked(body.invoice,j["invoice"])
             inv,provenance=enrich(body.invoice,references(c)) if demo_references else (body.invoice,[])
             before=j["invoice"]
-            j.update(invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
+            j.update(evidence=aligned_evidence(body.invoice,j),invoice=inv.model_dump(mode="json"),reviewed=body.confirm,status="review",revision=j["revision"]+1)
             if view is not None:
                 j["rules"]={**view,"revision":j["revision"]};j["owner_entries"]=entries;j["owner_entry_attribution"]=attribution
                 if pick:j.update(owner_supplier_code=pick,owner_supplier_pick=picked_by)
@@ -634,7 +670,8 @@ def create_app(data_dir=None):
             j["provenance"]+=provenance
             evaluate(j,c);store.job(jid,j,c)
             store.audit("reviewed" if body.confirm else "edited",{"job_id":jid,"before":before,"after":j["invoice"],"revision":j["revision"],"reference_version":references(c).get("version"),
-                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[]),"owner_supplier_pick":bool(pick)} if view is not None else {})},c)
+                        **({"owner_entries":entries,"accepted":j["validation"].get("accepted",[]),"owner_supplier_pick":bool(pick),
+                           "owner_line_entries_cleared":cleared} if view is not None else {})},c)
         return public(j)
 
     @app.post("/api/jobs/{jid}/retry")
@@ -689,6 +726,14 @@ def create_app(data_dir=None):
         """The job's lines in the current model's shape: a job saved before a field was added (part_code, FT3) compares
         equal to the same lines read or saved now, so an unchanged save or re-read keeps its line entries (decision 65)."""
         return Invoice.model_validate(j["invoice"]).model_dump(mode="json")["lines"] if j.get("invoice") else None
+    def same_lines(lines,j):
+        """F1 (D132): a save keeps the line entries only when every line is the stored one, compared as Line values:
+        numbers by value (a stored 1.00 equals a sent 1) and text through text_key, so the client's trimmed,
+        newline-free text matches the stored cell. A job with no stored invoice counts as changed."""
+        if not j.get("invoice"):return False
+        old=Invoice.model_validate(j["invoice"]).lines
+        def key(line):return tuple(text_key(getattr(line,f)) for f in Line.model_fields)
+        return len(old)==len(lines) and all(key(a)==key(b) for a,b in zip(lines,old))
     def reread_entries(j,lines):
         """Line entries are keyed by line number, so a re-read that changes the lines drops them; header
         entries stay. Returns the job fields to keep and the count of cleared line cells, or None."""

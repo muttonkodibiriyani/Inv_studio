@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from . import scan_guard
+
 
 WAREHOUSE = "Warehouse (W)"
 STORE = "Store (S)"
@@ -77,6 +79,8 @@ OWNER_PICK_DERIVED = {"Supplier Site", "Order No", "Location", "Location Type", 
                       "Unit Tax Code"}
 EXTRA_HEADER_FIELDS = ["Buyer Name"]
 ITEM_NOT_FOUND = "Not in Item Master"  # printed identifier with no Item Master row (not a disagreement)
+CHECK_DIGIT_FAILED = "Check digit failed"  # D102: complete printed barcode that fails the GTIN check digit
+MISPRINT = scan_guard.MISPRINT  # D99(4): the reader's review text, one definition
 
 # Exception types whose presence still allows approval (warnings only).
 # GRN quantity differences are warnings (owner form 01a10c4d qty_cost_tolerance = invoice_flag).
@@ -682,6 +686,19 @@ def match_line(run, n, line, source, sites=None):
         rows = [r for r in source.items_by_barcode(candidate["value"]) if strip_ult(r.get("ITEM")) == candidate["value"]]
         if rows:
             barcode_hits[candidate["value"]] = (candidate, rows)
+    # D102: a complete printed barcode that fails the GTIN check digit is never in gtin. It counts only as an exact
+    # Item Master code; otherwise the UPC stays empty with the misprint reason and the VPN route follows (D87).
+    unchecked = "" if text(getattr(line, "gtin", None)) else normalize_barcode(getattr(line, "barcode_unchecked", None))
+    if unchecked:
+        rows = [r for r in source.items_by_barcode(unchecked) if strip_ult(r.get("ITEM")) == unchecked]
+        if rows:
+            candidate = {"value": unchecked, "origin": "unchecked barcode", "printed": unchecked}
+            barcodes = barcodes + [candidate]
+            barcode_hits[unchecked] = (candidate, rows)
+            result["unchecked"] = "hit"
+        else:
+            result["unchecked"] = "miss"
+            run.exception("Data Quality", MISPRINT, "D102", n, evidence=f"printed {unchecked}", owner="Item steward")
     vpn_hits = {}
     for candidate in vpns:
         rows = [r for r in source.items_by_vpn(candidate["value"]) if text(r.get("VPN")) == candidate["value"]]
@@ -706,7 +723,7 @@ def match_line(run, n, line, source, sites=None):
             barcode_hits = {core: (supplier_code, rows)}
 
     if not barcodes:
-        result["checks"]["barcode"] = RECORDED_NO_BARCODE
+        result["checks"]["barcode"] = CHECK_DIGIT_FAILED if unchecked else RECORDED_NO_BARCODE
     if not vpns:
         result["checks"]["vpn"] = RECORDED_NO_VPN
     barcode_parents = {p for _, rows in barcode_hits.values() for p in _unique_parents(_constrain(rows, sites)[0])}
@@ -813,6 +830,9 @@ def match_line(run, n, line, source, sites=None):
         run.exception("Item Review", f"Printed supplier code {supplier_code['printed']} carries Item Master barcode "
                       f"{supplier_code['value']}; check the item", "ALG-016-VAR", n,
                       evidence=f"printed {supplier_code['printed']} barcode {supplier_code['value']}", owner="Item steward")
+    if result.get("unchecked") == "hit" and result["barcode"] == unchecked:
+        run.exception("Item Review", "internal code, exact master match", "D102", n,
+                      evidence=f"printed {unchecked} fails the GTIN check digit", owner="Item steward")
     result["status"] = "Matched"
     run.trace("Item", parent, "ALG-021", "Item Master ITEM_PARENT", reference=_refs(rows), line=n,
               original=ocr[0]["value"] if ocr else supplier_code["printed"] if supplier_code else result["barcode"] or result["vpn"])
@@ -1805,10 +1825,14 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
                               "ALG-022", n, evidence=", ".join(sorted(brands)))
         upc = m["barcode"] or next((c["value"] for c in barcode_candidates(line) if c["origin"] == "barcode column"), "")
         if upc:
-            printed_upc = text(line.gtin) if m["barcode"] is None or text(line.gtin) else text(line.description)
+            unchecked = m.get("unchecked") == "hit" and upc == m["barcode"]
+            printed_upc = text(line.gtin) if m["barcode"] is None or text(line.gtin) else \
+                text(line.barcode_unchecked) if unchecked else text(line.description)
             stripped = text(line.gtin)[:4].upper() == "ULT_" and upc in normalize_barcode(text(line.gtin))
             run.trace("UPC", upc, "ALG-027" + (" (ULT_ prefix removed, R-004)" if stripped else ""),
-                      "Invoice barcode" + ("" if text(line.gtin) else " in description"),
+                      "Invoice barcode" + ("" if text(line.gtin) else
+                                           " (fails the GTIN check digit; exact Item Master code, D102)" if unchecked
+                                           else " in description"),
                       original=printed_upc or line.description, line=n,
                       reference=f"page {line.page}" if line.page else "")
         line_ok = m["status"] == "Matched" and line.qty is not None and line.price is not None
@@ -1835,6 +1859,7 @@ def run_invoice(invoice, source, config=None, filename="", text_value="", boxes=
             "Source Row": f"page {line.page}" if line.page else f"line {n}",
             "Validation Status": "Matched" if line_ok else "Exception",
             "POGRN RMS Order No": po["order"] or "", "POGRN Validation Status": po["status"],
+            **({"Field Reasons": {"UPC": MISPRINT}} if m.get("unchecked") == "miss" else {}),
             "_match": m, "_line": line,
         })
     if not tax_code and invoice.lines and not any(e["Exception Type"] == "Tax Code" for e in run.exceptions):
