@@ -271,8 +271,26 @@ try {
   assert.equal(await page.locator("#selected-status").textContent(), "Needs review");
   assert(await page.locator("#selected-status").evaluate((element) => element.classList.contains("warning")), "Empty extraction was styled as successful");
   assert.equal(await page.locator(".validation-details").getAttribute("open"), null, "Validation issue wall was expanded by default");
-  assert.match(await page.locator(".validation-details summary").textContent(), /20 issues to resolve/);
+  assert.match(await page.locator(".validation-details summary").textContent(), /^Cannot approve yet · 20 issues must be fixed/);
   assert.equal(await page.locator(".validation-details li").count(), 20, "Collapsed validation omitted issue details");
+  // The verdict reads plainly: warnings alone never say "issues to resolve", and each group is counted on its own.
+  const verdictFor = async (issues) => {
+    await page.evaluate(({ id, filename, issues }) => renderValidation({ id, filename, status: "review", validation: { ready: false, issues } }),
+      { id: demoJob.id, filename: demoJob.filename, issues });
+    return page.locator("#validation-summary");
+  };
+  const syntheticWarning = (n) => ({ code: "SYN-WARN", message: `Synthetic warning ${n}`, owner: "", line: null, blocking: false, level: "warning" });
+  const review = { code: "REVIEW", message: "Compare values and evidence with the document, then confirm review", owner: "", line: null, blocking: true, level: "review" };
+  let verdict = await verdictFor([...[1, 2, 3].map(syntheticWarning), review]);
+  assert.equal(await verdict.locator("summary strong").textContent(), "Nothing blocks this invoice · confirm review to approve3 warnings to read · they do not block approval");
+  assert.match(await verdict.getAttribute("class"), /accepted/);
+  assert.deepEqual(await verdict.locator("h4").allTextContents(), ["Warnings, for information (3)"]);
+  verdict = await verdictFor([syntheticWarning(1), { code: "SYN-CHECK", message: "Synthetic check", line: 2, blocking: true, level: "review" }, review]);
+  assert.match(await verdict.locator("summary strong").textContent(), /^Check 1 item, then confirm review1 warning to read/);
+  assert.deepEqual(await verdict.locator("h4").allTextContents(), ["Check, then confirm review (1)", "Warnings, for information (1)"]);
+  verdict = await verdictFor([{ code: "Duplicate", message: "Synthetic duplicate", line: null, blocking: true, level: "hard" }, review]);
+  assert.match(await verdict.locator("summary strong").textContent(), /^Cannot approve yet · 1 issue must be fixed$/);
+  assert.match(await verdict.getAttribute("class"), /error/);
   await page.locator("#empty-show-text").click();
   assert(await page.locator("#extracted-text-wrap").evaluate((element) => element.open), "Raw-text action did not reveal extracted text");
   await page.evaluate((id) => selectJob(id), demoJob.id);

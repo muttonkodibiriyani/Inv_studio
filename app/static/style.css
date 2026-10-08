@@ -392,6 +392,7 @@ main { min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; }
 .completeness span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .07em; }
 .completeness strong { color: var(--forest); font-size: 17px; }
 .completeness.not-read strong { color: var(--warning); }
+.completeness em { color: var(--muted); font-size: 9px; font-style: normal; }
 .completeness small { max-width: 260px; color: var(--warning); font-size: 11px; text-align: right; }
 .processing-result { min-height: 390px; padding: 24px; background: linear-gradient(180deg, #f8fbfa, #fff); }
 .processing-result-copy { display: flex; gap: 12px; align-items: center; padding: 15px; background: #edf6f2; border: 1px solid #d5e8e0; border-radius: 11px; }
@@ -450,6 +451,9 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: #7fa99d
 .validation-details summary strong { display: inline; margin: 0; }
 .validation-details summary span { font-size: 9px; font-weight: 800; }
 .validation-details[open] summary span { visibility: hidden; }
+.validation-summary .validation-extra { margin: 4px 0 0; }
+.validation-details summary strong small { display: block; margin-top: 2px; font-weight: 600; opacity: .85; }
+.validation-summary .validation-group { margin: 9px 0 0; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 
 .legend-row { display: flex; justify-content: space-between; align-items: center; }
 .legend-row legend { float: left; margin: 0; }

@@ -182,7 +182,7 @@ try {
     if (shots) await page.screenshot({ path: `${shots}/review-${tag}.png`, fullPage: true });
 
     await page.locator('[aria-label="Review SYNTHETIC-target-b.png"]').click();
-    await page.locator("#target-check-hold", { hasText: "No hold" }).waitFor();
+    await page.locator("#target-check-hold", { hasText: "Target sheet OK" }).waitFor();
 
     await page.locator('[data-nav="accuracy"]').first().click();
     await page.locator("#accuracy-section").waitFor({ state: "visible" });

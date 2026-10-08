@@ -180,7 +180,7 @@ try {
     // After confirm, the banner does not contradict the "ready to export" toast.
     await page.locator('[aria-label="Review SYNTHETIC-demo-ready-c.png"]').click();
     await page.locator("#validation-summary.accepted").waitFor();
-    assert.match(await page.locator(".validation-details summary").textContent(), /^1 note accepted at review/);
+    assert.match(await page.locator(".validation-details summary").textContent(), /^Confirmed at review · 1 note accepted/);
     assert.match(await page.locator("#validation-summary li").first().textContent(), /\(accepted at review\)$/);
 
     // The preflight names what production validates against instead of "References: Not loaded".

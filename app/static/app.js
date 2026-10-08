@@ -164,7 +164,7 @@ function renderTargetCheck(job) {
   const hold = $("#target-check-hold");
   hold.textContent = check.holds
     ? (job.status === "ready" || job.status === "exported" ? "Confirmed by owner" : "Held at review: confirm after checking")
-    : "No hold";
+    : "Target sheet OK";
   hold.className = `status-pill ${check.holds && !["ready", "exported"].includes(job.status) ? "warning" : "success"}`;
   panel.classList.toggle("holds", Boolean(check.holds));
   if (panel.dataset.job !== job.id) panel.open = Boolean(check.holds) && !["ready", "exported"].includes(job.status);
@@ -1619,25 +1619,55 @@ function renderValidation(job) {
   summary.hidden = false;
   // After the reviewer's confirm, what remains are the notes they accepted, not open issues.
   const confirmed = job.status === "ready" || job.status === "exported";
-  summary.className = confirmed
-    ? "validation-summary accepted"
-    : `validation-summary${issues.some((issue) => issue.code !== "REVIEW" && issue.blocking !== false) ? " error" : ""}`;
+  // One plain verdict first, then the issues in three groups: must fix (holds the invoice whatever the reviewer does),
+  // check then confirm (the reviewer's confirm accepts them) and warnings (for information, never holding it).
+  const confirmStep = issues.some((issue) => issue.code === "REVIEW" && issue.blocking !== false);
+  const listed = issues.filter((issue) => issue.code !== "REVIEW");
+  const groups = [
+    ["Must fix", listed.filter((issue) => issue.blocking !== false && !issue.accepted && issue.level !== "review" && issue.level !== "warning")],
+    ["Check, then confirm review", listed.filter((issue) => issue.blocking !== false && !issue.accepted && issue.level === "review")],
+    ["Warnings, for information", listed.filter((issue) => issue.blocking === false && !issue.accepted)],
+    ["Accepted at review", listed.filter((issue) => issue.accepted)],
+  ];
+  const [mustFix, toCheck, warnings] = groups.map(([, items]) => items.length);
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  let verdict;
+  let tone;
+  if (confirmed) {
+    verdict = listed.length ? `Confirmed at review · ${count(listed.length, "note")} accepted` : "Confirmed at review";
+    tone = "accepted";
+  } else if (mustFix) {
+    verdict = `Cannot approve yet · ${count(mustFix, "issue")} must be fixed`;
+    tone = "error";
+  } else if (toCheck) {
+    verdict = `Check ${count(toCheck, "item")}, then confirm review`;
+    tone = "";
+  } else {
+    verdict = confirmStep ? "Nothing blocks this invoice · confirm review to approve" : "Nothing blocks this invoice";
+    tone = "accepted";
+  }
+  summary.className = `validation-summary${tone ? ` ${tone}` : ""}`;
   const details = make("details", "validation-details");
   const heading = make("summary");
-  const plural = issues.length === 1 ? "" : "s";
-  heading.append(make("strong", "", confirmed ? `${issues.length} note${plural} accepted at review` : `${issues.length} issue${plural} to resolve`), make("span", "", "Show all"));
-  const list = make("ul");
-  issues.forEach((issue) => {
-    const line = issue.line ? `Line ${issue.line}: ` : "";
-    const owner = issue.owner ? ` · ${issue.owner}` : "";
-    // Fine-rules issues carry the owner's Failure Status name; non-blocking ones are warnings.
-    // Owner's Failure Status first, then its checklist id and the engine's exception type when they differ.
-    const detail = [issue.check, issue.type && issue.type !== issue.code ? issue.type : ""].filter(Boolean).join(" · ");
-    const status = rulesJob(job) && issue.code !== "REVIEW" ? `${issue.code}${detail ? ` [${detail}]` : ""}: ` : "";
-    const warning = issue.accepted ? " (accepted at review)" : issue.blocking === false ? " (warning)" : "";
-    list.append(make("li", "", `${line}${status}${issue.message}${owner}${warning}`));
+  const title = make("strong", "", verdict);
+  if (!confirmed && warnings) title.append(make("small", "", `${count(warnings, "warning")} to read · they do not block approval`));
+  heading.append(title, make("span", "", listed.length ? "Show all" : ""));
+  details.append(heading);
+  groups.forEach(([title, items]) => {
+    if (!items.length) return;
+    const list = make("ul");
+    items.forEach((issue) => {
+      const line = issue.line ? `Line ${issue.line}: ` : "";
+      const owner = issue.owner ? ` · ${issue.owner}` : "";
+      // Owner's Failure Status first, then its checklist id and the engine's exception type when they differ.
+      const detail = [issue.check, issue.type && issue.type !== issue.code ? issue.type : ""].filter(Boolean).join(" · ");
+      const status = rulesJob(job) ? `${issue.code}${detail ? ` [${detail}]` : ""}: ` : "";
+      const warning = issue.accepted ? " (accepted at review)" : issue.blocking === false ? " (warning)" : "";
+      list.append(make("li", "", `${line}${status}${issue.message}${owner}${warning}`));
+    });
+    details.append(make("h4", "validation-group", `${title} (${items.length})`), list);
   });
-  details.append(heading, list);
+  if (confirmStep && !confirmed) details.append(make("p", "validation-extra", "Last step: compare the values with the document, then confirm review."));
   summary.append(details);
 }
 
