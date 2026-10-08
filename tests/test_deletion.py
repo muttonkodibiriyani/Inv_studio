@@ -300,3 +300,72 @@ def test_partial_exported_batch_is_rejected_and_full_batch_removes_every_copy(
         ledger = store.ledger(connection)
     assert len(ledger) == 2
     assert all(receipt["deleted"] is True for receipt in ledger)
+
+
+def _seed_export(store, job, export_id, invoice_key, allocations):
+    receipt = {"id": export_id, "job_id": job["id"], "invoice_key": invoice_key, "allocations": allocations}
+    with store.connection(True) as connection:
+        connection.execute(
+            "INSERT INTO exports VALUES (?,?,?,?,?)",
+            (export_id, invoice_key, job["id"], json.dumps(receipt), b"SYNTHETIC XLSX"),
+        )
+
+
+def test_exported_invoice_whose_key_was_deleted_before_merges_into_the_old_tombstone(deletion_client):
+    # 2026-10-08: the tombstone INSERT hit deleted_invoices_invoice_key_key and every delete answered 500.
+    client, store = deletion_client
+    key = "rules|SYNTHETIC-SITE|SYN-1"
+    first, _ = _seed_job(store, "delete-first", status="exported", revision=5, export_id="export-first")
+    _seed_export(store, first, "export-first", key, [{"key": "PO-SYN|1", "qty": "1"}])
+    assert _delete(client, first).status_code == 200
+    again, path = _seed_job(store, "delete-again", status="exported", revision=5, export_id="export-again")
+    _seed_export(store, again, "export-again", key, [{"key": "PO-SYN|1", "qty": "2"}])
+
+    response = _delete(client, again)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source_files_not_removed"] == 0
+    assert not path.exists()
+    with store.connection() as connection:
+        ledger = store.ledger(connection)
+        own = json.loads(connection.execute(
+            "SELECT payload FROM deleted_invoices WHERE job_id=? AND invoice_key IS NULL", (again["id"],)
+        ).fetchone()[0])
+    # One ledger entry for the key, carrying both exports' allocations for the receipt control.
+    assert ledger == [{"job_id": first["id"], "deleted": True, "invoice_key": key,
+                       "allocations": [{"key": "PO-SYN|1", "qty": "1"}, {"key": "PO-SYN|1", "qty": "2"}]}]
+    assert own == {"job_id": again["id"], "deleted": True, "invoice_key_kept_by": first["id"]}
+
+
+def test_a_failed_delete_keeps_every_source_file(deletion_client, monkeypatch):
+    # The source objects used to go before the database writes, so a failed delete lost them all.
+    client, store = deletion_client
+    one, one_path = _seed_job(store, "delete-keep-1")
+    two, two_path = _seed_job(store, "delete-keep-2")
+    import app.deletion as deletion
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("synthetic database failure")
+
+    monkeypatch.setattr(deletion, "_remove_invoice_audit", fail)
+    with pytest.raises(RuntimeError):
+        _delete(client, one, two)
+
+    assert one_path.exists() and two_path.exists()
+    assert store.job(one["id"]) is not None and store.job(two["id"]) is not None
+    assert client.get(f"/api/jobs/{one['id']}/document").status_code == 200
+
+
+def test_retry_after_a_partial_delete_treats_missing_source_files_as_removed(deletion_client):
+    client, store = deletion_client
+    job, path = _seed_job(store, "delete-retry")
+    path.unlink()
+    # The invoice opens with a readable 404 for its document, not a 500.
+    assert client.get(f"/api/jobs/{job['id']}/document").status_code == 404
+
+    response = _delete(client, job)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["source_files_not_removed"] == 0
+    assert store.job(job["id"]) is None
+

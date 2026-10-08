@@ -142,11 +142,9 @@ def delete_invoices(store, selections, connection):
             )
         prepared_tombstones[job_id] = (exported, invoice_key, tombstone)
 
+    # Source objects are removed by remove_uploads only after this transaction commits:
+    # removing them first lost every selected source file when a later statement failed.
     upload_paths = _upload_paths(store, jobs.values())
-    # Removing source objects while the write lock is held prevents retry or
-    # review mutations from racing between validation and database erasure.
-    for path in upload_paths:
-        store.delete_upload(path)
 
     ledger_tombstones = 0
     deleted_exports = 0
@@ -156,6 +154,9 @@ def delete_invoices(store, selections, connection):
             ledger_tombstones += 1
             deleted_exports += 1
             connection.execute("DELETE FROM exports WHERE id=?", (exported["id"],))
+            invoice_key, tombstone = _merge_into_existing_tombstone(
+                connection, job_id, invoice_key, tombstone
+            )
         connection.execute(
             """INSERT INTO deleted_invoices(job_id,invoice_key,payload)
                VALUES (?,?,?)""",
@@ -190,7 +191,41 @@ def delete_invoices(store, selections, connection):
             "ledger_receipts": ledger_tombstones,
         },
         "backup_notice": BACKUP_NOTICE,
+        "upload_paths": upload_paths,
     }
+
+
+def remove_uploads(store, paths):
+    """Remove source objects after the deletion committed. A missing object counts as removed
+    (a retry after a partial delete); any other failure is counted and audited, never raised."""
+
+    failed = 0
+    for path in paths:
+        try:
+            store.delete_upload(path)
+        except Exception as error:
+            failed += 1
+            store.audit("invoice_upload_delete_failed", {"error_type": type(error).__name__})
+    return failed
+
+
+def _merge_into_existing_tombstone(connection, job_id, invoice_key, tombstone):
+    """deleted_invoices.invoice_key is UNIQUE: when this invoice key was deleted before, its
+    tombstone keeps the key and gains these allocations, so the receipt control still counts
+    both; this job's own record stays, without the key."""
+
+    existing = connection.execute(
+        "SELECT job_id,payload FROM deleted_invoices WHERE invoice_key=?", (invoice_key,)
+    ).fetchone()
+    if existing is None:
+        return invoice_key, tombstone
+    kept = json.loads(existing["payload"])
+    kept["allocations"] = list(kept.get("allocations") or []) + tombstone["allocations"]
+    connection.execute(
+        "UPDATE deleted_invoices SET payload=? WHERE job_id=?",
+        (json.dumps(kept, separators=(",", ":")), existing["job_id"]),
+    )
+    return None, {"job_id": job_id, "deleted": True, "invoice_key_kept_by": existing["job_id"]}
 
 
 def _value(item, key):
