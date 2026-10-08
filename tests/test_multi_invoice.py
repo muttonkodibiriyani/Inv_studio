@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app.multi_invoice import analyse_pages, analyse_pdf, part_filename, split_pdf
+from app.multi_invoice import analyse_pages, analyse_pdf, part_filename, pdf_pages, split_pdf
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "layouts" / "two-invoices-synthetic.pdf"
@@ -62,6 +62,31 @@ def test_fixture_splits_into_two_readable_pdfs():
     for part, number in zip(parts, outcome.numbers):
         assert part.startswith(b"%PDF-") and analyse_pages(_texts(part)) .numbers == [number]
     assert part_filename("bound invoices.pdf", 2, 2, "ZZTI26-00000102") == "bound invoices [2 of 2 ZZTI26-00000102].pdf"
+
+
+def _column_heading_pdf(numbers):
+    """Synthetic layout that prints the number under an 'Invoice Number' column heading, with a label row between."""
+    from reportlab.pdfgen import canvas
+    buffer = io.BytesIO()
+    page = canvas.Canvas(buffer, pagesize=(595, 842))
+    for number in numbers:
+        page.drawString(40, 790, "Invoice Number"); page.drawString(200, 790, "Invoice Date"); page.drawString(340, 790, "Customer")
+        page.drawString(40, 776, "Synthetic label row"); page.drawString(200, 776, "Synthetic label")
+        page.drawString(40, 762, number); page.drawString(200, 762, "01/02/2026"); page.drawString(340, 762, "SYNTHETIC BUYER")
+        page.drawString(40, 300, "Item 777700001111 Qty 2"); page.showPage()
+    page.save()
+    return buffer.getvalue()
+
+
+def test_number_under_an_invoice_number_column_heading_splits_the_pdf():
+    content = _column_heading_pdf(["900000000101", "900000000102"])
+    texts, columns = pdf_pages(content)
+    assert analyse_pages(texts).numbers == []  # no number beside a label: the column heading is what finds them
+    assert columns == [["900000000101"], ["900000000102"]]
+    outcome = analyse_pdf(content)
+    assert outcome.multiple and outcome.numbers == ["900000000101", "900000000102"]
+    assert [segment.pages for segment in outcome.segments] == [[1], [2]]
+    assert analyse_pdf(_column_heading_pdf(["900000000101"])).multiple is False
 
 
 def _texts(content):

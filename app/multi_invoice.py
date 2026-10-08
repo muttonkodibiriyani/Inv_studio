@@ -1,6 +1,7 @@
 """Detect PDFs that bind several invoices and split them by page, or refuse them with both numbers named.
 
-Only the native text layer is read. A page starts a new invoice when it prints a different invoice
+Only the native text layer is read: a number beside an invoice-number label, or (when none) the value
+printed under an 'Invoice Number' column heading. A page starts a new invoice when it prints a different invoice
 number from the running one, or when its page counter restarts at 1 after the first page. Pages that
 print no number continue the running invoice. A page that prints two different numbers, or a number
 that reappears after another one, cannot be split by page and is refused: the reason names every
@@ -58,18 +59,46 @@ def page_numbers(text: str) -> list[str]:
     return seen
 
 
+_VALUE = re.compile(r"(?i)^[A-Z0-9][A-Z0-9/-]{3,39}$")
+_NUMBER_WORDS = {"number", "no", "no.", "#", "num", "num.", "nr", "nr."}
+
+
+def column_numbers(words: list[dict], page_height: float) -> list[str]:
+    """Invoice numbers printed under an 'Invoice Number' column heading (the value sits on a row below the
+    label, not beside it). Words are pdfplumber words; only headings in the top 40% of the page count, and
+    the value is the nearest word below the heading, within four line heights, overlapping its span."""
+    found: list[str] = []
+    for first, second in zip(words, words[1:]):
+        if str(first.get("text", "")).casefold() != "invoice" or str(second.get("text", "")).casefold() not in _NUMBER_WORDS:
+            continue
+        if abs(first["top"] - second["top"]) > 2 or second["x0"] - first["x1"] > 15 or first["top"] > page_height * 0.4:
+            continue
+        height = max(1.0, second["bottom"] - second["top"])
+        left, right = first["x0"] - 10, second["x1"] + 10
+        below = sorted((w for w in words if second["bottom"] < w["top"] <= second["bottom"] + 4 * height
+                        and w["x1"] > left and w["x0"] < right), key=lambda w: w["top"])
+        for word in below:
+            value = str(word.get("text", "")).strip().rstrip(".,:;")
+            if _VALUE.match(value) and any(c.isdigit() for c in value) and not _DATE_LIKE.match(value):
+                if value not in found:
+                    found.append(value)
+                break
+    return found
+
+
 def page_counter(text: str) -> tuple[int, int] | None:
     match = _PAGE_COUNTER.search(text[:MAX_PAGE_CHARS])
     return (int(match.group(1)), int(match.group(2))) if match else None
 
 
-def analyse_pages(page_texts: list[str]) -> Outcome:
-    """Pure analysis of per-page text; see the module docstring for the rules."""
+def analyse_pages(page_texts: list[str], columns: list[list[str]] | None = None) -> Outcome:
+    """Pure analysis of per-page text; see the module docstring for the rules. ``columns`` holds the numbers
+    read under an 'Invoice Number' column heading, per page; used where the text names none beside a label."""
     numbers: list[str] = []
     segments: list[Segment] = []
     clean = True
     for index, text in enumerate(page_texts[:MAX_PAGES], 1):
-        printed = page_numbers(text)
+        printed = page_numbers(text) or (columns[index - 1] if columns and index <= len(columns) else [])
         if len(printed) > 1:
             clean = False
         for value in printed:
@@ -102,22 +131,31 @@ def analyse_pages(page_texts: list[str]) -> Outcome:
     return Outcome(numbers, segments)
 
 
-def pdf_page_texts(content: bytes) -> list[str]:
-    """Native text per page, empty strings for pages without a text layer."""
+def pdf_pages(content: bytes) -> tuple[list[str], list[list[str]]]:
+    """Native text per page (empty without a text layer) and the numbers under an Invoice Number heading."""
     import pdfplumber
 
     texts: list[str] = []
+    columns: list[list[str]] = []
     with pdfplumber.open(io.BytesIO(content)) as pdf:
         for page in pdf.pages[:MAX_PAGES]:
             try:
-                texts.append((page.extract_text() or "")[:MAX_PAGE_CHARS])
+                text = (page.extract_text() or "")[:MAX_PAGE_CHARS]
+                column = column_numbers(page.extract_words(), float(page.height))
             except Exception:
-                texts.append("")
-    return texts
+                text, column = "", []
+            texts.append(text)
+            columns.append(column)
+    return texts, columns
+
+
+def pdf_page_texts(content: bytes) -> list[str]:
+    """Native text per page, empty strings for pages without a text layer."""
+    return pdf_pages(content)[0]
 
 
 def analyse_pdf(content: bytes) -> Outcome:
-    return analyse_pages(pdf_page_texts(content))
+    return analyse_pages(*pdf_pages(content))
 
 
 def split_pdf(content: bytes, segments: list[Segment]) -> list[bytes]:
