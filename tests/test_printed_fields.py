@@ -120,7 +120,8 @@ def test_a_bare_total_is_the_net_only_without_tax_and_when_the_lines_sum_to_it(t
 
 
 def test_barcode_codes_name_every_line_barcode_reason():
-    assert set(scan_guard.BARCODE_CODES) == {scan_guard.MISPRINT, scan_guard.UNREADABLE, scan_guard.UNCONFIRMED}
+    assert set(scan_guard.BARCODE_CODES) == {scan_guard.MISPRINT, scan_guard.UNREADABLE, scan_guard.UNCONFIRMED,
+                                             scan_guard.OTHER_ROW}
     assert set(scan_guard.BARCODE_CODES.values()) == {"misprint", "unreadable", "unconfirmed"}
 
 
@@ -334,7 +335,7 @@ def gtin_codes(result):
 def test_heading_words_on_stacked_ocr_lines_name_the_columns_and_the_first_block_only():
     boxes = stacked_scan([(G1, "Soap", "1", "5.00")])
     boxes += [scan_box("Net Amount", 300, 400), scan_box("VAT Amount", 400, 400)]
-    assert heading_columns(boxes[-2:]) == {"net_amount", "tax_amount"}  # alone, the totals band qualifies
+    assert heading_columns(boxes[-2:]) == set()  # alone, a totals band names amounts only: never a heading (A1)
     assert line_columns(" ", [], boxes) == set()  # the table route accepts no heading row here
     assert heading_columns(boxes) >= {"gtin", "description", "qty", "price"}
     assert "tax_amount" not in heading_columns(boxes)  # the totals block below the lines adds nothing
@@ -377,3 +378,44 @@ def test_a_failed_column_read_is_traced_not_silent(monkeypatch, tmp_path):
     result = run_scan(monkeypatch, tmp_path, stacked_scan(rows),
                       [(G1, "Soap", "5.00"), (None, "Towel", "5.00"), (None, "Brush", "25.00")])
     assert {"engine": "guard_printed", "status": "columns_failed", "reason": "ValueError"} in result["trace"]
+
+
+# --- K1: an AI barcode read off a neighbour's row ---
+
+def test_k1_a_code_moved_to_the_next_line_is_cleared_and_its_own_row_flagged(monkeypatch, tmp_path):
+    """The f1-iii lure: the code printed on row 1 is claimed by row 2 only, so the count check passes."""
+    rows = [(G1, "Soap", "1", "10.00"), ("####", "Towel", "1", "25.00")]
+    result = run_scan(monkeypatch, tmp_path, stacked_scan(rows), [(None, "Soap", "10.00"), (G1, "Towel", "25.00")])
+    assert gtin_codes(result) == ["not_read", "unconfirmed"]
+    review = result["evidence"]["lines"][1]["gtin"]["review"]
+    assert review == {"reason": scan_guard.OTHER_ROW, "other_value": G1, "code": "unconfirmed"}
+    assert "gtin" not in result["readers"]["lines"][1]
+
+
+def test_k1_codes_on_their_own_rows_stay_when_rows_share_a_price(monkeypatch, tmp_path):
+    rows = [(G1, "Soap", "1", "10.00"), (G2, "Towel", "1", "25.00")]
+    result = run_scan(monkeypatch, tmp_path, stacked_scan(rows), [(G1, "Soap", "10.00"), (G2, "Towel", "25.00")])
+    assert gtin_codes(result) == ["read", "read"]
+    assert [line["gtin"] for line in result["invoice"]["lines"]] == [G1, G2]
+
+
+def test_k1_other_row_needs_measured_boxes_and_another_lines_values():
+    lines = [{"description": "Soap", "net_amount": "10.00"}, {"description": "Towel", "net_amount": "25.00"}]
+    unmeasured = [{"text": G1, "page": 1, "geometry": "word"}, {"text": "Soap", "page": 1, "geometry": "word"}]
+    assert not scan_guard.on_other_row(1, 1, G1, lines, unmeasured)
+    alone = [scan_box(G1, 50, 140)]
+    assert not scan_guard.on_other_row(1, 1, G1, lines, alone)  # nothing on the row names any line
+    moved = alone + [scan_box("Soap", 130, 140), scan_box("10.00", 360, 140)]
+    assert scan_guard.on_other_row(1, 1, G1, lines, moved)
+    assert not scan_guard.on_other_row(0, 1, G1, lines, moved)
+    # A second copy on the claimant's own row keeps it.
+    both = moved + [scan_box(G1, 50, 160), scan_box("Towel", 130, 160), scan_box("25.00", 360, 160)]
+    assert not scan_guard.on_other_row(1, 1, G1, lines, both)
+
+
+def test_k1_heading_words_add_a_barcode_column_the_table_route_missed(monkeypatch):
+    from app import docling_extract
+    boxes = stacked_scan([(G1, "Soap", "1", "5.00")])
+    monkeypatch.setattr(docling_extract, "line_columns", lambda *args: {"description"})
+    assert "gtin" in engines._line_columns_of(" ", [], boxes, headings=True)
+    assert engines._line_columns_of(" ", [], boxes, headings=False) == {"description"}
