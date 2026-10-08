@@ -886,12 +886,16 @@ def line_columns(text: str, tables: list[dict[str, Any]] | None, boxes: list[dic
     return columns
 
 
+_AMOUNT_ROLES = {"net_amount", "gross_amount", "tax_amount", "tax_rate"}
+
+
 def heading_columns(boxes: list[dict[str, Any]] | None) -> set[str]:
     """The roles of the printed column headings found in the measured words alone (no table needed).
 
     Words are named with the same _role as table headings. A band is the words whose centres lie within
     0.7 x a heading word's height, from any OCR line; it qualifies with at least two heading words and no
-    more number-bearing words than heading words, so a body word is never enough. Only the topmost
+    more number-bearing words than heading words, so a body word is never enough, and with one heading
+    word that is not an amount, so a totals band alone is never a heading. Only the topmost
     heading block of each page counts: its first qualifying band and the qualifying bands stacked under it,
     each within a word height of the last (a heading printed on two or three lines). A totals band
     below the lines adds nothing.
@@ -911,7 +915,8 @@ def heading_columns(boxes: list[dict[str, Any]] | None) -> set[str]:
             band = [other for other in page_words if abs(centre(other) - centre(word)) <= height * 0.7]
             named = [other for other in band if roles[id(other)]]
             numbers = sum(1 for other in band if any(ch.isdigit() for ch in str(other.get("text", ""))))
-            if len(named) < 2 or numbers > len(named):
+            # A totals band (Subtotal / Total) names amounts only: a heading also names what the line is.
+            if len(named) < 2 or numbers > len(named) or not {roles[id(o)] for o in named} - _AMOUNT_ROLES:
                 continue
             if last is not None and centre(word) - last > height:
                 break

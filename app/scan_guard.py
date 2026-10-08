@@ -7,7 +7,8 @@ looks at reference data: the item master lives with the rules (fine_rules.match_
   digit (EAN-8, UPC-A/EAN-12, EAN-13, GTIN-14); a complete printed code that fails it goes to
   ``Line.barcode_unchecked`` with gtin None, so a lost field fails safe (empty, flagged).
 - An AI barcode on a scan fills gtin only when the same complete digit run is printed on the same
-  page in the local OCR text, as a standalone token, and no more lines claim it than the OCR saw.
+  page in the local OCR text, as a standalone token, and no more lines claim it than the OCR saw,
+  and not when every printed copy sits on a row that shows another line's values and none of its own.
 - A weak local read is replaced by the AI read only when the AI read passes its own checks: printed
   line nets that sum to its net and the key header fields present.
 """
@@ -19,8 +20,9 @@ GTIN_LENGTHS=(8,12,13,14)
 UNREADABLE="barcode unreadable or incomplete"
 MISPRINT="printed barcode fails the GTIN check digit (likely misprint) - check the printout"
 UNCONFIRMED="barcode not confirmed on the page"
+OTHER_ROW="barcode printed on another line's row"
 # Machine codes for a line barcode review, set next to the reason text.
-BARCODE_CODES={MISPRINT:"misprint",UNREADABLE:"unreadable",UNCONFIRMED:"unconfirmed"}
+BARCODE_CODES={MISPRINT:"misprint",UNREADABLE:"unreadable",UNCONFIRMED:"unconfirmed",OTHER_ROW:"unconfirmed"}
 AI_PAGE_IMAGE="AI (page image)"
 KEY_HEADER=("number","date","po","net","tax")
 NO_TAX="no tax total printed on the invoice"
@@ -111,6 +113,45 @@ def corroborate(claims,occurrences):
         if any(page not in pages or per_page[page]>occurrences[page][digits] for page in per_page):continue
         confirmed.update(index for index,_ in group)
     return confirmed
+
+
+def _centre(box):
+    return (float(box["box"][1])+float(box["box"][3]))/2
+
+
+def _line_marks(line):
+    """What identifies a line on its printed row: its amounts (at cents) and its description words."""
+    marks=set()
+    for field in ("net_amount","price"):
+        value=_amount(line.get(field))
+        if value is not None and value:marks|={f"{value:.2f}",f"{value:,.2f}"}
+    marks|={w for w in re.findall(r"[a-z]{4,}",str(line.get("description") or "").lower())}
+    return marks
+
+
+def _row_marks(text):
+    text=str(text or "").lower()
+    return set(re.findall(r"(?<![\d.,])\d[\d,]*\.\d{2}(?![\d])",text))|set(re.findall(r"[a-z]{4,}",text))
+
+
+def on_other_row(index,page,digits,lines,boxes):
+    """True when every printed copy of the AI's code sits on a row that shows more of another line's values
+    (amounts, description words) than of this line's: the code was read off a neighbour's row (K1).
+    Without measured boxes, False."""
+    words=[b for b in boxes or [] if b.get("geometry")=="word"]
+    tokens=[b for b in (words or [b for b in boxes or [] if b.get("geometry")!="word"])
+            if isinstance(b.get("box"),(list,tuple)) and len(b["box"])==4 and (page is None or (b.get("page") or 1)==page)]
+    hits=[b for b in tokens if digits in re.findall(r"\d+",_SEPARATED.sub("",str(b.get("text") or "")))]
+    if not hits:return False
+    own=_line_marks(lines[index])
+    others=[_line_marks(line) for n,line in enumerate(lines) if n!=index]
+    for hit in hits:
+        height=max(1.0,float(hit["box"][3])-float(hit["box"][1]))
+        band=" ".join(str(b.get("text") or "") for b in tokens
+                      if (b.get("page") or 1)==(hit.get("page") or 1) and abs(_centre(b)-_centre(hit))<=height*0.7)
+        printed=_row_marks(band)
+        if len(printed&own)>=max((len(printed&marks) for marks in others),default=0):return False
+    return True
 
 
 def _amount(value):

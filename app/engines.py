@@ -307,7 +307,8 @@ def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
 
     A local barcode that fails the check digit moves to barcode_unchecked; an incomplete one is cleared. An AI
     barcode is cleared when it fails the check digit or, on a scan, when the same page's OCR does not print the
-    same complete digit run as often as lines claim it. A cleared value survives only as evidence.
+    same complete digit run as often as lines claim it, or prints it only on another line's row. A cleared
+    value survives only as evidence.
     """
     lines=invoice.get("lines") or []
     rows=evidence.setdefault("lines",[])
@@ -338,10 +339,11 @@ def guard_lines(invoice,evidence,line_readers,source,scan,ocr_boxes):
             claims.append((n,line.get("page"),gtin))
     if claims:
         confirmed=scan_guard.corroborate(claims,scan_guard.page_occurrences(ocr_boxes))
-        for n,_,digits in claims:
-            if n in confirmed:continue
+        for n,page,digits in claims:
+            if n in confirmed and not scan_guard.on_other_row(n,page,digits,lines,ocr_boxes):continue
+            reason=scan_guard.UNCONFIRMED if n not in confirmed else scan_guard.OTHER_ROW
             lines[n]["gtin"]=None;line_readers[n].pop("gtin",None)
-            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),lines[n],"ai",scan_guard.UNCONFIRMED,digits)
+            rows[n]["gtin"]=_barcode_review(rows[n].get("gtin"),lines[n],"ai",reason,digits)
     return invoice,evidence
 
 
@@ -372,10 +374,11 @@ _PO_LABEL=re.compile(r"(?i)\b(?:customer\s+)?(?:p\.?\s*o\.?\s*(?:no\b\.?|number\
 
 
 def _line_columns_of(text,tables,boxes,headings=False):
-    """The line columns printed on the page. With headings (a scan with lines), an empty table-route set
-    falls back to the heading words in the OCR boxes. Raises: the caller records the failure."""
+    """The line columns printed on the page. With headings (a scan with lines), the heading words in the OCR
+    boxes add the columns the table route did not name (a Barcode heading the table missed, K1).
+    Raises: the caller records the failure."""
     from .docling_extract import heading_columns,line_columns
-    columns=line_columns(text,tables,boxes) or (heading_columns(boxes) if headings else set())
+    columns=line_columns(text,tables,boxes)|(heading_columns(boxes) if headings else set())
     return columns&set(LINE_COLUMNS)
 
 
