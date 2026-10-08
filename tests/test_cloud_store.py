@@ -9,7 +9,7 @@ from cryptography.fernet import Fernet
 
 from app.cloud_store import ADVISORY_LOCK_ID, PostgresStore
 from app.authentication import actor
-from app.deletion import delete_invoices
+from app.deletion import delete_invoices, remove_uploads
 
 
 class FakeCursor:
@@ -464,6 +464,8 @@ def test_live_postgres_store_contract_when_test_database_is_configured(tmp_path,
                 [{"id":delete_job["id"],"revision":delete_job["revision"]}],
                 connection,
             )
+        assert delete_path.exists()
+        assert remove_uploads(store,deleted_result.pop("upload_paths")) == 0
         assert deleted_result["deleted_ids"] == [delete_job["id"]]
         assert store.job(delete_job["id"]) is None
         assert not delete_path.exists()
