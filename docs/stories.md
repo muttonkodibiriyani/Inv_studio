@@ -23,7 +23,7 @@ As an **AP operator**, I want to extract headers and every item line from suppor
 - A readable PDF with no matching supplier template keeps native text and skips expensive image OCR. Conservative layout rules require an invoice heading, reject purchase orders, extract only explicit labels/spatial rows and never infer internal business codes or header totals.
 - The job view names the active stage rather than presenting extraction as one opaque wait. A scanned invoice2data route names Paddle as its image-text input.
 - Unread or incomplete output records an explainable reader trace that separates engine failure from text-only output with zero structured items; field completeness is read coverage, not accuracy.
-- Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction.
+- Unsupported, encrypted and oversized files receive a clear exception. A readable PDF binding several invoices on separate pages is split into one job per invoice number; mixed pages are refused with every invoice number named, never read as one merged record.
 
 ## INV-03 · Use a chosen AI connection for exceptions
 

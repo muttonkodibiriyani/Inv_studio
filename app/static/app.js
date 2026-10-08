@@ -1370,7 +1370,8 @@ function renderSelectedJob(job) {
     : "")).trim();
   $("#extraction-note").hidden = processing || !extractionNote;
   if (extractionNote) {
-    $("#extraction-note-title").textContent = possiblePurchaseOrder ? "This may be a purchase order" : "Extraction needs review";
+    $("#extraction-note-title").textContent = possiblePurchaseOrder ? "This may be a purchase order"
+      : job.split ? `Invoice ${job.split.part} of ${job.split.of} from one uploaded file` : "Extraction needs review";
     $("#extraction-note-detail").textContent = extractionNote;
   }
   $("#job-error").hidden = !job.error;

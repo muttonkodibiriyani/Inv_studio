@@ -399,7 +399,9 @@ def create_app(data_dir=None):
                 if demo_references:inv,provenance=enrich(raw,references(c)) if unchanged else (raw,[])
                 else:inv,provenance=raw,[]
                 kept=reread_entries(job,lines)
+                split_note=job.get("extraction_note") if job.get("split") else None
                 job.update(result);job.update(evidence=annotate_evidence(result.get("evidence"),result["invoice"],filename=job.get("filename")))
+                if split_note:job["extraction_note"]=" ".join(x for x in (split_note,job.get("extraction_note")) if x)
                 if kept:
                     job.update(kept[0])
                     note=f"{kept[1]} line correction{' was' if kept[1]==1 else 's were'} cleared because the invoice was read again."
@@ -459,24 +461,58 @@ def create_app(data_dir=None):
             else:
                 try:content.decode("utf-8-sig")
                 except UnicodeDecodeError:raise ValueError("Text/CSV/JSON invoices must use UTF-8 encoding") from None
-            jid=uuid.uuid4().hex;path=store.root/"uploads"/(jid+suffix);path.write_bytes(content);os.chmod(path,0o600)
-            job={"id":jid,"filename":Path(filename).name[:200],"size":len(content),"path":str(path),"sha256":hashlib.sha256(content).hexdigest(),
-                 "created_at":datetime.now(timezone.utc).isoformat(),"status":"queued","options":opts.model_dump(),
-                 "invoice":Invoice().model_dump(mode="json"),"revision":1,"reviewed":False,"trace":[],"provenance":[],"completeness":0,"selected_engine":"pending","validation":{"ready":False,"issues":[],"matches":[]}}
-            with plans_lock:
-                try:
-                    plan,entry=require_plan(token,opts,filename,len(content))
-                    if identity.cloud:store.persist_blob(path)
-                    job["confirmed_signature"]=plan["signature"]
-                    store.job(jid,job);store.audit("uploaded",{"job_id":jid,"filename":job["filename"],"sha256":job["sha256"]})
-                    pool.submit(copy_context().run,run,jid,opts)
-                    plan["files"].remove(entry)
-                except Exception:
-                    if store.job(jid):
-                        job.update(status="error",error="Could not queue this invoice. Review the plan and retry.");store.job(jid,job)
-                    else:path.unlink(missing_ok=True)
-                    raise
-            return public(job)
+            parts=[(content,Path(filename).name[:200],{})];refusal=None
+            if suffix==".pdf":
+                from .multi_invoice import analyse_pdf, part_filename, split_note, split_pdf
+                try:outcome=analyse_pdf(content)
+                except Exception:outcome=None
+                if outcome is not None and outcome.multiple:
+                    if outcome.refusal:refusal=outcome.refusal
+                    else:
+                        count=len(outcome.segments);name=Path(filename).name[:200]
+                        parts=[(part,part_filename(name,n,count,segment.number or ""),
+                                {"split":{"source_filename":name,"source_sha256":hashlib.sha256(content).hexdigest(),"part":n,"of":count,
+                                          "invoice_number":segment.number,"pages":segment.pages},
+                                 "extraction_note":split_note(n,count,outcome.numbers,segment.pages)})
+                               for n,(part,segment) in enumerate(zip(split_pdf(content,outcome.segments),outcome.segments),1)]
+            extra=len(parts)-1
+            for n in range(extra):
+                if not slots.acquire(blocking=False):
+                    for _ in range(n):slots.release()
+                    raise HTTPException(429,"Processing queue is full. Wait for an invoice to finish.")
+            jobs=[]
+            try:
+                for part,part_name,fields in parts:
+                    jid=uuid.uuid4().hex;path=store.root/"uploads"/(jid+suffix);path.write_bytes(part);os.chmod(path,0o600)
+                    jobs.append({"id":jid,"filename":part_name,"size":len(part),"path":str(path),"sha256":hashlib.sha256(part).hexdigest(),
+                         "created_at":datetime.now(timezone.utc).isoformat(),"status":"queued","options":opts.model_dump(),
+                         "invoice":Invoice().model_dump(mode="json"),"revision":1,"reviewed":False,"trace":[],"provenance":[],"completeness":0,"selected_engine":"pending","validation":{"ready":False,"issues":[],"matches":[]},**fields})
+                with plans_lock:
+                    try:
+                        plan,entry=require_plan(token,opts,filename,len(content))
+                        for job in jobs:
+                            if identity.cloud:store.persist_blob(Path(job["path"]))
+                            job["confirmed_signature"]=plan["signature"]
+                            if refusal:
+                                job.update(status="error",error=refusal,extraction_status="multi_invoice_refused")
+                                store.job(job["id"],job);store.audit("multi_invoice_refused",{"job_id":job["id"],"filename":job["filename"],"sha256":job["sha256"]})
+                                continue
+                            store.job(job["id"],job);store.audit("uploaded",{"job_id":job["id"],"filename":job["filename"],"sha256":job["sha256"],
+                                                              **({"split":{k:v for k,v in job["split"].items() if k!="invoice_number"}} if job.get("split") else {})})
+                        for job in jobs:
+                            if not refusal:pool.submit(copy_context().run,run,job["id"],opts)
+                        plan["files"].remove(entry)
+                    except Exception:
+                        for job in jobs:
+                            if store.job(job["id"]):
+                                job.update(status="error",error="Could not queue this invoice. Review the plan and retry.");store.job(job["id"],job)
+                            else:Path(job["path"]).unlink(missing_ok=True)
+                        raise
+            except Exception:
+                for _ in range(extra):slots.release()
+                raise
+            if refusal:slots.release()
+            return public(jobs[0])
         except Exception:slots.release();raise
 
     def public(j,full=True):

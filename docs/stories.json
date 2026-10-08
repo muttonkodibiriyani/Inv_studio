@@ -25,7 +25,7 @@
       "A readable PDF with no matching template keeps native text; conservative rules require an invoice heading, reject purchase orders and never infer internal codes or totals.",
       "A scanned invoice2data route names Paddle as its image-text input in the trace.",
       "The job view names the active extraction stage and separates engine failure from text-only output with zero structured items; field completeness is read coverage, not accuracy.",
-      "Unsupported, encrypted, oversized and multi-invoice files receive a clear exception or split instruction."
+      "Unsupported, encrypted and oversized files receive a clear exception. A readable PDF binding several invoices on separate pages is split into one job per invoice number; mixed pages are refused with every invoice number named, never read as one merged record."
     ]
   },
   {
