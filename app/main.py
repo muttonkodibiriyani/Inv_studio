@@ -29,7 +29,7 @@ from .excel import UPC_MODES, workbook, batch_workbook, rules_workbook
 from . import target_check as tc
 from .extraction_draft import extraction_workbook, extraction_batch_workbook
 from .drafts import ManualDraftRequest, build_draft_workbook, draft_filename, draft_public_metadata
-from .deletion import DeletionError, delete_invoices
+from .deletion import DeletionError, delete_invoices, remove_uploads
 from .reference_lookup import ReferenceLookup
 from .fine_rules import RulesConfig, decide_feedback, feedback_entry, ocr_read, run_batch
 from .fine_rules_export import review_workbook, target_workbook
@@ -603,8 +603,11 @@ def create_app(data_dir=None):
         if len({item.id for item in body.jobs})!=len(body.jobs):
             raise ValueError("Select each invoice only once")
         try:
-            with plans_lock,store.connection(True) as connection:
-                outcome=delete_invoices(store,body.jobs,connection)
+            with plans_lock:
+                with store.connection(True) as connection:
+                    outcome=delete_invoices(store,body.jobs,connection)
+                # After the commit: a failed delete leaves every invoice and its source file whole.
+                outcome["source_files_not_removed"]=remove_uploads(store,outcome.pop("upload_paths"))
         except DeletionError as error:
             raise HTTPException(error.status_code,error.detail) from None
         if learned is not None:
@@ -620,7 +623,11 @@ def create_app(data_dir=None):
     @app.get("/api/jobs/{jid}/document")
     def document(jid:str):
         j=job_or_404(jid)
-        if identity.cloud:store.ensure_blob(Path(j["path"]))
+        try:
+            if identity.cloud:store.ensure_blob(Path(j["path"]))
+        except Exception as error:
+            if getattr(error,"code",None)!=404 and 404 not in getattr(error,"args",()):raise
+        if not Path(j["path"]).is_file():raise HTTPException(404,"The source file of this invoice is no longer stored.")
         return FileResponse(j["path"],filename=j["filename"],content_disposition_type="inline")
 
     @app.post("/api/jobs/{jid}/extraction-draft")
