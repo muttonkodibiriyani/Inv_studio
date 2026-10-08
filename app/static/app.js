@@ -3409,10 +3409,38 @@ async function verifyCloudSession() {
   }
 }
 
+// An idle server takes up to about 80 s to start. Until it is up, Cloud Run answers 429 and
+// Firebase Hosting answers 502 or 504 after 60 s: those mean "starting", not "no access".
+const SERVER_STARTING_STATUSES = new Set([429, 500, 502, 503, 504]);
+
+async function waitForServer(limitMs = 150000) {
+  const started = Date.now();
+  let delay = 1000;
+  for (;;) {
+    let status = 0;
+    try {
+      status = (await fetch("/api/public-config", { headers: { Accept: "application/json" }, cache: "no-store" })).status;
+    } catch (_) {
+      status = 0;
+    }
+    if (status && !SERVER_STARTING_STATUSES.has(status)) return;
+    if (Date.now() - started + delay > limitMs) return;
+    showAuthGate({
+      message: "Starting the workspace…",
+      detail: "The server was idle and is starting up. This can take up to a minute.",
+      busy: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    delay = Math.min(delay * 2, 8000);
+  }
+}
+
 async function initializeAccess() {
   showAuthGate({ message: "Checking workspace access…", busy: true });
   try {
     if (!window.InvoiceStudioAuth) throw new Error("The sign-in module did not load.");
+    await waitForServer();
+    showAuthGate({ message: "Checking workspace access…", busy: true });
     const runtime = await window.InvoiceStudioAuth.bootstrap();
     if (!runtime.cloud) {
       app.authMode = "local";

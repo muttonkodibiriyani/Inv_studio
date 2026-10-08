@@ -198,6 +198,23 @@ try {
   await page.locator("#app-shell").waitFor({ state: "visible", timeout });
   await page.unroute("**/api/public-config");
   await assertOk(home, "Invoice Studio page load");
+
+  // A server that is still starting (Cloud Run 429, Hosting 502) is waited for, not reported as no access.
+  const startingStatuses = [429, 502];
+  await page.route("**/api/public-config", async (route) => {
+    const status = startingStatuses.shift();
+    if (status) await route.fulfill({ status, contentType: "text/plain", body: "starting" });
+    else await route.continue();
+  });
+  await page.reload({ waitUntil: "domcontentloaded", timeout });
+  await page.getByText("Starting the workspace…").waitFor({ timeout });
+  await page.locator("#app-shell").waitFor({ state: "visible", timeout });
+  assert.equal(startingStatuses.length, 0, "The starting responses were not all retried");
+  assert(await page.getByText("Workspace access could not be verified.").isHidden(), "A starting server was reported as no access");
+  await page.unroute("**/api/public-config");
+  const simulatedStart = serverErrors.indexOf(`GET ${baseURL}/api/public-config -> 502`);
+  assert(simulatedStart >= 0, "The simulated starting response was not observed");
+  serverErrors.splice(simulatedStart, 1);
   await page.getByRole("heading", { level: 1, name: "Review workspace" }).waitFor();
 
   // The shell exposes the three major semantic regions expected by keyboard and
