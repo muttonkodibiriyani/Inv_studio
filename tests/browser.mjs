@@ -747,13 +747,13 @@ try {
   await currentNumber.fill(thirdNumber);
   assert.match(await page.locator("#review-save-state").textContent(), /Unsaved changes/);
   const reviewBatchPostsBeforeSave = requestLog.filter(
-    (entry) => entry.method === "POST" && entry.path === "/api/exports/extraction-batch",
+    (entry) => entry.method === "POST" && entry.path === "/api/background/extraction-batch",
   ).length;
   await page.locator("#batch-review").click();
   assert(await page.locator("#batch-review-dialog").isHidden(), "Unsaved edits opened the batch download confirmation");
   assert.match(await page.locator("#global-message").textContent(), /Save the current invoice/);
   assert.equal(
-    requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/exports/extraction-batch").length,
+    requestLog.filter((entry) => entry.method === "POST" && entry.path === "/api/background/extraction-batch").length,
     reviewBatchPostsBeforeSave,
     "Unsaved edits were omitted from a hidden batch request",
   );
@@ -768,7 +768,7 @@ try {
   await page.locator("#batch-review").click();
   await page.locator("#batch-review-dialog").waitFor({ state: "visible" });
   assert.equal(await page.locator("#batch-review-count").textContent(), "2 invoices");
-  const reviewBatchResponsePromise = page.waitForResponse(responseMatches("POST", "/api/exports/extraction-batch"), { timeout });
+  const reviewBatchResponsePromise = page.waitForResponse(responseMatches("POST", "/api/background/extraction-batch"), { timeout });
   const reviewBatchDownloadPromise = page.waitForEvent("download", { timeout });
   await page.locator("#confirm-batch-review").click();
   const reviewBatchResponse = await reviewBatchResponsePromise;
@@ -789,7 +789,7 @@ try {
   assert.equal(afterReviewBatchSecond.export_id, beforeReviewBatchSecond.export_id, "Review batch wrote the first approved export ledger");
   assert.equal(afterReviewBatchThird.export_id, beforeReviewBatchThird.export_id, "Review batch wrote the second approved export ledger");
 
-  const batchPostPromise = page.waitForResponse(responseMatches("POST", "/api/exports/batch"), {
+  const batchPostPromise = page.waitForResponse(responseMatches("POST", "/api/background/export-batch"), {
     timeout,
   });
   const batchGetPromise = page.waitForResponse(

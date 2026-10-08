@@ -1,6 +1,6 @@
 /**
  * Playwright check of the inbox "Export selected (draft)" button (FT6, decisions 67/70/72). It is enabled when at
- * least one selected invoice has extracted data, sends only those to /api/exports/target-draft with their revisions,
+ * least one selected invoice has extracted data, sends only those to /api/background/target-draft with their revisions,
  * keeps the server's DRAFT file name, reports the server's included/skipped counts, shows a 409 as-is, and never calls
  * an export route. Export approved stays greyed for unapproved invoices. Every job is mocked synthetic data.
  *
@@ -84,7 +84,7 @@ try {
     });
     let draft = null;
     let reply = { status: 200, contentType: "application/octet-stream", headers: { "content-disposition": 'attachment; filename="DRAFT_Target_SYNTHETIC.xlsx"', "x-draft-included": "1", "x-draft-skipped": "1" }, body: "SYNTHETIC" };
-    await page.route("**/api/exports/target-draft", (route) => {
+    await page.route("**/api/background/target-draft", (route) => {
       draft = route.request().postDataJSON();
       return route.fulfill(reply);
     });
@@ -125,7 +125,7 @@ try {
     await waitFor("the state reload", async () => stateLoads > loadsBefore);
 
     assert.equal(await page.locator("#selected-count").textContent(), "3 selected");
-    assert.deepEqual(posted, ["/api/exports/target-draft"]);
+    assert.deepEqual(posted, ["/api/background/target-draft"]);
 
     // Without the count headers it reports what it sent, with none left out.
     draft = null;
@@ -136,7 +136,22 @@ try {
     await second;
     await waitFor("the fallback banner", async () => /^2 invoices in one draft target workbook\. Nothing was exported or approved\.$/.test(await banner.textContent()));
     assert.match(await banner.getAttribute("class"), /success/);
-    assert.deepEqual(posted, ["/api/exports/target-draft", "/api/exports/target-draft"]);
+    assert.deepEqual(posted, ["/api/background/target-draft", "/api/background/target-draft"]);
+
+    // A long draft (dozens of invoices) answers 202 while it builds; the app polls the task until the workbook arrives.
+    let polls = 0;
+    reply = { status: 202, contentType: "application/json", body: JSON.stringify({ id: "synthetic-task", status: "running" }) };
+    await page.route("**/api/background/tasks/synthetic-task", (route) => {
+      polls += 1;
+      return route.fulfill(polls < 2
+        ? { status: 202, contentType: "application/json", body: JSON.stringify({ id: "synthetic-task", status: "running" }) }
+        : { status: 200, contentType: "application/octet-stream", headers: { "content-disposition": 'attachment; filename="DRAFT_Target_SLOW.xlsx"' }, body: "SYNTHETIC" });
+    });
+    await button.click();
+    const slow = page.waitForEvent("download");
+    await page.locator("#confirm-batch-draft").click();
+    assert.equal((await slow).suggestedFilename(), "DRAFT_Target_SLOW.xlsx");
+    assert.equal(polls, 2);
 
     // When 0 qualify the server answers 409; it is shown as the server wrote it; the dialog stays open for another try.
     draft = null;

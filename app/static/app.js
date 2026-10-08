@@ -655,6 +655,17 @@ async function studioFetch(path, options = {}) {
   }
 }
 
+// Bulk downloads over many invoices outlast the hosting proxy's 60 s: the server builds them in the background and
+// each request waits under 60 s; a 202 means "still building", so the next poll picks it up.
+async function studioBackground(kind, body) {
+  let response = await studioFetch(`/api/background/${kind}`, { method: "POST", body });
+  while (response.status === 202) {
+    const { id } = await response.json();
+    response = await studioFetch(`/api/background/tasks/${id}`, { method: "GET" });
+  }
+  return response;
+}
+
 async function responseError(response) {
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("json") ? await response.json() : await response.text();
@@ -1861,12 +1872,9 @@ async function downloadBatchReview() {
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const response = await studioFetch("/api/exports/extraction-batch", {
-      method: "POST",
-      body: {
-        jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })),
-        acknowledge_unvalidated: true,
-      },
+    const response = await studioBackground("extraction-batch", {
+      jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })),
+      acknowledge_unvalidated: true,
     });
     if (!response.ok) throw await responseError(response);
     const disposition = response.headers.get("content-disposition") || "";
@@ -1909,10 +1917,7 @@ async function downloadBatchDraft() {
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const response = await studioFetch("/api/exports/target-draft", {
-      method: "POST",
-      body: { jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })) },
-    });
+    const response = await studioBackground("target-draft", { jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })) });
     if (!response.ok) throw await responseError(response);
     const disposition = response.headers.get("content-disposition") || "";
     saveBlob(await response.blob(), dispositionFilename(disposition, "DRAFT_Target.xlsx"));
@@ -2084,7 +2089,7 @@ async function downloadFineRules(kind) {
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const response = await studioFetch(`/api/fine-rules/${kind}.xlsx`, { method: "POST", body: { job_ids: ids } });
+    const response = await studioBackground(`fine-rules-${kind}`, { job_ids: ids });
     if (!response.ok) throw await responseError(response);
     const fallback = kind === "target" ? "ULTA_Target.xlsx" : "ULTA_Rules_Review.xlsx";
     saveBlob(await response.blob(), dispositionFilename(response.headers.get("content-disposition") || "", fallback));
@@ -2115,7 +2120,9 @@ async function exportBatch() {
   button.disabled = true;
   button.textContent = "Preparing…";
   try {
-    const result = await api("/api/exports/batch", { method: "POST", body: { jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })) } });
+    const response = await studioBackground("export-batch", { jobs: jobs.map((job) => ({ id: job.id, revision: job.revision })) });
+    if (!response.ok) throw await responseError(response);
+    const result = await response.json();
     await downloadApi(result.url, `Merch_Inv_Batch_${result.id.slice(0, 8)}.xlsx`);
     app.selectedForBatch.clear();
     await loadState();

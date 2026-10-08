@@ -75,7 +75,7 @@ try {
     page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.route("**/api/state", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) }));
     let batch = null;
-    await page.route("**/api/exports/extraction-batch", (route) => {
+    await page.route("**/api/background/extraction-batch", (route) => {
       batch = route.request().postDataJSON();
       return route.fulfill({ status: 200, contentType: "application/octet-stream", headers: { "content-disposition": 'attachment; filename="SYNTHETIC_REVIEW.xlsx"' }, body: "SYNTHETIC" });
     });

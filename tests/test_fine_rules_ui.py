@@ -28,7 +28,8 @@ def test_panel_elements_exist_and_are_wired():
 def test_panel_calls_only_the_fine_rules_endpoints():
     script = fine_rules_script()
     assert set(re.findall(r'"/api/[\w/.-]+"', script)) == {'"/api/fine-rules/config"', '"/api/fine-rules/run"'}
-    assert "`/api/fine-rules/${kind}.xlsx`" in script
+    # The workbooks come through the background download (the server maps fine-rules-<kind> to /api/fine-rules/<kind>.xlsx).
+    assert "studioBackground(`fine-rules-${kind}`" in script
     # V-007 / V-010 stay visible until the governed lists exist; the target needs every invoice Approved.
     assert "V-007" in script and "V-010" in script
     assert 'result.status !== "Approved"' in script
