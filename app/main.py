@@ -399,7 +399,7 @@ def create_app(data_dir=None):
                 if demo_references:inv,provenance=enrich(raw,references(c)) if unchanged else (raw,[])
                 else:inv,provenance=raw,[]
                 kept=reread_entries(job,lines)
-                split_note=job.get("extraction_note") if job.get("split") else None
+                split_note=(job.get("split") or {}).get("note")  # from the upload, so a re-read never stacks notes
                 job.update(result);job.update(evidence=annotate_evidence(result.get("evidence"),result["invoice"],filename=job.get("filename")))
                 if split_note:job["extraction_note"]=" ".join(x for x in (split_note,job.get("extraction_note")) if x)
                 if kept:
@@ -472,7 +472,8 @@ def create_app(data_dir=None):
                         count=len(outcome.segments);name=Path(filename).name[:200]
                         parts=[(part,part_filename(name,n,count,segment.number or ""),
                                 {"split":{"source_filename":name,"source_sha256":hashlib.sha256(content).hexdigest(),"part":n,"of":count,
-                                          "invoice_number":segment.number,"pages":segment.pages},
+                                          "invoice_number":segment.number,"pages":segment.pages,
+                                          "note":split_note(n,count,outcome.numbers,segment.pages)},
                                  "extraction_note":split_note(n,count,outcome.numbers,segment.pages)})
                                for n,(part,segment) in enumerate(zip(split_pdf(content,outcome.segments),outcome.segments),1)]
             extra=len(parts)-1
@@ -498,7 +499,7 @@ def create_app(data_dir=None):
                                 store.job(job["id"],job);store.audit("multi_invoice_refused",{"job_id":job["id"],"filename":job["filename"],"sha256":job["sha256"]})
                                 continue
                             store.job(job["id"],job);store.audit("uploaded",{"job_id":job["id"],"filename":job["filename"],"sha256":job["sha256"],
-                                                              **({"split":{k:v for k,v in job["split"].items() if k!="invoice_number"}} if job.get("split") else {})})
+                                                              **({"split":{k:v for k,v in job["split"].items() if k not in ("invoice_number","note")}} if job.get("split") else {})})
                         for job in jobs:
                             if not refusal:pool.submit(copy_context().run,run,job["id"],opts)
                         plan["files"].remove(entry)

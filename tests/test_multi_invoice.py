@@ -140,3 +140,26 @@ def _single_pdf():
     page = canvas.Canvas(buffer, pagesize=(595, 842))
     page.drawString(40, 800, "TAX INVOICE # ZZTI26-00000301"); page.showPage(); page.save()
     return buffer.getvalue()
+
+
+def test_a_split_part_read_again_keeps_one_split_note(tmp_path, monkeypatch):
+    import app.main as main
+    read = main.process
+
+    def noted(*args, **kwargs):
+        result = read(*args, **kwargs)
+        return {**result, "extraction_note": "Synthetic reader note."}
+    monkeypatch.setattr(main, "process", noted)
+    with _client(tmp_path, monkeypatch) as client:
+        _upload(client, "bound invoices.pdf", FIXTURE.read_bytes())
+        job = next(j for j in client.get("/api/state").json()["jobs"] if (j.get("split") or {}).get("part") == 1)
+        before = _settled(client, job["id"])["extraction_note"]
+        for _ in range(2):
+            plan = client.post("/api/preflight", headers=MUTATION,
+                               json={"options": OPTIONS, "files": [{"name": job["filename"], "size": job["size"]}]}).json()
+            client.post("/api/preflight/confirm", headers=MUTATION, json={"token": plan["token"]}).raise_for_status()
+            client.post(f"/api/jobs/{job['id']}/retry", headers=MUTATION,
+                        json={"options": OPTIONS, "preflight_token": plan["token"]}).raise_for_status()
+            after = _settled(client, job["id"])["extraction_note"]
+            assert after == before and after.count("It was split by page") == 1
+            assert after.count("Synthetic reader note.") == 1
